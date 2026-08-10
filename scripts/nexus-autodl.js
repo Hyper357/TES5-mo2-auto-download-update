@@ -5,9 +5,12 @@
 //   whoami                    报告登录态
 //   inspect <modId> [substr]  转储某模组 Files 页的文件卡 + 下载控件（学 DOM 用）
 //   dl <manifest.tsv>         按清单逐条触发下载（默认 preview，--go 才真点）
+//   verify <manifest.tsv>     核对 Downloads 中的 meta、归档和 7-Zip 完整性
 // 清单格式（每行）:
-//   modId<TAB>名称子串<TAB>期望版本<TAB>备注<TAB>期望fileId
-// 选项: --start N --limit N --wait SEC --go --gate
+//   modId<TAB>名称子串<TAB>期望版本<TAB>备注<TAB>期望fileId<TAB>动作
+// 动作可选：DOWNLOAD / MANUAL / HOLD_*；非 DOWNLOAD 行不会被误触发。
+// 选项: --start N --limit N --wait SEC --go --gate --json --redownload
+//       --downloads DIR --sevenzip PATH
 const fs = require('fs');
 const path = require('path');
 const { execFile } = require('child_process');
@@ -21,9 +24,17 @@ const WAKE_SCRIPT = process.env.MO2_WAKE_SCRIPT
   || path.resolve(__dirname, 'wake-mo2-download.ps1');
 const REFRESH_SCRIPT = process.env.MO2_REFRESH_SCRIPT
   || path.resolve(__dirname, 'refresh-mo2-downloads.ps1');
+const DOWNLOADS_DIR = process.env.MO2_DOWNLOADS_DIR
+  || path.resolve(__dirname, '..', '..', 'mo2', 'downloads');
+const SEVENZIP = process.env.MO2_7Z
+  || process.env.SEVENZIP
+  || (process.platform === 'win32' ? 'C:\\Program Files\\7-Zip\\7z.exe' : '7z');
 
 function parseArgs(rest) {
-  const out = { start: 0, limit: Infinity, wait: 6, go: false, gate: false };
+  const out = {
+    start: 0, limit: Infinity, wait: 6, go: false, gate: false,
+    json: false, redownload: false, downloads: DOWNLOADS_DIR, sevenzip: SEVENZIP,
+  };
   for (let i = 0; i < rest.length; i++) {
     const a = rest[i];
     if (a === '--start') out.start = parseInt(rest[++i], 10);
@@ -31,6 +42,10 @@ function parseArgs(rest) {
     else if (a === '--wait') out.wait = parseFloat(rest[++i]);
     else if (a === '--go') out.go = true;
     else if (a === '--gate') out.gate = true;
+    else if (a === '--json') out.json = true;
+    else if (a === '--redownload') out.redownload = true;
+    else if (a === '--downloads') out.downloads = path.resolve(rest[++i]);
+    else if (a === '--sevenzip') out.sevenzip = rest[++i];
     else { out._pos = out._pos || []; out._pos.push(a); }
   }
   return out;
@@ -41,8 +56,8 @@ function parseManifest(file) {
     .split('\n')
     .filter(l => l.trim() && !l.startsWith('#'))
     .map(l => {
-      const [modId, name, ver, note, fileId] = l.split('\t').map(s => (s || '').trim());
-      return { modId, name, ver, note, fileId };
+      const [modId, name, ver, note, fileId, action] = l.split('\t').map(s => (s || '').trim());
+      return { modId, name, ver, note, fileId, action: action || 'DOWNLOAD' };
     });
 }
 
@@ -50,7 +65,93 @@ function normVer(v) {
   if (!v) return '';
   const m = String(v).trim().replace(/^v/i, '').match(/^(\d+(?:\.\d+)*)/);
   if (!m) return String(v).trim().toLowerCase();
-  return m[1].split('.').map(x => parseInt(x, 10) || 0).join('.');
+  const parts = m[1].split('.').map(x => parseInt(x, 10) || 0);
+  while (parts.length > 1 && parts[parts.length - 1] === 0) parts.pop();
+  return parts.join('.');
+}
+
+function readMeta(file) {
+  const text = fs.readFileSync(file, 'utf8');
+  const get = key => {
+    const m = text.match(new RegExp(`^${key}=(.*)$`, 'mi'));
+    return m ? m[1].trim().replace(/^"|"$/g, '') : '';
+  };
+  return {
+    modId: get('modID'),
+    fileId: get('fileID'),
+    name: get('name'),
+    version: get('version'),
+    text,
+  };
+}
+
+function listMetaFiles(downloadsDir) {
+  if (!fs.existsSync(downloadsDir)) return [];
+  return fs.readdirSync(downloadsDir)
+    .filter(name => name.endsWith('.meta') && !name.endsWith('.unfinished.meta'))
+    .map(name => path.join(downloadsDir, name));
+}
+
+function findExistingArchive(entry, downloadsDir) {
+  for (const metaPath of listMetaFiles(downloadsDir)) {
+    let meta;
+    try { meta = readMeta(metaPath); } catch { continue; }
+    if (String(meta.modId) !== String(entry.modId) || String(meta.fileId) !== String(entry.fileId)) continue;
+    const archivePath = metaPath.slice(0, -'.meta'.length);
+    const unfinishedPath = `${archivePath}.unfinished`;
+    const stat = fs.existsSync(archivePath) ? fs.statSync(archivePath) : null;
+    return {
+      metaPath,
+      archivePath,
+      unfinishedPath,
+      meta,
+      exists: !!stat && stat.isFile() && stat.size > 0,
+      size: stat ? stat.size : 0,
+      hasUnfinished: fs.existsSync(unfinishedPath),
+    };
+  }
+  return null;
+}
+
+function testArchive(archivePath, sevenzip) {
+  return new Promise(resolve => {
+    if (!fs.existsSync(archivePath)) return resolve({ ok: false, code: null, reason: 'MISSING_ARCHIVE' });
+    execFile(sevenzip, ['t', '-y', archivePath], {
+      windowsHide: true,
+      timeout: 180000,
+      maxBuffer: 1024 * 1024,
+    }, (err) => {
+      if (err && err.code === 'ENOENT') return resolve({ ok: false, code: null, reason: 'SEVENZIP_NOT_FOUND' });
+      resolve({ ok: !err, code: err ? (typeof err.code === 'number' ? err.code : 1) : 0,
+        reason: err ? 'ARCHIVE_TEST_FAILED' : 'OK' });
+    });
+  });
+}
+
+async function verifyEntry(entry, args) {
+  if (!entry.fileId) return { status: 'HOLD_NO_FILE_ID', modId: entry.modId, fileId: '', note: 'manifest lacks exact file ID' };
+  const found = findExistingArchive(entry, args.downloads);
+  if (!found) return { status: 'MISSING_META', modId: entry.modId, fileId: entry.fileId, note: 'no matching .meta' };
+  if (!found.exists) {
+    return {
+      status: 'INCOMPLETE', modId: entry.modId, fileId: entry.fileId,
+      archive: found.archivePath, size: found.size, unfinished: found.hasUnfinished,
+    };
+  }
+  const expectedVersion = normVer(entry.ver);
+  const actualVersion = normVer(found.meta.version);
+  if (String(found.meta.modId) !== String(entry.modId) || String(found.meta.fileId) !== String(entry.fileId)) {
+    return { status: 'META_MISMATCH', modId: entry.modId, fileId: entry.fileId, archive: found.archivePath };
+  }
+  if (expectedVersion && actualVersion && expectedVersion !== actualVersion) {
+    return { status: 'VERSION_MISMATCH', modId: entry.modId, fileId: entry.fileId, expected: entry.ver, actual: found.meta.version, archive: found.archivePath };
+  }
+  const zip = await testArchive(found.archivePath, args.sevenzip);
+  return {
+    status: zip.ok ? (found.hasUnfinished ? 'VERIFIED_WITH_RESIDUAL' : 'VERIFIED') : `VERIFY_${zip.reason}`,
+    modId: entry.modId, fileId: entry.fileId, version: found.meta.version,
+    archive: found.archivePath, size: found.size, unfinished: found.hasUnfinished, sevenZip: zip.code,
+  };
 }
 
 const sleep = ms => new Promise(r => setTimeout(r, ms));
@@ -110,7 +211,7 @@ async function dumpCards(page, substr) {
   }, substr || '');
 }
 
-async function findCard(page, modId, nameSub) {
+async function findCard(page, modId, nameSub, expectedFileId) {
   await page.goto(`https://www.nexusmods.com/${DOMAIN}/mods/${modId}?tab=files`, {
     waitUntil: 'domcontentloaded', timeout: 90000,
   });
@@ -118,11 +219,18 @@ async function findCard(page, modId, nameSub) {
   await dismissConsent(page);
   // 等待文件卡渲染
   for (let i = 0; i < 15; i++) {
-    const cards = await dumpCards(page, nameSub);
-    if (cards.length) return { cards, atTab: true };
+    const cards = await dumpCards(page, expectedFileId ? '' : nameSub);
+    const exact = expectedFileId
+      ? cards.filter(c => String(c.fileId) === String(expectedFileId))
+      : cards;
+    if (exact.length) return { cards: exact, atTab: true };
     await sleep(1500);
   }
-  return { cards: await dumpCards(page, nameSub), atTab: true };
+  const cards = await dumpCards(page, expectedFileId ? '' : nameSub);
+  const exact = expectedFileId
+    ? cards.filter(c => String(c.fileId) === String(expectedFileId))
+    : cards;
+  return { cards: exact, atTab: true };
 }
 
 // 打开选中文件的下载模态框并提取 nxm:// 链接（免费用户专用路径）
@@ -175,7 +283,14 @@ async function extractNxmFromNmmPage(page, modId, fileId) {
 }
 
 async function downloadOne(page, e, args) {
-  const { cards } = await findCard(page, e.modId, e.name);
+  if (e.action && e.action !== 'DOWNLOAD') {
+    return `SKIP_ACTION ${e.action} (${e.note || 'manual review'})`;
+  }
+  const existing = findExistingArchive(e, args.downloads);
+  if (existing && existing.exists && !args.redownload) {
+    return `SKIP_DUPLICATE fileId=${e.fileId} size=${existing.size} residualUnfinished=${existing.hasUnfinished} archive=${path.basename(existing.archivePath)}`;
+  }
+  const { cards } = await findCard(page, e.modId, e.name, e.fileId);
   if (!cards.length) return `NOT-FOUND (${e.name})`;
   const card = cards[0];
   if (e.fileId && String(card.fileId) !== String(e.fileId)) {
@@ -201,15 +316,18 @@ async function downloadOne(page, e, args) {
   // 交给 OS 的 nxm 协议处理器（MO2 nxmhandler）——绕过浏览器外部协议弹窗
   await launchNxm(nxm);
   const wake = await wakeDownload(e.name);
-  return `OK submitted fileId=${card.fileId} ver=${card.version} mo2=${wake || 'unknown'}`;
+  return `SUBMITTED fileId=${card.fileId} ver=${card.version} mo2=${wake.wake || 'unknown'} refresh=${wake.refresh || 'unknown'}`;
 }
 
 function launchNxm(nxm) {
   return new Promise((res, rej) => {
-    // 沿用项目中已验证的 Python subprocess 方式，整个 NXM 作为一个参数传给 handler。
-    const py = 'import subprocess,sys; subprocess.run([sys.argv[1],sys.argv[2]], capture_output=True, timeout=20)';
-    execFile('py', ['-c', py, NXM_HANDLER, nxm], { windowsHide: true, timeout: 30000 }, (err) =>
-      err ? rej(err) : res());
+    // 整个 NXM 作为一个参数传给 handler，并把 handler 的退出码传出来。
+    // 不使用 cmd /c start，避免签名中的 & 被命令解释器拆开。
+    const py = 'import subprocess,sys; r=subprocess.run([sys.argv[1],sys.argv[2]], capture_output=True, timeout=20); print(r.returncode); sys.exit(r.returncode or 0)';
+    execFile('py', ['-c', py, NXM_HANDLER, nxm], { windowsHide: true, timeout: 30000 }, (err, stdout, stderr) => {
+      if (err) return rej(err);
+      res({ stdout: String(stdout || '').trim(), stderr: String(stderr || '').trim() });
+    });
   });
 }
 
@@ -217,12 +335,16 @@ function wakeDownload(pattern) {
   return new Promise((res, rej) => {
     execFile('powershell.exe', [
       '-NoProfile', '-NonInteractive', '-File', REFRESH_SCRIPT,
-    ], { windowsHide: true, timeout: 20000 }, () => {
+    ], { windowsHide: true, timeout: 20000 }, (refreshErr, refreshOut) => {
       execFile('powershell.exe', [
         '-NoProfile', '-NonInteractive', '-File', WAKE_SCRIPT, '-Pattern', pattern,
       ], { windowsHide: true, timeout: 20000 }, (err, stdout) => {
-        if (err) return rej(err);
-        res(String(stdout || '').trim());
+        // “ROW_NOT_FOUND” 只表示暂时没有可唤醒的 UI 行；NXM 已交给 handler，不能把它伪装成提交失败。
+        if (err && err.code === 'ENOENT') return rej(err);
+        res({
+          refresh: String(refreshOut || '').trim() || (refreshErr ? 'REFRESH_ERROR' : 'UNKNOWN'),
+          wake: String(stdout || '').trim() || (err ? 'WAKE_ERROR' : 'UNKNOWN'),
+        });
       });
     });
   });
@@ -231,10 +353,15 @@ function wakeDownload(pattern) {
 async function main() {
   const [, , cmd, ...rest] = process.argv;
   const args = parseArgs(rest);
-  const puppeteer = require('puppeteer-core');
-  const browser = await puppeteer.connect({ browserURL: CDP, defaultViewport: null });
-  const page = await browser.newPage();
-  await page.setViewport({ width: 1500, height: 950 });
+  const needsBrowser = new Set(['login', 'whoami', 'inspect', 'consent', 'html', 'files', 'raw', 'dl']).has(cmd);
+  let browser = null;
+  let page = null;
+  if (needsBrowser) {
+    const puppeteer = require('puppeteer-core');
+    browser = await puppeteer.connect({ browserURL: CDP, defaultViewport: null });
+    page = await browser.newPage();
+    await page.setViewport({ width: 1500, height: 950 });
+  }
 
   try {
     switch (cmd) {
@@ -368,29 +495,51 @@ async function main() {
       case 'dl': {
         const manifestPath = rest[0];
         const entries = parseManifest(manifestPath);
+        const results = [];
         let i = args.start;
         let done = 0;
         while (i < entries.length && done < (args.limit === Infinity ? entries.length : args.limit)) {
           const e = entries[i];
           try {
             const r = await downloadOne(page, e, args);
-            console.log(`[${i}] ${r} | ${e.modId} ${e.name} (${e.note || ''})`);
+            const result = { index: i, modId: e.modId, fileId: e.fileId, name: e.name, action: e.action, result: r };
+            results.push(result);
+            if (!args.json) console.log(`[${i}] ${r} | ${e.modId} ${e.name} (${e.note || ''})`);
           } catch (err) {
-            console.log(`[${i}] ERROR ${e.modId} ${e.name}: ${err.message}`);
+            const result = { index: i, modId: e.modId, fileId: e.fileId, name: e.name, action: e.action, result: `ERROR ${err.message}` };
+            results.push(result);
+            if (!args.json) console.log(`[${i}] ${result.result} | ${e.modId} ${e.name}`);
           }
           i++; done++;
           if (i < entries.length && done < (args.limit === Infinity ? entries.length : args.limit)) {
             await sleep((args.wait || 6) * 1000);
           }
         }
+        if (args.json) console.log(JSON.stringify(results, null, 2));
+        break;
+      }
+      case 'verify': {
+        const manifestPath = rest[0];
+        if (!manifestPath) throw new Error('verify requires a manifest.tsv');
+        const entries = parseManifest(manifestPath);
+        const results = [];
+        for (const entry of entries) {
+          if (entry.action && entry.action !== 'DOWNLOAD') {
+            results.push({ status: `SKIP_ACTION_${entry.action}`, modId: entry.modId, fileId: entry.fileId, name: entry.name, note: entry.note });
+            continue;
+          }
+          results.push({ ...(await verifyEntry(entry, args)), name: entry.name });
+        }
+        if (args.json) console.log(JSON.stringify(results, null, 2));
+        else results.forEach(r => console.log(`${r.status}\t${r.modId}\t${r.fileId || ''}\t${r.archive || ''}\t${r.size || 0}`));
         break;
       }
       default:
-        console.log('usage: nexus-autodl.js <login|whoami|inspect modId [substr]|dl manifest.tsv> [--go] [--start N] [--limit N] [--wait S]');
+        console.log('usage: nexus-autodl.js <login|whoami|inspect modId [substr]|dl manifest.tsv|verify manifest.tsv> [--go] [--start N] [--limit N] [--wait S] [--json] [--redownload] [--downloads DIR] [--sevenzip PATH]');
     }
   } finally {
-    await page.close().catch(() => {});
-    await browser.disconnect();
+    if (page) await page.close().catch(() => {});
+    if (browser) await browser.disconnect();
   }
 }
 
