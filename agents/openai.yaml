@@ -1,0 +1,8 @@
+interface:
+  display_name: "Skyrim MO2 安全更新"
+  short_description: "核对 AE1170 版本、补丁与汉化并安全交给 MO2 下载"
+  brand_color: "#6B4F2A"
+  default_prompt: "Use $skyrim-mo2-safe-update to audit and stage Skyrim AE 1.6.1170 mod updates through MO2, including compatible patches, resources, and Chinese translations, and report anything that needs manual download."
+
+policy:
+  allow_implicit_invocation: true

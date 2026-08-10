@@ -1,0 +1,10 @@
+# Local Nexus manifests and audit output
+*.tsv
+*.jsonl
+.env
+
+# Local runtime paths and session artifacts
+node_modules/
+*.log
+*.unfinished
+*.meta
