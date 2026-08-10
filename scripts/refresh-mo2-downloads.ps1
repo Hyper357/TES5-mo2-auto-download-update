@@ -1,8 +1,3 @@
-param(
-  [Parameter(Mandatory = $true)]
-  [string]$Pattern
-)
-
 Add-Type -AssemblyName UIAutomationClient,UIAutomationTypes
 
 $deadline = (Get-Date).AddSeconds(12)
@@ -17,12 +12,13 @@ while ((Get-Date) -lt $deadline) {
       )
       for ($i = 0; $i -lt $all.Count; $i++) {
         $el = $all.Item($i)
-        if ($el.Current.ControlType.ProgrammaticName -eq 'ControlType.TreeItem' -and
-            $el.Current.Name -like "*$Pattern*") {
+        $aid = $el.Current.AutomationId
+        $name = $el.Current.Name
+        if (($aid -like '*downloadTab.btnRefreshDownloads*') -or ($name -match '刷新|refresh')) {
           $invoke = $null
           if ($el.TryGetCurrentPattern([System.Windows.Automation.InvokePattern]::Pattern, [ref]$invoke)) {
             $invoke.Invoke()
-            Write-Output 'WOKE'
+            Write-Output 'REFRESHED'
             exit 0
           }
         }
@@ -32,5 +28,5 @@ while ((Get-Date) -lt $deadline) {
   Start-Sleep -Milliseconds 500
 }
 
-Write-Output 'ROW_NOT_FOUND'
+Write-Output 'REFRESH_NOT_FOUND'
 exit 2

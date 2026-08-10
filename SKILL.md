@@ -296,12 +296,13 @@ https://www.nexusmods.com/skyrimspecialedition/mods/<modId>?tab=files&file_id=<f
 
 ```text
 E:\SkyrimAE\.claude\update-audit\nexus-autodl.js
+E:\SkyrimAE\.claude\update-audit\refresh-mo2-downloads.ps1
 E:\SkyrimAE\.claude\update-audit\wake-mo2-download.ps1
 ```
 
 脚本可以帮助解析当前文件卡、调用 NXM handler 和刷新/唤醒 MO2，但不能替代页面核验和落盘验收。实际使用前仍须确认 MO2 进程、`nxmhandler.exe`、profile 与 `downloads_directory` 属于同一实例。
 
-从 GitHub 克隆到其他工具时，不要假定仓库旁边存在 `mo2` 目录；设置 `MO2_NXM_HANDLER` 指向实际 `nxmhandler.exe`，必要时设置 `MO2_WAKE_SCRIPT` 指向唤醒脚本。每次运行前仍要重新发现当前 MO2 实例和下载目录。
+从 GitHub 克隆到其他工具时，不要假定仓库旁边存在 `mo2` 目录；设置 `MO2_NXM_HANDLER` 指向实际 `nxmhandler.exe`，必要时设置 `MO2_REFRESH_SCRIPT` 和 `MO2_WAKE_SCRIPT` 指向刷新/唤醒脚本。每次运行前仍要重新发现当前 MO2 实例和下载目录。
 
 在 Windows 上的调用形式为：
 

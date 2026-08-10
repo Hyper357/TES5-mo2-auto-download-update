@@ -6,7 +6,7 @@
 //   inspect <modId> [substr]  转储某模组 Files 页的文件卡 + 下载控件（学 DOM 用）
 //   dl <manifest.tsv>         按清单逐条触发下载（默认 preview，--go 才真点）
 // 清单格式（每行）:
-//   modId<TAB>名称子串<TAB>期望版本<TAB>备注
+//   modId<TAB>名称子串<TAB>期望版本<TAB>备注<TAB>期望fileId
 // 选项: --start N --limit N --wait SEC --go --gate
 const fs = require('fs');
 const path = require('path');
@@ -19,6 +19,8 @@ const NXM_HANDLER = process.env.MO2_NXM_HANDLER
   || path.resolve(__dirname, '..', '..', 'mo2', 'nxmhandler.exe');
 const WAKE_SCRIPT = process.env.MO2_WAKE_SCRIPT
   || path.resolve(__dirname, 'wake-mo2-download.ps1');
+const REFRESH_SCRIPT = process.env.MO2_REFRESH_SCRIPT
+  || path.resolve(__dirname, 'refresh-mo2-downloads.ps1');
 
 function parseArgs(rest) {
   const out = { start: 0, limit: Infinity, wait: 6, go: false, gate: false };
@@ -39,8 +41,8 @@ function parseManifest(file) {
     .split('\n')
     .filter(l => l.trim() && !l.startsWith('#'))
     .map(l => {
-      const [modId, name, ver, note] = l.split('\t').map(s => (s || '').trim());
-      return { modId, name, ver, note };
+      const [modId, name, ver, note, fileId] = l.split('\t').map(s => (s || '').trim());
+      return { modId, name, ver, note, fileId };
     });
 }
 
@@ -176,6 +178,9 @@ async function downloadOne(page, e, args) {
   const { cards } = await findCard(page, e.modId, e.name);
   if (!cards.length) return `NOT-FOUND (${e.name})`;
   const card = cards[0];
+  if (e.fileId && String(card.fileId) !== String(e.fileId)) {
+    return `VERIFY-FAIL expectFileId=${e.fileId} cardFileId=${card.fileId} (${card.name})`;
+  }
   const cardVer = normVer(card.version);
   const expectVer = normVer(e.ver);
   if (expectVer && cardVer && cardVer !== expectVer) {
@@ -211,10 +216,14 @@ function launchNxm(nxm) {
 function wakeDownload(pattern) {
   return new Promise((res, rej) => {
     execFile('powershell.exe', [
-      '-NoProfile', '-NonInteractive', '-File', WAKE_SCRIPT, '-Pattern', pattern,
-    ], { windowsHide: true, timeout: 20000 }, (err, stdout) => {
-      if (err) return rej(err);
-      res(String(stdout || '').trim());
+      '-NoProfile', '-NonInteractive', '-File', REFRESH_SCRIPT,
+    ], { windowsHide: true, timeout: 20000 }, () => {
+      execFile('powershell.exe', [
+        '-NoProfile', '-NonInteractive', '-File', WAKE_SCRIPT, '-Pattern', pattern,
+      ], { windowsHide: true, timeout: 20000 }, (err, stdout) => {
+        if (err) return rej(err);
+        res(String(stdout || '').trim());
+      });
     });
   });
 }
