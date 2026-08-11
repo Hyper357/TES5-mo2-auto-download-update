@@ -29,11 +29,82 @@ const DOWNLOADS_DIR = process.env.MO2_DOWNLOADS_DIR
 const SEVENZIP = process.env.MO2_7Z
   || process.env.SEVENZIP
   || (process.platform === 'win32' ? 'C:\\Program Files\\7-Zip\\7z.exe' : '7z');
+// Nexus API key：优先 --api-key-file / NEXUS_API_KEY，其次仓库相邻 tools/.nexus_api_key。
+// 绝不打印。
+let API_KEY = (() => {
+  if (process.env.NEXUS_API_KEY) return process.env.NEXUS_API_KEY.trim();
+  for (const cand of [path.resolve(__dirname, '..', 'tools', '.nexus_api_key'),
+    path.resolve(__dirname, '..', '..', 'tools', '.nexus_api_key')]) {
+    try { return fs.readFileSync(cand, 'utf8').trim(); } catch { /* 继续 */ }
+  }
+  return '';
+})();
+
+function nexusApi(pathName, apiKeyOverride) {
+  return new Promise((resolve, reject) => {
+    const key = (apiKeyOverride || API_KEY || '').trim();
+    if (!key) return reject(new Error('Nexus API key 缺失：--api-key-file / tools/.nexus_api_key / NEXUS_API_KEY'));
+    execFile('curl', ['-s', '-H', `apikey: ${key}`, '-H', 'Accept: application/json',
+      `https://api.nexusmods.com/v1/games/${DOMAIN}/mods/${pathName}`],
+      { windowsHide: true, timeout: 30000, maxBuffer: 8 * 1024 * 1024 }, (err, stdout) => {
+        if (err) return reject(err);
+        try { resolve(JSON.parse(stdout)); }
+        catch { reject(new Error(`API 非 JSON 响应: ${String(stdout).slice(0, 120)}`)); }
+      });
+  });
+}
+
+// 判定文件名是否为补丁/汉化候选。返回分类或 null。
+function classifyAuxFile(name, version) {
+  const n = (name || '').toLowerCase();
+  if (/(chinese|中文|汉化|chs|^cn[\s_-]|cn$)/.test(n)) return 'TRANSLATION';
+  if (/(patch|fix|compat|修复|兼容|补丁)/.test(n)) return 'PATCH';
+  if (/translation|translate/.test(n)) return 'TRANSLATION';
+  return null;
+}
+
+// 主 MOD 的补丁/汉化扫描：拉 files.json，按名称关键词分类，输出候选表。
+// 局限（如实标注）：Nexus 开放 API 无 search/requirements/translations 端点，
+// 只能扫描同一 modId 下的文件卡；跨 mod 的独立翻译页/补丁中心需页面核验。
+async function scanAuxFiles(modId, installedFileIds, apiKeyOverride) {
+  const files = await nexusApi(`${modId}/files.json`, apiKeyOverride);
+  if (!files || !Array.isArray(files.files)) return [];
+  const rows = [];
+  const seen = new Set();
+  for (const f of files.files) {
+    if (f.category_id === 7) continue; // ARCHIVED 跳过
+    const kind = classifyAuxFile(f.name, f.version);
+    if (!kind) continue;
+    const key = `${f.file_id}`;
+    if (seen.has(key)) continue;
+    seen.add(key);
+    const installed = installedFileIds && installedFileIds.has(String(f.file_id));
+    rows.push({
+      kind, fileId: f.file_id, version: f.version || '',
+      category: f.category_name || '', name: f.name || '',
+      installed,
+    });
+  }
+  // 同类只取非 ARCHIVED 的最新一个，按 fileId 升序（fileId 大 ≈ 新）
+  const byKind = {};
+  for (const r of rows) {
+    if (!byKind[r.kind]) byKind[r.kind] = [];
+    byKind[r.kind].push(r);
+  }
+  const out = [];
+  for (const kind of Object.keys(byKind)) {
+    const list = byKind[kind].sort((a, b) => a.fileId - b.fileId);
+    const latest = list[list.length - 1];
+    out.push({ ...latest, olderCount: list.length - 1 });
+  }
+  return out.sort((a, b) => (a.kind === 'TRANSLATION' ? -1 : 0) - (b.kind === 'TRANSLATION' ? -1 : 0) || b.fileId - a.fileId);
+}
 
 function parseArgs(rest) {
   const out = {
     start: 0, limit: Infinity, wait: 6, go: false, gate: false,
     json: false, redownload: false, downloads: DOWNLOADS_DIR, sevenzip: SEVENZIP,
+    installedDir: null, apiKeyFile: null,
   };
   for (let i = 0; i < rest.length; i++) {
     const a = rest[i];
@@ -46,9 +117,63 @@ function parseArgs(rest) {
     else if (a === '--redownload') out.redownload = true;
     else if (a === '--downloads') out.downloads = path.resolve(rest[++i]);
     else if (a === '--sevenzip') out.sevenzip = rest[++i];
+    else if (a === '--installed-dir') out.installedDir = path.resolve(rest[++i]);
+    else if (a === '--api-key-file') out.apiKeyFile = path.resolve(rest[++i]);
     else { out._pos = out._pos || []; out._pos.push(a); }
   }
   return out;
+}
+
+// 扫描 MO2 已安装模组目录，建立 modId -> 已安装 fileId 的映射。
+// 权威字段是 meta.ini 的 "1\fileid="（MO2 记录实际安装的 Nexus file ID）；
+// 顶层的 "version=" 字段经常是旧值，不能用于判断“是否已是最新”。
+// 注意：部分条目没有 "1\fileid="（MO2 未刷新），此时回退查 downloads 目录中
+// 同 modId 的 .meta 文件（MO2 安装后归档通常保留在 downloads，fileID 精确）。
+function loadInstalledFileIds(installedDir, downloadsDir) {
+  const map = new Map(); // modId -> Set<fileId>
+  const add = (modId, fileId) => {
+    if (!map.has(modId)) map.set(modId, new Set());
+    map.get(modId).add(fileId);
+  };
+  if (!installedDir || !fs.existsSync(installedDir)) return map;
+  for (const dir of fs.readdirSync(installedDir, { withFileTypes: true })) {
+    if (!dir.isDirectory()) continue;
+    const metaPath = path.join(installedDir, dir.name, 'meta.ini');
+    if (!fs.existsSync(metaPath)) continue;
+    let text;
+    try { text = fs.readFileSync(metaPath, 'utf8'); } catch { continue; }
+    // 形如: 1\modid=12345  与  1\fileid=67890（同一编号前缀成对出现）
+    let any = false;
+    for (const m of text.matchAll(/^(\d+)\\modid=(\d+)\s*$/gm)) {
+      const key = m[1];
+      const modId = m[2];
+      const fid = text.match(new RegExp(`^${key}\\\\fileid=(\\d+)\\s*$`, 'm'));
+      if (!fid) continue;
+      add(modId, fid[1]);
+      any = true;
+    }
+    // 回退1：顶层 modid= + 顶层 fileid=（部分 meta 有）
+    if (!any) {
+      const topModId = text.match(/^modid=(\d+)\s*$/m);
+      const topFid = text.match(/^fileid=(\d+)\s*$/mi);
+      if (topModId && topFid) { add(topModId[1], topFid[1]); any = true; }
+    }
+    // 回退2：顶层 modid= + downloads 目录中该 modId 的 .meta fileID
+    // （MO2 的 "1\fileid" 偶发缺失，但安装来源归档仍在 downloads，fileID 可信）
+    if (!any && downloadsDir && fs.existsSync(downloadsDir)) {
+      const topModId = text.match(/^modid=(\d+)\s*$/m);
+      if (topModId) {
+        for (const f of fs.readdirSync(downloadsDir)) {
+          if (!f.endsWith('.meta') || f.endsWith('.unfinished.meta')) continue;
+          let mt;
+          try { mt = readMeta(path.join(downloadsDir, f)); } catch { continue; }
+          if (String(mt.modId) === topModId[1] && mt.fileId) add(topModId[1], mt.fileId);
+        }
+        if (map.has(topModId[1])) any = true;
+      }
+    }
+  }
+  return map;
 }
 
 function parseManifest(file) {
@@ -282,9 +407,17 @@ async function extractNxmFromNmmPage(page, modId, fileId) {
   return null;
 }
 
-async function downloadOne(page, e, args) {
+async function downloadOne(page, e, args, installedMap) {
   if (e.action && e.action !== 'DOWNLOAD') {
     return `SKIP_ACTION ${e.action} (${e.note || 'manual review'})`;
+  }
+  // 变体防护：若本地已安装同一 modId 的不同 fileId（=不同变体），拒绝下载。
+  // 典型事故：mod 有两个 MAIN（如 3BA 与 BHUNP），按上传时间排序取“最新”会拿错变体。
+  if (installedMap && e.modId && e.fileId) {
+    const installed = installedMap.get(String(e.modId));
+    if (installed && installed.size && !installed.has(String(e.fileId))) {
+      return `VARIANT-MISMATCH targetFileId=${e.fileId} installedFileIds=[${[...installed].join(',')}] — 目标与本地已装变体不一致，禁止下载（如需更换变体请先处理本地安装）`;
+    }
   }
   const existing = findExistingArchive(e, args.downloads);
   if (existing && existing.exists && !args.redownload) {
@@ -319,8 +452,7 @@ async function downloadOne(page, e, args) {
   return `SUBMITTED fileId=${card.fileId} ver=${card.version} mo2=${wake.wake || 'unknown'} refresh=${wake.refresh || 'unknown'}`;
 }
 
-function launchNxm(nxm) {
-  return new Promise((res, rej) => {
+function launchNxm(nxm) {  return new Promise((res, rej) => {
     // 整个 NXM 作为一个参数传给 handler，并把 handler 的退出码传出来。
     // 不使用 cmd /c start，避免签名中的 & 被命令解释器拆开。
     const py = 'import subprocess,sys; r=subprocess.run([sys.argv[1],sys.argv[2]], capture_output=True, timeout=20); print(r.returncode); sys.exit(r.returncode or 0)';
@@ -374,10 +506,16 @@ async function main() {
         await page.goto(`https://www.nexusmods.com/${DOMAIN}`, { waitUntil: 'domcontentloaded', timeout: 60000 });
         const st = await page.evaluate(() => {
           const html = document.body ? document.body.innerText : '';
-          return {
-            signedIn: /sign out|log ?out|登出|注销/i.test(html),
-            hasSid: document.cookie.includes('sid_development'),
-          };
+          // 2026 版 Nexus 把用户菜单折叠成图标按钮，"Sign out" 不在 innerText 中；
+          // 因此除了文本正则，还要检查 authenticated 标记 / 用户菜单按钮 / sid cookie。
+          const hasSignOut = /sign out|log ?out|登出|注销/i.test(html);
+          const authMark = /authenticated/i.test(document.documentElement.outerHTML);
+          const hasUserMenu = !!document.querySelector(
+            '[aria-label*="profile" i], [aria-label*="menu" i], [class*="user-menu" i], [class*="userMenu" i]'
+          );
+          const hasSidCookie = document.cookie.split(';').some(c => c.trim().startsWith('sid'));
+          const signedIn = hasSignOut || authMark || (hasUserMenu && hasSidCookie);
+          return { signedIn, hasSignOut, authMark, hasUserMenu, hasSid: hasSidCookie };
         });
         console.log(JSON.stringify(st));
         break;
@@ -495,13 +633,14 @@ async function main() {
       case 'dl': {
         const manifestPath = rest[0];
         const entries = parseManifest(manifestPath);
+        const installedMap = loadInstalledFileIds(args.installedDir, args.downloads);
         const results = [];
         let i = args.start;
         let done = 0;
         while (i < entries.length && done < (args.limit === Infinity ? entries.length : args.limit)) {
           const e = entries[i];
           try {
-            const r = await downloadOne(page, e, args);
+            const r = await downloadOne(page, e, args, installedMap);
             const result = { index: i, modId: e.modId, fileId: e.fileId, name: e.name, action: e.action, result: r };
             results.push(result);
             if (!args.json) console.log(`[${i}] ${r} | ${e.modId} ${e.name} (${e.note || ''})`);
@@ -534,8 +673,78 @@ async function main() {
         else results.forEach(r => console.log(`${r.status}\t${r.modId}\t${r.fileId || ''}\t${r.archive || ''}\t${r.size || 0}`));
         break;
       }
+      case 'installed': {
+        // 审计：对照本地已装 fileId 与 manifest 目标 fileId，区分真缺口与已装最新。
+        // 用法: nexus-autodl.js installed <manifest.tsv> --installed-dir <MO2 mods> [--downloads DIR]
+        const manifestPath = rest[0];
+        if (!manifestPath) throw new Error('installed requires a manifest.tsv');
+        const entries = parseManifest(manifestPath);
+        const installedMap = loadInstalledFileIds(args.installedDir, args.downloads);
+        const results = [];
+        for (const e of entries) {
+          if (e.action && e.action !== 'DOWNLOAD') {
+            results.push({ status: `SKIP_ACTION_${e.action}`, modId: e.modId, fileId: e.fileId, name: e.name });
+            continue;
+          }
+          const installed = e.modId ? installedMap.get(String(e.modId)) : undefined;
+          if (!installed || !installed.size) {
+            results.push({ status: 'NOT_INSTALLED', modId: e.modId, fileId: e.fileId, name: e.name });
+            continue;
+          }
+          if (installed.has(String(e.fileId))) {
+            results.push({ status: 'ALREADY_INSTALLED', modId: e.modId, fileId: e.fileId, name: e.name, installedFileIds: [...installed] });
+          } else {
+            results.push({ status: 'VARIANT_MISMATCH', modId: e.modId, fileId: e.fileId, name: e.name, installedFileIds: [...installed], note: '目标 fileID 与本地已装变体不一致' });
+          }
+        }
+        if (args.json) console.log(JSON.stringify(results, null, 2));
+        else results.forEach(r => console.log(`${r.status}\t${r.modId}\t${r.fileId || ''}\t${r.name}\t${r.installedFileIds ? r.installedFileIds.join(',') : ''}`));
+        break;
+      }
+      case 'patchscan': {
+        // 补丁/汉化候选扫描：对 manifest 中每个主 MOD，列出其文件卡里的
+        // PATCH / TRANSLATION 候选（按名称关键词分类），供人工勾选后并入下载清单。
+        // 用法: nexus-autodl.js patchscan <manifest.tsv> [--installed-dir MO2 mods]
+        const manifestPath = rest[0];
+        if (!manifestPath) throw new Error('patchscan requires a manifest.tsv');
+        const entries = parseManifest(manifestPath);
+        const installedMap = loadInstalledFileIds(args.installedDir, args.downloads);
+        const results = [];
+        for (const e of entries) {
+          if (e.action && e.action !== 'DOWNLOAD') {
+            results.push({ status: 'SKIP_ACTION', modId: e.modId, name: e.name, action: e.action });
+            continue;
+          }
+          let aux;
+          try {
+            const installed = e.modId ? installedMap.get(String(e.modId)) : undefined;
+            const keyFile = args.apiKeyFile ? fs.readFileSync(args.apiKeyFile, 'utf8').trim() : '';
+            aux = await scanAuxFiles(e.modId, installed, keyFile);
+          } catch (err) {
+            results.push({ status: 'API_ERROR', modId: e.modId, name: e.name, error: err.message });
+            continue;
+          }
+          if (!aux.length) {
+            results.push({ status: 'NO_AUX', modId: e.modId, name: e.name, note: '文件卡中无补丁/汉化候选（跨 mod 翻译页需页面核验）' });
+            continue;
+          }
+          for (const a of aux) {
+            results.push({
+              status: a.installed ? 'ALREADY_INSTALLED' : 'CANDIDATE',
+              kind: a.kind, modId: e.modId, fileId: a.fileId, version: a.version,
+              category: a.category, name: a.name, olderCount: a.olderCount,
+            });
+          }
+        }
+        if (args.json) console.log(JSON.stringify(results, null, 2));
+        else results.forEach(r => {
+          const line = [r.status, r.kind || '', r.modId || '', r.fileId || '', r.version || '', r.name || '', r.note || ''].join('\t');
+          console.log(line);
+        });
+        break;
+      }
       default:
-        console.log('usage: nexus-autodl.js <login|whoami|inspect modId [substr]|dl manifest.tsv|verify manifest.tsv> [--go] [--start N] [--limit N] [--wait S] [--json] [--redownload] [--downloads DIR] [--sevenzip PATH]');
+        console.log('usage: nexus-autodl.js <login|whoami|inspect modId [substr]|dl manifest.tsv|verify manifest.tsv|installed manifest.tsv|patchscan manifest.tsv> [--go] [--start N] [--limit N] [--wait S] [--json] [--redownload] [--downloads DIR] [--sevenzip PATH] [--installed-dir MO2_MODS_DIR]');
     }
   } finally {
     if (page) await page.close().catch(() => {});

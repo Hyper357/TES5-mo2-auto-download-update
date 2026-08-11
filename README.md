@@ -7,6 +7,9 @@
 ## 功能
 
 - 以 `mod ID + file ID` 精确选择 Nexus 文件，避免同名旧文件或错误变体。
+- `installed` 审计命令对照本地 MO2 已装 file ID（`meta.ini` 的 `1\fileid=`）区分真缺口、已装最新与变体不一致，防止把“已装最新”误当更新。
+- `dl` 支持 `--installed-dir` 变体防护：目标 fileID 与本地已装变体不一致时返回 `VARIANT-MISMATCH` 拒绝下载（如 3BA/BHUNP、4K/2K 双 MAIN 模组）。
+- `patchscan` 命令扫描主 MOD 文件卡中的补丁/汉化候选（PATCH / TRANSLATION 分类），供人工勾选后并入下载清单。
 - 支持 AE/SE/NG/CC 等版本由清单和 Nexus 文件页共同核对；不按相邻 file ID 猜版本。
 - 支持 `DOWNLOAD`、`MANUAL`、`HOLD_PATCH`、`HOLD_TRANSLATION` 等动作字段，人工项不会被误触发。
 - 下载前检查 MO2 Downloads 中是否已经存在同一 `modID/fileID` 的完整归档，默认返回 `SKIP_DUPLICATE`。
@@ -151,6 +154,41 @@ node scripts/nexus-autodl.js verify .\manifests\batch.tsv --json
 | `SKIP_ACTION_MANUAL` | 清单明确要求人工选择，自动化跳过 |
 
 只有 `VERIFIED` 才能进入“已下载并通过验证”清单。`.unfinished` 文件不要手工改名、拼接或删除，先观察 MO2 是否继续增长。
+
+### 4. 下载前审计（installed）
+
+下载前先用 `installed` 对照本地已装 file ID，区分真缺口与已装最新，避免白下：
+
+```powershell
+node scripts/nexus-autodl.js installed .\manifests\batch.tsv --installed-dir <MO2 mods 目录> [--downloads DIR]
+```
+
+| 状态 | 含义 |
+|---|---|
+| `NEED_DOWNLOAD` | 目标 fileID 未在本地安装，真缺口 |
+| `ALREADY_INSTALLED` | 目标 fileID 已装（meta.ini `1\fileid=` 命中），跳过 |
+| `VARIANT_MISMATCH` | 本地装了同一 modId 的**其他变体**（如 3BA vs BHUNP）——目标与本地变体不一致，下载前必须确认变体 |
+| `NOT_INSTALLED` | 本地无该 mod 的安装记录 |
+
+`dl` 传 `--installed-dir` 时对 `VARIANT_MISMATCH` 行直接拒绝下载（返回 `VARIANT-MISMATCH`），防止再发生“清单填了 A 变体、实际下成 B 变体”的错误。判断依据是 MO2 `meta.ini` 的 `1\fileid=`（权威），不是经常过时的顶层 `version=`。
+
+### 5. 补丁/汉化候选扫描（patchscan）
+
+```powershell
+node scripts/nexus-autodl.js patchscan .\manifests\main-mods.tsv --installed-dir <MO2 mods 目录> [--api-key-file <key 文件>] [--json]
+```
+
+对清单中每个主 MOD 扫描其 Nexus 文件卡，按名称关键词分类输出补丁/汉化候选：
+
+| 字段 | 含义 |
+|---|---|
+| `PATCH` | 文件名为补丁/修复（patch/fix/compat/兼容/补丁） |
+| `TRANSLATION` | 文件名为汉化/翻译（Chinese/汉化/CHS/translation） |
+| `CANDIDATE` | 候选，可并入下载清单 |
+| `ALREADY_INSTALLED` | 该 fileID 本地已装 |
+| `NO_AUX` | 文件卡中无候选（独立翻译页/补丁中心需页面核验） |
+
+局限（如实）：Nexus 开放 API 无 search/requirements/translations 端点，patchscan 只能扫描**同一 modId 文件卡**中的候选；跨 mod 的独立翻译页、补丁中心、FOMOD 互斥方案仍需人工页面核验后标记 `MANUAL` / `HOLD_*`。patchscan 的用途是把“逐页人工核对”变成“脚本出候选表 + 人工勾选”，不是替代人工决定。
 
 ## MO2 队列辅助脚本
 
