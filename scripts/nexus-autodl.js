@@ -12,6 +12,7 @@
 // 选项: --start N --limit N --wait SEC --go --gate --json --redownload
 //       --downloads DIR --sevenzip PATH
 const fs = require('fs');
+const os = require('os');
 const path = require('path');
 const { execFile } = require('child_process');
 
@@ -100,6 +101,82 @@ async function scanAuxFiles(modId, installedFileIds, apiKeyOverride) {
   return out.sort((a, b) => (a.kind === 'TRANSLATION' ? -1 : 0) - (b.kind === 'TRANSLATION' ? -1 : 0) || b.fileId - a.fileId);
 }
 
+// 从已下载的 Patch Hub 归档中提取 fomod/ModuleConfig.xml，解析出真实 FOMOD 选项
+// （插件名 + 条件）。返回 [{ name, group, condition }]，或空数组。
+function parseFomodOptions(archivePath, sevenzip, workDir) {
+  return new Promise(resolve => {
+    if (!archivePath || !fs.existsSync(archivePath)) return resolve([]);
+    const tmp = workDir || path.join(os.tmpdir(), 'patchpicker-' + process.pid);
+    fs.mkdirSync(tmp, { recursive: true });
+    execFile(sevenzip, ['x', '-y', '-o' + tmp, archivePath, 'fomod/*'], { windowsHide: true, timeout: 60000 }, (err) => {
+      if (err) return resolve([]);
+      const candidates = [];
+      const walk = d => {
+        for (const f of fs.readdirSync(d, { withFileTypes: true })) {
+          const p = path.join(d, f.name);
+          if (f.isDirectory()) walk(p);
+          else if (/ModuleConfig\.xml$/i.test(f.name)) candidates.push(p);
+        }
+      };
+      try { walk(tmp); } catch { return resolve([]); }
+      if (!candidates.length) return resolve([]);
+      const out = [];
+      for (const mc of candidates) {
+        let xml;
+        try { xml = fs.readFileSync(mc, 'utf8'); } catch { continue; }
+        // 提取 <plugin name="..."> 及其条件关键字
+        for (const m of xml.matchAll(/<plugin\s+name="([^"]+)"[^>]*>/g)) out.push({ name: m[1], group: path.basename(path.dirname(mc)), condition: '' });
+        for (const m of xml.matchAll(/<dependency\s+file="([^"]+)"/g)) {
+          const dep = m[1];
+          const hit = out.find(o => o.condition === '' && o.name.toLowerCase().includes(dep.toLowerCase().split('.')[0]));
+          if (hit) hit.condition = dep;
+        }
+      }
+      // 清理临时目录
+      try { fs.rmSync(tmp, { recursive: true, force: true }); } catch { /* 保留 */ }
+      resolve([...new Map(out.map(o => [o.name, o])).values()]);
+    });
+  });
+}
+// 用本地维护的表扩展 patchscan 的扫描范围。格式（TSV，每行）：
+//   主modId<TAB>附属modId<TAB>PATCH|TRANSLATION<TAB>备注
+// 返回: Map<主modId, Array<{modId, kind, note}>>
+function loadSeriesMap(seriesFile) {
+  const map = new Map();
+  if (!seriesFile || !fs.existsSync(seriesFile)) return map;
+  for (const line of fs.readFileSync(seriesFile, 'utf8').split('\n')) {
+    if (!line.trim() || line.startsWith('#')) continue;
+    const [mainId, auxId, kind, note] = line.split('\t').map(s => (s || '').trim());
+    if (!mainId || !auxId) continue;
+    if (!map.has(mainId)) map.set(mainId, []);
+    map.get(mainId).push({ modId: auxId, kind: kind === 'TRANSLATION' ? 'TRANSLATION' : 'PATCH', note: note || '' });
+  }
+  return map;
+}
+
+// 扫描系列关系表中的附属 mod（独立汉化/补丁页），复用 scanAuxFiles 的文件卡分类。
+async function scanSeriesMods(seriesMap, mainModId, installedFileIds, apiKeyOverride) {
+  const aux = seriesMap.get(String(mainModId)) || [];
+  const out = [];
+  for (const a of aux) {
+    try {
+      const files = await nexusApi(`${a.modId}/files.json`, apiKeyOverride);
+      if (!files || !Array.isArray(files.files)) continue;
+      const latest = files.files
+        .filter(f => f.category_id !== 7 && (a.kind === 'TRANSLATION' ? classifyAuxFile(f.name, f.version) === 'TRANSLATION' : true))
+        .sort((x, y) => x.file_id - y.file_id);
+      if (!latest.length) continue;
+      const f = latest[latest.length - 1];
+      const installed = installedFileIds && installedFileIds.has(String(f.file_id));
+      out.push({
+        kind: a.kind, modId: a.modId, fileId: f.file_id, version: f.version || '',
+        category: f.category_name || '', name: f.name || '', note: a.note, installed,
+      });
+    } catch { /* API 失败跳过该附属 */ }
+  }
+  return out;
+}
+
 function parseArgs(rest) {
   const out = {
     start: 0, limit: Infinity, wait: 6, go: false, gate: false,
@@ -119,6 +196,16 @@ function parseArgs(rest) {
     else if (a === '--sevenzip') out.sevenzip = rest[++i];
     else if (a === '--installed-dir') out.installedDir = path.resolve(rest[++i]);
     else if (a === '--api-key-file') out.apiKeyFile = path.resolve(rest[++i]);
+    else if (a === '--modlist') out.modlist = path.resolve(rest[++i]);
+    else if (a === '--only-enabled') out.onlyEnabled = true;
+    else if (a === '--out') out.out = path.resolve(rest[++i]);
+    else if (a === '--interval') out.interval = parseInt(rest[++i], 10);
+    else if (a === '--stall-after') out.stallAfter = parseInt(rest[++i], 10);
+    else if (a === '--timeout') out.timeout = parseInt(rest[++i], 10);
+    else if (a === '--sort') out.sort = rest[++i];
+    else if (a === '--series-file') out.seriesFile = path.resolve(rest[++i]);
+    else if (a === '--work-dir') out.workDir = path.resolve(rest[++i]);
+    else if (a === '--reconnect') out.reconnect = true;
     else { out._pos = out._pos || []; out._pos.push(a); }
   }
   return out;
@@ -174,6 +261,60 @@ function loadInstalledFileIds(installedDir, downloadsDir) {
     }
   }
   return map;
+}
+
+// 扫描 MO2 已安装模组目录，返回每项的详情：
+// { modId, fileId, name(目录名), installedVersion, enabled(经 modlist.txt 判断), archiveMissing }
+// 用途：rebuild 子命令 —— 生成"已装但 downloads 缺归档"的候选清单，由用户筛选后下载。
+function scanInstalledMods(installedDir, downloadsDir, modlistPath) {
+  const rows = [];
+  const dlFileIds = new Set();
+  if (downloadsDir && fs.existsSync(downloadsDir)) {
+    for (const f of fs.readdirSync(downloadsDir)) {
+      if (!f.endsWith('.meta') || f.endsWith('.unfinished.meta')) continue;
+      let mt;
+      try { mt = readMeta(path.join(downloadsDir, f)); } catch { continue; }
+      if (mt.fileId) dlFileIds.add(String(mt.fileId));
+    }
+  }
+  // 启用状态：modlist.txt 第一行 = 左侧底部 = 高优先级；+ 开头 = 启用
+  const enabled = new Set();
+  if (modlistPath && fs.existsSync(modlistPath)) {
+    for (const line of fs.readFileSync(modlistPath, 'utf8').split('\n')) {
+      if (line.startsWith('+')) enabled.add(line.slice(1).trim());
+    }
+  }
+  if (!installedDir || !fs.existsSync(installedDir)) return rows;
+  for (const dir of fs.readdirSync(installedDir, { withFileTypes: true })) {
+    if (!dir.isDirectory()) continue;
+    const metaPath = path.join(installedDir, dir.name, 'meta.ini');
+    if (!fs.existsSync(metaPath)) continue;
+    let text;
+    try { text = fs.readFileSync(metaPath, 'utf8'); } catch { continue; }
+    const getTop = key => {
+      const m = text.match(new RegExp(`^${key}=(.*)$`, 'mi'));
+      return m ? m[1].trim() : '';
+    };
+    const topModId = getTop('modid');
+    if (!topModId || topModId === '0') continue; // 无 Nexus 链接的本地 mod
+    let fileId = '';
+    for (const m of text.matchAll(/^(\d+)\\modid=(\d+)\s*$/gm)) {
+      if (m[2] === topModId) {
+        const fid = text.match(new RegExp(`^${m[1]}\\\\fileid=(\\d+)\\s*$`, 'm'));
+        if (fid) { fileId = fid[1]; break; }
+      }
+    }
+    if (!fileId) fileId = getTop('fileid');
+    rows.push({
+      modId: topModId,
+      fileId,
+      name: dir.name,
+      installedVersion: getTop('version'),
+      enabled: enabled.has(dir.name),
+      archiveMissing: !fileId || !dlFileIds.has(String(fileId)),
+    });
+  }
+  return rows;
 }
 
 function parseManifest(file) {
@@ -490,7 +631,41 @@ async function main() {
   let page = null;
   if (needsBrowser) {
     const puppeteer = require('puppeteer-core');
-    browser = await puppeteer.connect({ browserURL: CDP, defaultViewport: null });
+    try {
+      browser = await puppeteer.connect({ browserURL: CDP, defaultViewport: null });
+    } catch (connectErr) {
+      // --reconnect：CDP 断连时自动用独立 Edge 配置重启浏览器会话（登录态持久化在 user-data-dir）。
+      if (!args.reconnect) throw connectErr;
+      console.log('CDP 不可达，--reconnect 尝试重启浏览器会话…');
+      const edge = process.env.MO2_EDGE
+        || 'C:\\Program Files (x86)\\Microsoft\\Edge\\Application\\msedge.exe';
+      const userData = process.env.MO2_EDGE_USERDATA
+        || path.join(os.homedir(), '.claude', 'nexus-autodl-edge');
+      // 用 cmd /c start 启动独立 Edge 实例（与 nexus-edge.cmd 相同语义）。
+      // 直接 spawn Edge 会被已运行的实例复用进程，--remote-debugging-port 被忽略。
+      const args2 = [
+        `--user-data-dir=${userData}`, '--remote-debugging-port=9222',
+        '--disable-extensions', '--no-first-run', '--no-default-browser-check',
+        '--new-window', `https://www.nexusmods.com/${DOMAIN}`,
+      ];
+      const { spawn } = require('child_process');
+      await new Promise((res, rej) => {
+        spawn('cmd', ['/c', 'start', '""', edge, ...args2], { windowsHide: true, stdio: 'ignore' }).on('error', rej);
+        // 最多等 25 秒让 CDP 端口就绪
+        const deadline = Date.now() + 25000;
+        const poll = async () => {
+          try {
+            browser = await puppeteer.connect({ browserURL: CDP, defaultViewport: null });
+            console.log('浏览器会话已重启（CDP 9222）');
+          } catch {
+            if (Date.now() > deadline) return rej(new Error('浏览器会话重启超时'));
+            await sleep(1000);
+            return poll();
+          }
+        };
+        poll();
+      });
+    }
     page = await browser.newPage();
     await page.setViewport({ width: 1500, height: 950 });
   }
@@ -632,7 +807,27 @@ async function main() {
       }
       case 'dl': {
         const manifestPath = rest[0];
-        const entries = parseManifest(manifestPath);
+        let entries = parseManifest(manifestPath);
+        // --sort small-first：先用 API 批量预取各目标的文件大小（KB），小文件先提交。
+        // SKSE/框架类多为几百 KB，大型材质包可达 GB 级；小文件先下可避免队列被大文件堵住。
+        if (args.sort === 'small-first') {
+          if (!args.apiKeyFile && !API_KEY) {
+            console.log('--sort small-first 需要 Nexus API key（--api-key-file 或 tools/.nexus_api_key），跳过排序');
+          } else {
+            const key = args.apiKeyFile ? fs.readFileSync(args.apiKeyFile, 'utf8').trim() : API_KEY;
+            const withSize = [];
+            for (const e of entries) {
+              if (!e.modId || !e.fileId || (e.action && e.action !== 'DOWNLOAD')) { withSize.push({ e, sizeKb: Infinity }); continue; }
+              try {
+                const files = await nexusApi(`${e.modId}/files.json`, key);
+                const f = (files.files || []).find(x => String(x.file_id) === String(e.fileId));
+                withSize.push({ e, sizeKb: f ? f.size_kb : Infinity });
+              } catch { withSize.push({ e, sizeKb: Infinity }); }
+            }
+            entries = withSize.sort((a, b) => a.sizeKb - b.sizeKb).map(x => x.e);
+            if (!args.json) console.log(`--sort small-first: ${entries.length} 项已按大小排序（API 预取）`);
+          }
+        }
         const installedMap = loadInstalledFileIds(args.installedDir, args.downloads);
         const results = [];
         let i = args.start;
@@ -701,6 +896,91 @@ async function main() {
         else results.forEach(r => console.log(`${r.status}\t${r.modId}\t${r.fileId || ''}\t${r.name}\t${r.installedFileIds ? r.installedFileIds.join(',') : ''}`));
         break;
       }
+      case 'monitor': {
+        // 监控 downloads 中的 .unfinished：观察是否增长，卡死判定。
+        // 用法: nexus-autodl.js monitor [--downloads DIR] [--interval SEC] [--stall-after MIN] [--timeout MIN] [--json]
+        const interval = args.interval || 15;      // 采样间隔（秒）
+        const stallAfter = args.stallAfter || 3;    // 无增长超过 N 分钟判卡死
+        const timeoutMin = args.timeout || 60;      // 总监控时长（分钟）
+        const started = Date.now();
+        const last = new Map(); // 文件名 -> { size, ts }
+        const stalled = new Set();
+        const done = new Set();
+        let poll = true;
+        const sample = () => {
+          const files = fs.existsSync(args.downloads) ? fs.readdirSync(args.downloads) : [];
+          const report = [];
+          for (const f of files) {
+            if (!f.endsWith('.unfinished')) continue;
+            const stat = fs.statSync(path.join(args.downloads, f));
+            const prev = last.get(f);
+            if (prev && prev.size === stat.size) {
+              const mins = (Date.now() - prev.ts) / 60000;
+              if (mins >= stallAfter) {
+                stalled.add(f);
+                report.push({ file: f, size: stat.size, status: 'STALLED', minsSinceGrowth: Math.round(mins * 10) / 10 });
+              }
+            } else {
+              last.set(f, { size: stat.size, ts: Date.now() });
+              stalled.delete(f);
+              report.push({ file: f, size: stat.size, status: 'GROWING' });
+            }
+          }
+          // 已完成的（.unfinished 消失但之前存在）
+          for (const f of last.keys()) {
+            if (!files.includes(f) && !done.has(f)) {
+              done.add(f);
+              report.push({ file: f, size: last.get(f).size, status: 'COMPLETED' });
+            }
+          }
+          return report;
+        };
+        if (!args.json) console.log(`monitor: 每 ${interval}s 采样，${stallAfter} 分钟无增长判卡死，总时长 ${timeoutMin} 分钟`);
+        while (poll) {
+          const report = sample();
+          if (report.length) {
+            if (args.json) console.log(JSON.stringify({ t: Math.round((Date.now() - started) / 1000), report }, null, 0));
+            else report.forEach(r => console.log(`[${Math.round((Date.now() - started) / 1000)}s] ${r.status}\t${r.size}\t${r.file}`));
+          }
+          if ((Date.now() - started) > timeoutMin * 60000) poll = false;
+          else await sleep(interval * 1000);
+        }
+        const stalledList = [...stalled];
+        if (args.json) console.log(JSON.stringify({ done: 'monitor-timeout', stalled: stalledList }, null, 2));
+        else console.log(`监控结束：卡死 ${stalledList.length} 个${stalledList.length ? '（' + stalledList.join('; ') + '）' : ''}`);
+        break;
+      }
+      case 'rebuild': {
+        // 重建归档库：扫描已装 mod，输出 downloads 缺归档的清单（不自动下载）。
+        // 用法: nexus-autodl.js rebuild [--installed-dir MO2 mods] [--downloads DIR]
+        //       [--modlist PATH] [--only-enabled] [--out manifest.tsv] [--json]
+        if (!args.installedDir) throw new Error('rebuild requires --installed-dir <MO2 mods>');
+        const modlistPath = args.modlist || (args.installedDir ? path.resolve(args.installedDir, '..', 'profiles', 'Default', 'modlist.txt') : '');
+        const rows = scanInstalledMods(args.installedDir, args.downloads, modlistPath);
+        const missing = rows.filter(r => r.archiveMissing && (!args.onlyEnabled || r.enabled));
+        const present = rows.filter(r => !r.archiveMissing);
+        const out = [];
+        for (const r of missing) {
+          const enabledFlag = r.enabled ? 'E' : 'D';
+          if (r.fileId) {
+            out.push(`${r.modId}\t${r.name}\t${r.installedVersion}\t归档缺失[${enabledFlag}]\t${r.fileId}\tDOWNLOAD`);
+          } else {
+            out.push(`${r.modId}\t${r.name}\t${r.installedVersion}\t归档缺失[${enabledFlag}]且meta无fileID，需人工从Nexus页面补fileID\t\tMANUAL`);
+          }
+        }
+        if (args.out) {
+          const header = '# modId<TAB>名称<TAB>已装版本<TAB>备注<TAB>期望fileID<TAB>动作 (rebuild 生成，人工筛选后喂给 dl)\n';
+          fs.writeFileSync(args.out, header + out.join('\n') + '\n', 'utf8');
+        }
+        if (args.json) {
+          console.log(JSON.stringify({ total: rows.length, present: present.length, missing: missing.length, out: args.out, rows: missing }, null, 2));
+        } else {
+          console.log(`已装 mod: ${rows.length} | 归档已有: ${present.length} | 归档缺失: ${missing.length}${args.out ? ` → 已写 ${args.out}` : ''}`);
+          if (args.out) console.log('（先人工筛选，再 node nexus-autodl.js dl <文件> --go）');
+          else missing.slice(0, 50).forEach(r => console.log(`${r.enabled ? '+' : '-'} ${r.modId}#${r.fileId} v${r.installedVersion}  ${r.name}`));
+        }
+        break;
+      }
       case 'patchscan': {
         // 补丁/汉化候选扫描：对 manifest 中每个主 MOD，列出其文件卡里的
         // PATCH / TRANSLATION 候选（按名称关键词分类），供人工勾选后并入下载清单。
@@ -709,6 +989,7 @@ async function main() {
         if (!manifestPath) throw new Error('patchscan requires a manifest.tsv');
         const entries = parseManifest(manifestPath);
         const installedMap = loadInstalledFileIds(args.installedDir, args.downloads);
+        const seriesMap = loadSeriesMap(args.seriesFile);
         const results = [];
         for (const e of entries) {
           if (e.action && e.action !== 'DOWNLOAD') {
@@ -720,6 +1001,8 @@ async function main() {
             const installed = e.modId ? installedMap.get(String(e.modId)) : undefined;
             const keyFile = args.apiKeyFile ? fs.readFileSync(args.apiKeyFile, 'utf8').trim() : '';
             aux = await scanAuxFiles(e.modId, installed, keyFile);
+            const seriesAux = await scanSeriesMods(seriesMap, e.modId, installed, keyFile);
+            aux = aux.concat(seriesAux);
           } catch (err) {
             results.push({ status: 'API_ERROR', modId: e.modId, name: e.name, error: err.message });
             continue;
@@ -743,8 +1026,77 @@ async function main() {
         });
         break;
       }
+      case 'patchpicker': {
+        // Patch Hub 选项匹配：拉取 Patch Hub 文件描述中的补丁选项列表，与本地 modlist
+        // 已装模组名匹配，输出“建议勾选/无需勾选”清单。匹配基于名称关键词，仅供人工确认。
+        // 用法: nexus-autodl.js patchpicker <manifest.tsv> [--modlist PATH] [--api-key-file PATH]
+        const manifestPath = rest[0];
+        if (!manifestPath) throw new Error('patchpicker requires a manifest.tsv');
+        const entries = parseManifest(manifestPath);
+        const modlistPath = args.modlist || (args.installedDir ? path.resolve(args.installedDir, '..', 'profiles', 'Default', 'modlist.txt') : '');
+        let installedNames = [];
+        if (fs.existsSync(modlistPath)) {
+          installedNames = fs.readFileSync(modlistPath, 'utf8').split('\n')
+            .filter(l => l.startsWith('+'))
+            .map(l => l.slice(1).trim())
+            .filter(Boolean);
+        }
+        const keyFile = args.apiKeyFile ? fs.readFileSync(args.apiKeyFile, 'utf8').trim() : '';
+        const normName = s => s.toLowerCase().replace(/[^a-z0-9\u4e00-\u9fff]+/g, '').trim();
+        const installedNorm = installedNames.map(n => normName(n));
+        const results = [];
+        for (const e of entries) {
+          if (e.action && e.action !== 'DOWNLOAD') { results.push({ status: 'SKIP_ACTION', modId: e.modId, name: e.name }); continue; }
+          try {
+            // 优先：本地已有该 fileID 归档 → 解析 FOMOD 真实选项
+            let options = [];
+            if (e.fileId) {
+              const found = findExistingArchive(e, args.downloads);
+              if (found && found.exists) options = await parseFomodOptions(found.archivePath, args.sevenzip, args.workDir);
+            }
+            let desc = '';
+            let fname = '';
+            if (!options.length) {
+              const files = await nexusApi(`${e.modId}/files.json`, keyFile);
+              const f = (files.files || []).find(x => String(x.file_id) === String(e.fileId))
+                || (files.files || []).filter(x => x.category_id !== 7).sort((a, b) => a.file_id - b.file_id).pop();
+              desc = f ? (f.description || '') : '';
+              fname = f ? f.name : '';
+              // 从描述提取候选选项：列表项 [*]、- 、数字. 、或独立成行的文字
+              const lines = desc.replace(/<[^>]+>/g, '\n').split(/\r?\n/)
+                .map(l => l.replace(/^[\s*•\-–\d.)]+/, '').trim())
+                .filter(l => l.length >= 3 && l.length <= 80 && !/^(http|www|patreon|discord|youtube)/i.test(l));
+              options = lines.map(l => ({ name: l, group: 'desc', condition: '' }));
+            }
+            if (!options.length) { results.push({ status: 'NO_OPTIONS', modId: e.modId, fileId: e.fileId, name: e.name }); continue; }
+            const suggestions = [];
+            const unselected = [];
+            for (const opt of options) {
+              const on = normName(opt.name);
+              if (!on) continue;
+              const hit = installedNames.find(n => {
+                const nn = normName(n);
+                if (!nn) return false;
+                return (on.length > 4 && nn.includes(on)) || (nn.length > 4 && on.includes(nn));
+              });
+              if (hit) suggestions.push({ option: opt.name, group: opt.group, condition: opt.condition, matchedInstalled: hit });
+              else unselected.push(opt.name);
+            }
+            results.push({ status: 'SUGGESTIONS', modId: e.modId, fileId: e.fileId, name: e.name, file: fname, source: options.length && options[0].group !== 'desc' ? 'fomod' : 'desc', suggestions, unselected });
+          } catch (err) {
+            results.push({ status: 'API_ERROR', modId: e.modId, name: e.name, error: err.message });
+          }
+        }
+        if (args.json) console.log(JSON.stringify(results, null, 2));
+        else results.forEach(r => {
+          console.log(`== ${r.modId} ${r.name} ${r.file || ''} [${r.source || ''}] → ${r.status}${r.error ? ' ' + r.error : ''}`);
+          (r.suggestions || []).forEach(s => console.log(`  [建议勾选] ${s.option}  ← 命中已装: ${s.matchedInstalled}${s.condition ? ' (dep: ' + s.condition + ')' : ''}`));
+          if (r.unselected && r.unselected.length) console.log(`  [未匹配] ${r.unselected.join(' | ')}`);
+        });
+        break;
+      }
       default:
-        console.log('usage: nexus-autodl.js <login|whoami|inspect modId [substr]|dl manifest.tsv|verify manifest.tsv|installed manifest.tsv|patchscan manifest.tsv> [--go] [--start N] [--limit N] [--wait S] [--json] [--redownload] [--downloads DIR] [--sevenzip PATH] [--installed-dir MO2_MODS_DIR]');
+        console.log('usage: nexus-autodl.js <login|whoami|inspect modId [substr]|dl manifest.tsv|verify manifest.tsv|installed manifest.tsv|patchscan manifest.tsv|patchpicker manifest.tsv|rebuild|monitor> [--go] [--start N] [--limit N] [--wait S] [--json] [--redownload] [--downloads DIR] [--sevenzip PATH] [--installed-dir MO2_MODS_DIR] [--api-key-file PATH] [--series-file PATH] [--modlist PATH] [--only-enabled] [--out PATH] [--sort small-first] [--reconnect] [--work-dir PATH] [--interval SEC] [--stall-after MIN] [--timeout MIN]');
     }
   } finally {
     if (page) await page.close().catch(() => {});

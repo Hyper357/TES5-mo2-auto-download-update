@@ -190,6 +190,53 @@ node scripts/nexus-autodl.js patchscan .\manifests\main-mods.tsv --installed-dir
 
 局限（如实）：Nexus 开放 API 无 search/requirements/translations 端点，patchscan 只能扫描**同一 modId 文件卡**中的候选；跨 mod 的独立翻译页、补丁中心、FOMOD 互斥方案仍需人工页面核验后标记 `MANUAL` / `HOLD_*`。patchscan 的用途是把“逐页人工核对”变成“脚本出候选表 + 人工勾选”，不是替代人工决定。
 
+跨 mod 的汉化/补丁可用 `--series-file` 扩展：本地维护一张系列关系表（主 modId 与独立汉化/补丁 modId 的对应），patchscan 会一并扫描。格式：
+
+```text
+# 主modId<TAB>附属modId<TAB>PATCH|TRANSLATION<TAB>备注
+122487	172586	TRANSLATION	FDE Uthgerd 的 CHS 翻译（独立mod）
+```
+
+### 6. 补丁中心选项匹配（patchpicker）
+
+```powershell
+node scripts/nexus-autodl.js patchpicker .\manifests\patch-hubs.tsv --modlist <modlist.txt> [--api-key-file <key>] [--work-dir <临时目录>]
+```
+
+读取 Patch Hub 的 FOMOD 真实选项（本地已有归档时解包解析 `fomod/ModuleConfig.xml`），与本地 modlist 已装模组名匹配，输出“建议勾选/未匹配”清单供人工确认；本地无归档时回退用文件描述中的列表项匹配。匹配基于名称关键词，**仅供人工确认，不自动选择**。
+
+### 7. 归档库重建（rebuild）
+
+```powershell
+node scripts/nexus-autodl.js rebuild --installed-dir <MO2 mods> [--downloads DIR] [--modlist PATH] [--only-enabled] [--out manifest.tsv] [--json]
+```
+
+扫描已装 mod 的 `meta.ini`，对照 downloads 现有归档，输出“已装但缺归档”的清单（TSV，可直接喂给 `dl`）。**只出清单不自动下载**——因为用户可能主动清理过 downloads 缓存，且全量重建可能数百 GB。无 fileID 的条目标记为 `MANUAL`（需人工从 Nexus 页面补 fileID）。
+
+### 8. 下载队列监控（monitor）
+
+```powershell
+node scripts/nexus-autodl.js monitor [--downloads DIR] [--interval SEC] [--stall-after MIN] [--timeout MIN] [--json]
+```
+
+轮询 downloads 目录，报告 `.unfinished` 的 `GROWING` / `STALLED`（超过 `--stall-after` 分钟无增长）/ `COMPLETED` 状态。用于判断“下载慢 vs 卡死”，不要用网页弹窗判断。
+
+### 9. 下载顺序（dl --sort small-first）
+
+```powershell
+node scripts/nexus-autodl.js dl .\manifests\batch.tsv --go --sort small-first --api-key-file <key>
+```
+
+下载前用 Nexus API 预取各目标文件大小，小文件（SKSE/框架，几百 KB）先提交，大型材质包（GB 级）后提交，避免队列被大文件堵住。需要 API key。
+
+### 10. 浏览器会话自动恢复（dl --reconnect）
+
+```powershell
+node scripts/nexus-autodl.js dl .\manifests\batch.tsv --go --reconnect
+```
+
+CDP（127.0.0.1:9222）断连时，自动用独立 Edge 配置（`~/.claude/nexus-autodl-edge`，登录态持久化）重启浏览器会话并等待端口就绪，然后继续。
+
 ## MO2 队列辅助脚本
 
 ```powershell
