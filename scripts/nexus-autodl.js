@@ -548,16 +548,32 @@ async function extractNxmFromNmmPage(page, modId, fileId) {
   return null;
 }
 
-async function downloadOne(page, e, args, installedMap) {
+async function downloadOne(page, e, args, installedMap, apiKeyOverride) {
   if (e.action && e.action !== 'DOWNLOAD') {
     return `SKIP_ACTION ${e.action} (${e.note || 'manual review'})`;
   }
-  // 变体防护：若本地已安装同一 modId 的不同 fileId（=不同变体），拒绝下载。
-  // 典型事故：mod 有两个 MAIN（如 3BA 与 BHUNP），按上传时间排序取“最新”会拿错变体。
+  // 变体防护：若本地已安装同一 modId 的不同 fileId，需区分两种情况：
+  //   a) 同文件升级（旧 fileID 在 Nexus 已 ARCHIVED/OLD_VERSION）→ 放行，这是更新目标；
+  //   b) 真变体（旧 fileID 仍是当前 MAIN/OPTIONAL，与新目标并行存在）→ 拦截。
+  // 判断依据：API 查旧 fileID 的 category。仅当本地旧 fileID 仍是活跃 MAIN/OPTIONAL 时拦截。
   if (installedMap && e.modId && e.fileId) {
     const installed = installedMap.get(String(e.modId));
     if (installed && installed.size && !installed.has(String(e.fileId))) {
-      return `VARIANT-MISMATCH targetFileId=${e.fileId} installedFileIds=[${[...installed].join(',')}] — 目标与本地已装变体不一致，禁止下载（如需更换变体请先处理本地安装）`;
+      const oldFid = [...installed][0];
+      let oldActive = false;
+      if (apiKeyOverride || API_KEY) {
+        try {
+          const key = apiKeyOverride || API_KEY;
+          const files = await nexusApi(`${e.modId}/files.json`, key);
+          const oldFile = (files.files || []).find(f => String(f.file_id) === String(oldFid));
+          // 旧文件仍是活跃 MAIN(1)/OPTIONAL(3) 视为“活跃变体”→ 拦截；
+          // OLD_VERSION(4)/旧文件(6)/ARCHIVED(7) 或已不存在 → 同文件升级 → 放行。
+          oldActive = !!oldFile && [1, 3].includes(oldFile.category_id);
+        } catch { /* API 失败时保守放行（页面核对兜底） */ }
+      }
+      if (oldActive) {
+        return `VARIANT-MISMATCH targetFileId=${e.fileId} installedFileIds=[${[...installed].join(',')}] — 本地旧文件仍是活跃 MAIN/OPTIONAL，目标与本地变体不一致，禁止下载（如需更换变体请先处理本地安装）`;
+      }
     }
   }
   const existing = findExistingArchive(e, args.downloads);
@@ -835,7 +851,8 @@ async function main() {
         while (i < entries.length && done < (args.limit === Infinity ? entries.length : args.limit)) {
           const e = entries[i];
           try {
-            const r = await downloadOne(page, e, args, installedMap);
+            const keyFile = args.apiKeyFile ? fs.readFileSync(args.apiKeyFile, 'utf8').trim() : '';
+            const r = await downloadOne(page, e, args, installedMap, keyFile);
             const result = { index: i, modId: e.modId, fileId: e.fileId, name: e.name, action: e.action, result: r };
             results.push(result);
             if (!args.json) console.log(`[${i}] ${r} | ${e.modId} ${e.name} (${e.note || ''})`);
