@@ -172,6 +172,26 @@ node scripts/nexus-autodl.js installed .\manifests\batch.tsv --installed-dir <MO
 
 `dl` 传 `--installed-dir` 时对 `VARIANT_MISMATCH` 行直接拒绝下载（返回 `VARIANT-MISMATCH`），防止再发生“清单填了 A 变体、实际下成 B 变体”的错误。判断依据是 MO2 `meta.ini` 的 `1\fileid=`（权威），不是经常过时的顶层 `version=`。
 
+### 4.5 全量更新检查（check-outdated）
+
+MO2 自带的 Check for Updates 缓存可能过期（`lastNexusQuery` 可能数月前），且很多 meta.ini 没有 `1\fileid`。用 `check-outdated` 直接以 Nexus API 为准做全量扫描：
+
+```powershell
+node scripts/check-outdated.js <MO2 mods 目录> <apiKeyFile> [--json] [--out manifest.tsv]
+```
+
+判断逻辑：本地已装 fileId 在 Nexus 上**仍是活跃 MAIN(1)/OPTIONAL(3)** → 已最新；已被移到 OLD_VERSION/ARCHIVED 或文件消失 → 过时，列出最新 MAIN 作为目标。
+
+fileId 解析三通道（顶层 `version=` 字段经常过时，不可用于判断）：
+
+1. meta.ini 的 `1\fileid=` 配对（MO2 记录实际安装的 Nexus file ID）
+2. `installationFile` 与 API `file_name` 精确匹配（旧式下载文件名）
+3. 名称子串匹配（新式文件名，如 `AI Overhaul AE 1.9.5 21654 1.9.5 2026-...-xxx.zip`）
+
+输出 `OUTDATED` 行（含目标 fileID/版本）；`--out` 可生成 dl 直接可读的候选清单。**注意：输出是候选，仍需人工甄别变体/版本噪音**（如 3.0 vs 3.0.0 格式差异、同 modId 多个补丁文件、作者降级等情况），甄别后交给 `dl`。
+
+该脚本串行限速（约 0.15s/mod），2000 个 mod 约 8 分钟；`fail`（403/超时）与 `unresolved`（三通道都解析不出 fileId）会单独报告，需补查。
+
 ### 5. 补丁/汉化候选扫描（patchscan）
 
 ```powershell
