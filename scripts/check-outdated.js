@@ -165,12 +165,19 @@ process.stderr.write(`rows=${rows.length}\n`);
       const mine = files.files.find(f => String(f.file_id) === String(targetFid));
       if (!mine) { outdated.push({ ...r, fileId: targetFid, how, reason: 'FILE_GONE' }); continue; }
       if (mine.category_id === 1 || mine.category_id === 3) continue; // 仍活跃 MAIN/OPTIONAL
+
+      // 如果当前安装的只是补丁类（UPDATE/PATCH），且没有明确的同名升级包，不跨类别升级主文件
+      if (mine.category_id !== 1 && mine.category_id !== 3 && mine.category_name && mine.category_name.toLowerCase().includes('patch')) {
+        continue;
+      }
+
       // 过时：查找最新同分类/同变体目标
       let latestTarget = null;
       const sameCat = files.files.filter(f => f.category_id === mine.category_id).sort((a, b) => a.file_id - b.file_id);
       if (sameCat.length && sameCat[sameCat.length - 1].file_id !== mine.file_id) {
         latestTarget = sameCat[sameCat.length - 1];
-      } else {
+      } else if (mine.category_id === 1 || mine.category_id === 3 || mine.category_id === 4) {
+        // 仅当原本是 MAIN/OPTIONAL/OLD_VERSION 时才允许回退寻找最新 MAIN
         const mains = files.files.filter(f => f.category_id === 1).sort((a, b) => a.file_id - b.file_id);
         if (mains.length) latestTarget = mains[mains.length - 1];
       }
