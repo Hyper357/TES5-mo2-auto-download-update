@@ -896,23 +896,28 @@ async function main() {
         let entries = parseManifest(manifestPath);
         // --sort small-first：先用 API 批量预取各目标的文件大小（KB），小文件先提交。
         // SKSE/框架类多为几百 KB，大型材质包可达 GB 级；小文件先下可避免队列被大文件堵住。
-        if (args.sort === 'small-first') {
-          if (!args.apiKeyFile && !API_KEY) {
-            console.log('--sort small-first 需要 Nexus API key（--api-key-file 或 tools/.nexus_api_key），跳过排序');
-          } else {
-            const key = args.apiKeyFile ? fs.readFileSync(args.apiKeyFile, 'utf8').trim() : API_KEY;
-            const withSize = [];
-            for (const e of entries) {
-              if (!e.modId || !e.fileId || (e.action && e.action !== 'DOWNLOAD')) { withSize.push({ e, sizeKb: Infinity }); continue; }
-              try {
-                const files = await nexusApi(`${e.modId}/files.json`, key);
-                const f = (files.files || []).find(x => String(x.file_id) === String(e.fileId));
-                withSize.push({ e, sizeKb: f ? f.size_kb : Infinity });
-              } catch { withSize.push({ e, sizeKb: Infinity }); }
+        // 默认启用小文件优先排序：有 API key 或本地 API 缓存时均可生效，彻底避免大文件把整个下载链卡死
+        const shouldSortSmall = args.sort === 'small-first' || !args.sort;
+        if (shouldSortSmall) {
+          const key = args.apiKeyFile && fs.existsSync(args.apiKeyFile)
+            ? fs.readFileSync(args.apiKeyFile, 'utf8').trim()
+            : API_KEY;
+          const withSize = [];
+          for (const e of entries) {
+            if (!e.modId || !e.fileId || (e.action && e.action !== 'DOWNLOAD')) {
+              withSize.push({ e, sizeKb: Infinity });
+              continue;
             }
-            entries = withSize.sort((a, b) => a.sizeKb - b.sizeKb).map(x => x.e);
-            if (!args.json) console.log(`--sort small-first: ${entries.length} 项已按大小排序（API 预取）`);
+            try {
+              const files = await nexusApi(`${e.modId}/files.json`, key);
+              const f = (files.files || []).find(x => String(x.file_id) === String(e.fileId));
+              withSize.push({ e, sizeKb: f ? (f.size_kb || f.size_in_bytes / 1024 || 0) : Infinity });
+            } catch {
+              withSize.push({ e, sizeKb: Infinity });
+            }
           }
+          entries = withSize.sort((a, b) => a.sizeKb - b.sizeKb).map(x => x.e);
+          if (!args.json && args.sort === 'small-first') console.log(`--sort small-first: ${entries.length} 项已按文件体积升序排列（先小后大，防大包卡链）`);
         }
         const installedMap = loadInstalledFileIds(args.installedDir, args.downloads);
         const results = [];
