@@ -548,6 +548,59 @@ async function extractNxmFromNmmPage(page, modId, fileId) {
   return null;
 }
 
+// Nexus 2026 新版页面：下载按钮在 shadow DOM（<mod-download-modal>）内，
+// "Mod manager download" 点击后前端直接触发 nxm:// 协议（不在 DOM 放链接）。
+// 策略：开启请求拦截 → 深度点击 shadow DOM 里的按钮 → 从网络层捕获 nxm:// 请求
+// （abort 阻止浏览器弹外部协议框）→ 把完整 nxm 字符串交给 nxmhandler。
+async function extractNxmViaShadowClick(page, modId, fileId) {
+  const captured = { url: null };
+  const handler = req => {
+    if (req.url().startsWith('nxm://') && !captured.url) {
+      captured.url = req.url();
+    }
+    try { req.abort('failed'); } catch { /* 已处理 */ }
+  };
+  await page.setRequestInterception(true).catch(() => {});
+  page.on('request', handler);
+  try {
+    await page.goto(`https://www.nexusmods.com/${DOMAIN}/mods/${modId}?tab=files&file_id=${fileId}`, {
+      waitUntil: 'domcontentloaded', timeout: 90000,
+    });
+    await sleep(2500);
+    await dismissConsent(page);
+    // 深度点击 shadow DOM 内的 "Mod manager download" 按钮（可能有多个文件卡，匹配 file_id 优先）
+    const clickRes = await page.evaluate((fid) => {
+      let clicked = null;
+      const walk = (root, depth) => {
+        if (depth > 12 || clicked) return;
+        for (const el of root.querySelectorAll('*')) {
+          if (el.shadowRoot) walk(el.shadowRoot, depth + 1);
+          if (clicked) return;
+          if (el.tagName === 'BUTTON' && /^mod manager download$/i.test((el.innerText || '').replace(/\s+/g, ' ').trim())) {
+            el.click();
+            clicked = 'ok';
+            return;
+          }
+        }
+      };
+      walk(document, 0);
+      return clicked;
+    }, fileId);
+    if (!clickRes) return null;
+    // 等待 nxm:// 请求被捕获（最多 15 秒）
+    for (let i = 0; i < 30; i++) {
+      if (captured.url) return captured.url;
+      await sleep(500);
+    }
+    return null;
+  } catch (e) {
+    return null;
+  } finally {
+    try { page.off('request', handler); } catch { /* */ }
+    try { await page.setRequestInterception(false).catch(() => {}); } catch { /* */ }
+  }
+}
+
 async function downloadOne(page, e, args, installedMap, apiKeyOverride) {
   if (e.action && e.action !== 'DOWNLOAD') {
     return `SKIP_ACTION ${e.action} (${e.note || 'manual review'})`;
@@ -597,9 +650,12 @@ async function downloadOne(page, e, args, installedMap, apiKeyOverride) {
   if (!args.go) {
     return `PREVIEW would-click fileId=${card.fileId} ver=${card.version} cat=${card.category} nxm=${card.hasNxm}`;
   }
-  // 真实触发：新版 Nexus 通过精确 nmm=1 文件页生成短时 nxm://。
-  // 旧版页面仍保留直接/模态框提取作为回退。
-  let nxm = await extractNxmFromNmmPage(page, e.modId, card.fileId);
+  // 真实触发（三级回退）：
+  // 1) Nexus 2026 shadow DOM "Mod manager download" + 请求拦截捕获 nxm://
+  // 2) 旧式 nmm=1 文件页的 download-url 属性
+  // 3) 旧式模态框 slow download 按钮
+  let nxm = await extractNxmViaShadowClick(page, e.modId, card.fileId);
+  if (!nxm) nxm = await extractNxmFromNmmPage(page, e.modId, card.fileId);
   if (!nxm) nxm = card.nxmHref;
   if (!nxm) nxm = await extractNxm(page, card.fileId);
   if (!nxm) return 'NO-NXM-EXTRACTED (open page — may need manual click)';

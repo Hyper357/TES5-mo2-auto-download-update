@@ -45,6 +45,12 @@
 npm install
 ```
 
+## 性能与架构特性 (v1.1)
+
+- **高性能并发扫描**：`check-outdated.js` 支持 HTTP Keep-Alive 连接池复用与多路并发队列，2000+ Mod 全量审计耗时由原本 30 分钟压缩至 1 分钟左右。
+- **本地 API 磁盘缓存**：自动缓存 Nexus Mod 文件信息至 `.api_cache/`，避免频繁触发 Cloudflare 403 频控与 API Rate Limit，支持秒级断点恢复。
+- **Nexus 2026 Shadow DOM 适配**：`nexus-autodl.js` 支持穿透 Shadow DOM (`<mod-download-modal>`) 并结合请求拦截捕获 `nxm://`，原生兼容最新版 Nexus 页面交互。
+
 ## 配置
 
 不要把示例路径当成固定路径。通过环境变量指向实际 MO2 实例：

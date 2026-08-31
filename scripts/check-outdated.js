@@ -19,6 +19,10 @@ const fs = require('fs');
 const path = require('path');
 const https = require('https');
 
+const agent = new https.Agent({ keepAlive: true, maxSockets: 20 });
+const CACHE_DIR = path.join(__dirname, '.api_cache');
+if (!fs.existsSync(CACHE_DIR)) fs.mkdirSync(CACHE_DIR, { recursive: true });
+
 const modsDir = process.argv[2];
 const keyArg = process.argv[3];
 const asJson = process.argv.includes('--json');
@@ -26,18 +30,33 @@ const outFlag = process.argv.indexOf('--out');
 const outFile = outFlag > 0 ? process.argv[outFlag + 1] : null;
 
 function apiGet(modId, key) {
+  const cacheFile = path.join(CACHE_DIR, `${modId}.json`);
+  if (fs.existsSync(cacheFile)) {
+    try {
+      const stats = fs.statSync(cacheFile);
+      if (Date.now() - stats.mtimeMs < 24 * 3600 * 1000) {
+        return Promise.resolve(JSON.parse(fs.readFileSync(cacheFile, 'utf8')));
+      }
+    } catch (_) {}
+  }
+
   return new Promise((resolve, reject) => {
     const req = https.get({
       hostname: 'api.nexusmods.com',
       path: `/v1/games/skyrimspecialedition/mods/${modId}/files.json`,
-      headers: { apikey: key, Accept: 'application/json' },
-      timeout: 20000,
+      headers: { apikey: key, Accept: 'application/json', 'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64)' },
+      timeout: 15000,
+      agent
     }, res => {
       let data = '';
       res.on('data', c => data += c);
       res.on('end', () => {
         if (res.statusCode !== 200) { reject(new Error('HTTP ' + res.statusCode)); return; }
-        try { resolve(JSON.parse(data)); } catch { reject(new Error('bad json')); }
+        try {
+          const parsed = JSON.parse(data);
+          try { fs.writeFileSync(cacheFile, data, 'utf8'); } catch (_) {}
+          resolve(parsed);
+        } catch { reject(new Error('bad json')); }
       });
     });
     req.on('timeout', () => req.destroy(new Error('timeout')));
@@ -92,45 +111,57 @@ process.stderr.write(`rows=${rows.length}\n`);
 (async () => {
   const outdated = [];
   let ok = 0, fail = 0, unresolved = 0;
-  for (let i = 0; i < rows.length; i++) {
-    const r = rows[i];
-    let files;
-    try {
-      files = await apiGet(r.modId, key);
-      if (!files || !Array.isArray(files.files)) { fail++; continue; }
-    } catch (e) { fail++; process.stderr.write(`[${i}] ${r.modId} ERR ${e.message}\n`); continue; }
-    ok++;
-    // 解析目标 fileId：三通道
-    let targetFid = r.fileId;
-    let how = '1\\fileid';
-    if (!targetFid && r.instFile) {
-      const byName = files.files.find(f => f.file_name === r.instFile);
-      if (byName) { targetFid = String(byName.file_id); how = 'file_name'; }
-    }
-    if (!targetFid && r.nameSub) {
-      const sub = r.nameSub.toLowerCase();
-      const bySub = files.files.find(f => {
-        const n = (f.name || '').toLowerCase();
-        return n && sub && (n.includes(sub) || sub.includes(n));
+  let cursor = 0;
+  const CONCURRENCY = 8;
+
+  async function worker() {
+    while (true) {
+      const i = cursor++;
+      if (i >= rows.length) break;
+      const r = rows[i];
+      let files;
+      try {
+        files = await apiGet(r.modId, key);
+        if (!files || !Array.isArray(files.files)) { fail++; continue; }
+      } catch (e) { fail++; continue; }
+      ok++;
+      // 解析目标 fileId：三通道
+      let targetFid = r.fileId;
+      let how = '1\\fileid';
+      if (!targetFid && r.instFile) {
+        const byName = files.files.find(f => f.file_name === r.instFile);
+        if (byName) { targetFid = String(byName.file_id); how = 'file_name'; }
+      }
+      if (!targetFid && r.nameSub) {
+        const sub = r.nameSub.toLowerCase();
+        const bySub = files.files.find(f => {
+          const n = (f.name || '').toLowerCase();
+          return n && sub && (n.includes(sub) || sub.includes(n));
+        });
+        if (bySub) { targetFid = String(bySub.file_id); how = 'name_sub'; }
+      }
+      if (!targetFid) { unresolved++; continue; }
+      const mine = files.files.find(f => String(f.file_id) === String(targetFid));
+      if (!mine) { outdated.push({ ...r, fileId: targetFid, how, reason: 'FILE_GONE' }); continue; }
+      if (mine.category_id === 1 || mine.category_id === 3) continue; // 仍活跃 MAIN/OPTIONAL
+      // 过时：列出最新 MAIN 作为目标
+      let latestMain = null;
+      const mains = files.files.filter(f => f.category_id === 1).sort((a, b) => a.file_id - b.file_id);
+      if (mains.length) latestMain = mains[mains.length - 1];
+      outdated.push({
+        ...r, fileId: targetFid, how,
+        oldCategory: mine.category_name || `id${mine.category_id}`,
+        reason: 'OUTDATED', latestFileId: latestMain ? latestMain.file_id : '', latestVersion: latestMain ? latestMain.version : '',
       });
-      if (bySub) { targetFid = String(bySub.file_id); how = 'name_sub'; }
+      if ((cursor) % 200 === 0 || cursor === rows.length) {
+        process.stderr.write(`progress ${Math.min(cursor, rows.length)}/${rows.length}\n`);
+      }
     }
-    if (!targetFid) { unresolved++; continue; }
-    const mine = files.files.find(f => String(f.file_id) === String(targetFid));
-    if (!mine) { outdated.push({ ...r, fileId: targetFid, how, reason: 'FILE_GONE' }); continue; }
-    if (mine.category_id === 1 || mine.category_id === 3) continue; // 仍活跃 MAIN/OPTIONAL
-    // 过时：列出最新 MAIN 作为目标
-    let latestMain = null;
-    const mains = files.files.filter(f => f.category_id === 1).sort((a, b) => a.file_id - b.file_id);
-    if (mains.length) latestMain = mains[mains.length - 1];
-    outdated.push({
-      ...r, fileId: targetFid, how,
-      oldCategory: mine.category_name || `id${mine.category_id}`,
-      reason: 'OUTDATED', latestFileId: latestMain ? latestMain.file_id : '', latestVersion: latestMain ? latestMain.version : '',
-    });
-    if ((i + 1) % 200 === 0) process.stderr.write(`progress ${i + 1}/${rows.length}\n`);
-    await new Promise(r => setTimeout(r, 150));
   }
+
+  const workers = [];
+  for (let c = 0; c < CONCURRENCY; c++) workers.push(worker());
+  await Promise.all(workers);
   process.stderr.write(`done ok=${ok} fail=${fail} unresolved=${unresolved} outdated=${outdated.length}\n`);
   if (outFile) {
     const lines = ['# check-outdated 候选清单：先人工甄别变体/版本噪音，再 node nexus-autodl.js dl <此文件> --go --sort small-first'];
