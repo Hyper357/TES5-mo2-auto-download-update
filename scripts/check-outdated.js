@@ -19,6 +19,27 @@ const fs = require('fs');
 const path = require('path');
 const https = require('https');
 
+function normalizeVer(v) {
+  if (!v) return '';
+  return String(v).trim().toLowerCase().replace(/^v/, '').replace(/\.0+$/g, '').replace(/\.0+(?=\.)/g, '.');
+}
+
+function compareVersions(v1, v2) {
+  const n1 = normalizeVer(v1);
+  const n2 = normalizeVer(v2);
+  if (n1 === n2) return 0;
+  const p1 = n1.split(/[.-]/).map(x => parseInt(x, 10) || 0);
+  const p2 = n2.split(/[.-]/).map(x => parseInt(x, 10) || 0);
+  const len = Math.max(p1.length, p2.length);
+  for (let i = 0; i < len; i++) {
+    const a = p1[i] || 0;
+    const b = p2[i] || 0;
+    if (a < b) return -1;
+    if (a > b) return 1;
+  }
+  return 0;
+}
+
 const agent = new https.Agent({ keepAlive: true, maxSockets: 20 });
 const CACHE_DIR = path.join(__dirname, '.api_cache');
 if (!fs.existsSync(CACHE_DIR)) fs.mkdirSync(CACHE_DIR, { recursive: true });
@@ -144,14 +165,37 @@ process.stderr.write(`rows=${rows.length}\n`);
       const mine = files.files.find(f => String(f.file_id) === String(targetFid));
       if (!mine) { outdated.push({ ...r, fileId: targetFid, how, reason: 'FILE_GONE' }); continue; }
       if (mine.category_id === 1 || mine.category_id === 3) continue; // 仍活跃 MAIN/OPTIONAL
-      // 过时：列出最新 MAIN 作为目标
-      let latestMain = null;
-      const mains = files.files.filter(f => f.category_id === 1).sort((a, b) => a.file_id - b.file_id);
-      if (mains.length) latestMain = mains[mains.length - 1];
+      // 过时：查找最新同分类/同变体目标
+      let latestTarget = null;
+      const sameCat = files.files.filter(f => f.category_id === mine.category_id).sort((a, b) => a.file_id - b.file_id);
+      if (sameCat.length && sameCat[sameCat.length - 1].file_id !== mine.file_id) {
+        latestTarget = sameCat[sameCat.length - 1];
+      } else {
+        const mains = files.files.filter(f => f.category_id === 1).sort((a, b) => a.file_id - b.file_id);
+        if (mains.length) latestTarget = mains[mains.length - 1];
+      }
+      if (!latestTarget) continue;
+
+      // 规则甄别：版本噪音与反向降级判断
+      const cmp = compareVersions(r.installedVersion, latestTarget.version);
+      let action = 'DOWNLOAD';
+      let note = `${mine.category_name || 'OLD'}→v${latestTarget.version}`;
+
+      if (cmp === 0) {
+        action = 'SKIP_NOISE';
+        note = `版本一致 (${r.installedVersion} == ${latestTarget.version})`;
+      } else if (cmp > 0) {
+        action = 'SKIP_DOWNGRADE';
+        note = `本地版本较新 (${r.installedVersion} > ${latestTarget.version})`;
+      }
+
       outdated.push({
         ...r, fileId: targetFid, how,
         oldCategory: mine.category_name || `id${mine.category_id}`,
-        reason: 'OUTDATED', latestFileId: latestMain ? latestMain.file_id : '', latestVersion: latestMain ? latestMain.version : '',
+        reason: action === 'DOWNLOAD' ? 'OUTDATED' : action,
+        action, note,
+        latestFileId: latestTarget.file_id,
+        latestVersion: latestTarget.version,
       });
       if ((cursor) % 200 === 0 || cursor === rows.length) {
         process.stderr.write(`progress ${Math.min(cursor, rows.length)}/${rows.length}\n`);
@@ -167,7 +211,7 @@ process.stderr.write(`rows=${rows.length}\n`);
     const lines = ['# check-outdated 候选清单：先人工甄别变体/版本噪音，再 node nexus-autodl.js dl <此文件> --go --sort small-first'];
     for (const o of outdated) {
       if (!o.latestFileId) continue;
-      lines.push(`${o.modId}\t${o.name}\t${o.latestVersion}\t${o.oldCategory}→v${o.latestVersion} [${o.how}]\t${o.latestFileId}\tDOWNLOAD`);
+      lines.push(`${o.modId}\t${o.name}\t${o.latestVersion}\t${o.note || o.oldCategory + '→v' + o.latestVersion} [${o.how}]\t${o.latestFileId}\t${o.action || 'DOWNLOAD'}`);
     }
     fs.writeFileSync(outFile, lines.join('\n') + '\n', 'utf8');
   }
