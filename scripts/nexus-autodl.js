@@ -601,6 +601,20 @@ async function extractNxmViaShadowClick(page, modId, fileId) {
   }
 }
 
+
+async function waitForActiveDownloads(downloadsDir, maxWaitSec = 60) {
+  if (!downloadsDir || !fs.existsSync(downloadsDir)) return;
+  const start = Date.now();
+  while ((Date.now() - start) < maxWaitSec * 1000) {
+    try {
+      const files = fs.readdirSync(downloadsDir);
+      const unfin = files.filter(f => f.endsWith('.unfinished') || f.endsWith('.crdownload'));
+      if (unfin.length === 0) return;
+    } catch (_) {}
+    await sleep(2000);
+  }
+}
+
 async function downloadOne(page, e, args, installedMap, apiKeyOverride) {
   if (e.action && e.action !== 'DOWNLOAD') {
     return `SKIP_ACTION ${e.action} (${e.note || 'manual review'})`;
@@ -920,6 +934,7 @@ async function main() {
           i++; done++;
           if (i < entries.length && done < (args.limit === Infinity ? entries.length : args.limit)) {
             await sleep((args.wait || 6) * 1000);
+            if (args.downloads) await waitForActiveDownloads(args.downloads, args.maxDownloadWait || 120);
           }
         }
         if (args.json) console.log(JSON.stringify(results, null, 2));
