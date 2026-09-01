@@ -47,6 +47,7 @@ if (!fs.existsSync(CACHE_DIR)) fs.mkdirSync(CACHE_DIR, { recursive: true });
 const modsDir = process.argv[2];
 const keyArg = process.argv[3];
 const asJson = process.argv.includes('--json');
+const forceRefresh = process.argv.includes('--force-refresh') || process.argv.includes('--no-cache');
 const outFlag = process.argv.indexOf('--out');
 const outFile = outFlag > 0 ? process.argv[outFlag + 1] : null;
 
@@ -55,7 +56,7 @@ function apiGet(modId, key) {
   if (fs.existsSync(cacheFile)) {
     try {
       const stats = fs.statSync(cacheFile);
-      if (Date.now() - stats.mtimeMs < 24 * 3600 * 1000) {
+      if (!forceRefresh && (Date.now() - stats.mtimeMs < 24 * 3600 * 1000)) {
         return Promise.resolve(JSON.parse(fs.readFileSync(cacheFile, 'utf8')));
       }
     } catch (_) {}

@@ -45,6 +45,10 @@
 npm install
 ```
 
+## 性能与架构特性 (v1.8)
+
+- **时间戳优先排序与强制刷新支持 ()**：文件列表优先按 `uploaded_time` 倒序严格取最新，同时支持 `--no-cache` / `--force-refresh` 绕过本地磁盘缓存实时拉取 Nexus 刚上传的最新发布包。
+
 ## 性能与架构特性 (v1.7)
 
 - **智能补丁/宿主对齐准则 (Smart Patch & Host Binding Matrix)**：
