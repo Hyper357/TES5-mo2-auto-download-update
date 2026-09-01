@@ -53,6 +53,12 @@ npm install
 
 - **AIO 多包合集 Hub 智能解耦与多目标下载**：针对如 doodlum 的 dTry Plugin Updates (85740) 等将多个独立插件作为平级 MAIN 托管在一个 Mod 页面中的合集 Hub，支持精准识别本地 modlist 启用的各个独立子插件，支持多文件并发独立下载，并新增 `--ignore-variant-mismatch` 放行指令。
 
+## 性能与架构特性 (v2.1)
+
+- **一键自动化流水线 ()**：全自动串联扫描画像、小文件优先调度下载、7-Zip 完整性验收及 FOMOD 安装备忘推导。
+- **模块化工程分层 ()**：拆分 `mo2-reader`、`profile` (画像决策引擎)、`semver`、`fomod-helper`，便于扩展维护与单元测试。
+- **FOMOD 安装备忘清单 (FOMOD Preset Memory)**：自动读取上次安装时在 `FOMOD Plus` 中勾选的具体子选项，并在下载完成后高亮展示，避免重新安装时选错身形或漏勾补丁。
+
 ## 性能与架构特性 (v1.8)
 
 - **时间戳优先排序与强制刷新支持 ()**：文件列表优先按 `uploaded_time` 倒序严格取最新，同时支持 `--no-cache` / `--force-refresh` 绕过本地磁盘缓存实时拉取 Nexus 刚上传的最新发布包。

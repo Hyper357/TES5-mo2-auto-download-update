@@ -1,13 +1,14 @@
 {
   "name": "tes5-mo2-auto-download-update",
-  "version": "2.0.0",
+  "version": "2.1.0",
   "private": true,
   "description": "Safe, file-ID-precise Nexus downloads and verification for Skyrim MO2.",
   "type": "commonjs",
-  "main": "scripts/nexus-autodl.js",
+  "main": "index.js",
   "scripts": {
     "check": "node --check scripts/nexus-autodl.js",
-    "verify": "node scripts/nexus-autodl.js verify"
+    "verify": "node scripts/nexus-autodl.js verify",
+    "pipeline": "node index.js"
   },
   "dependencies": {
     "puppeteer-core": "^25.5.0"
