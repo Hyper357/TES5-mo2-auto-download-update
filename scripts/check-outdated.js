@@ -170,15 +170,30 @@ process.stderr.write(`rows=${rows.length}\n`);
       if (mine.category_id !== 1 && mine.category_id !== 3 && mine.category_name && mine.category_name.toLowerCase().includes('patch')) {
         continue;
       }
+      // 变体特征提取与平台/身形严格隔离（SE/AE vs VR, 3BA/CBBE vs BHUNP/UNP）
+      const mineFullName = ((mine.name || '') + ' ' + (mine.file_name || '') + ' ' + (r.instFile || '')).toLowerCase();
+      const isMineVR = /vr|(vr)/i.test(mineFullName);
+      const isMine3BA = /3ba|3bbb|cbbe/i.test(mineFullName);
+      const isMineBHUNP = /bhunp|unp/i.test(mineFullName);
+
+      function isCompatibleVariant(targetFile) {
+        const tName = ((targetFile.name || '') + ' ' + (targetFile.file_name || '')).toLowerCase();
+        const isTargetVR = /vr|(vr)/i.test(tName);
+        if (!isMineVR && isTargetVR) return false;
+        if (isMineVR && !isTargetVR && /(ae|se)/i.test(tName)) return false;
+        if (isMine3BA && /bhunp/i.test(tName) && !/3ba|cbbe/i.test(tName)) return false;
+        if (isMineBHUNP && /3ba/i.test(tName) && !/bhunp/i.test(tName)) return false;
+        return true;
+      }
 
       // 过时：查找最新同分类/同变体目标
       let latestTarget = null;
-      const sameCat = files.files.filter(f => f.category_id === mine.category_id).sort((a, b) => a.file_id - b.file_id);
+      const sameCat = files.files.filter(f => f.category_id === mine.category_id && isCompatibleVariant(f)).sort((a, b) => a.file_id - b.file_id);
       if (sameCat.length && sameCat[sameCat.length - 1].file_id !== mine.file_id) {
         latestTarget = sameCat[sameCat.length - 1];
       } else if (mine.category_id === 1 || mine.category_id === 3 || mine.category_id === 4) {
         // 仅当原本是 MAIN/OPTIONAL/OLD_VERSION 时才允许回退寻找最新 MAIN
-        const mains = files.files.filter(f => f.category_id === 1).sort((a, b) => a.file_id - b.file_id);
+        const mains = files.files.filter(f => f.category_id === 1 && isCompatibleVariant(f)).sort((a, b) => a.file_id - b.file_id);
         if (mains.length) latestTarget = mains[mains.length - 1];
       }
       if (!latestTarget) continue;

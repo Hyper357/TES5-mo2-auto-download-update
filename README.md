@@ -45,8 +45,9 @@
 npm install
 ```
 
-## 性能与架构特性 (v1.5)
+## 性能与架构特性 (v1.6)
 
+- **平台与身形变体硬核隔离 (Platform & Body Type Strict Isolation)**： `check-outdated.js` 全面引入平台（SE/AE vs VR）与身形（3BA/CBBE vs BHUNP/UNP）指纹对齐机制。当本地为 SE/AE 时严禁匹配 VR 分支，本地为 3BA 时严禁错匹纯 BHUNP 分支，彻底避免错下 VR 动态库或身形破皮安装包。
 - **跨类别误升与补丁/可选文件隔离保护**：`check-outdated.js` 严密限制非 MAIN 类别的回退逻辑，禁止将单体独立 Patch/Update 误升级为主文件（例如 Archery Target、Water in Wells 独立补丁），彻底消除假性更新。
 - **先小后大队列自适应调度 (Small-First Scheduling)**：下载调度层原生集成体积预判机制，默认按安装包体积升序调度下载。小体积核心插件/脚本优先落盘并完成验证，GB 级大包平稳置后，彻底避免单个大文件卡死整个批量下载链。
 - **智能变体与版本噪音自动过滤**：`check-outdated.js` 内置语义版本与噪音过滤引擎，自动识别 `.0` 后缀噪音（`SKIP_NOISE`）与作者反向降级（`SKIP_DOWNGRADE`），并优先沿同分类/同变体分支匹配最新目标。
