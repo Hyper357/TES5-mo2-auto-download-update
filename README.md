@@ -45,7 +45,11 @@
 npm install
 ```
 
-## 性能与架构特性 (v1.6)
+## 性能与架构特性 (v1.7)
+
+- **智能补丁/宿主对齐准则 (Smart Patch & Host Binding Matrix)**：
+  1. **本体与补丁强隔离**：本地安装为本体主包时，禁止因可选补丁区（Optional/Patch）发布了更高版本号而误下第三方兼容包（如 Archery Target Remodel、Water in Wells 等）。
+  2. **第三方宿主强绑定 (Host-Binding)**：本地安装为 `For ModX` 专用补丁时，升级目标必须命中同宿主关键词，严禁错升为其他关联 Mod 的补丁。
 
 - **平台与身形变体硬核隔离 (Platform & Body Type Strict Isolation)**： `check-outdated.js` 全面引入平台（SE/AE vs VR）与身形（3BA/CBBE vs BHUNP/UNP）指纹对齐机制。当本地为 SE/AE 时严禁匹配 VR 分支，本地为 3BA 时严禁错匹纯 BHUNP 分支，彻底避免错下 VR 动态库或身形破皮安装包。
 - **跨类别误升与补丁/可选文件隔离保护**：`check-outdated.js` 严密限制非 MAIN 类别的回退逻辑，禁止将单体独立 Patch/Update 误升级为主文件（例如 Archery Target、Water in Wells 独立补丁），彻底消除假性更新。

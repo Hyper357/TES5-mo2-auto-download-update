@@ -172,17 +172,31 @@ process.stderr.write(`rows=${rows.length}\n`);
       }
       // 变体特征提取与平台/身形严格隔离（SE/AE vs VR, 3BA/CBBE vs BHUNP/UNP）
       const mineFullName = ((mine.name || '') + ' ' + (mine.file_name || '') + ' ' + (r.instFile || '')).toLowerCase();
-      const isMineVR = /vr|(vr)/i.test(mineFullName);
+      const isMineVR = / vr |(vr)/i.test(mineFullName);
       const isMine3BA = /3ba|3bbb|cbbe/i.test(mineFullName);
       const isMineBHUNP = /bhunp|unp/i.test(mineFullName);
+      const isMinePatch = /patch|fix|update|addon|hotfix/i.test(mineFullName) || (mine.category_id !== 1 && mine.category_id !== 4);
 
       function isCompatibleVariant(targetFile) {
         const tName = ((targetFile.name || '') + ' ' + (targetFile.file_name || '')).toLowerCase();
-        const isTargetVR = /vr|(vr)/i.test(tName);
+        const isTargetVR = / vr |(vr)/i.test(tName);
         if (!isMineVR && isTargetVR) return false;
-        if (isMineVR && !isTargetVR && /(ae|se)/i.test(tName)) return false;
+        if (isMineVR && !isTargetVR && / (ae|se) /i.test(tName)) return false;
         if (isMine3BA && /bhunp/i.test(tName) && !/3ba|cbbe/i.test(tName)) return false;
         if (isMineBHUNP && /3ba/i.test(tName) && !/bhunp/i.test(tName)) return false;
+
+        // 补丁准则 1：本地为本体时，严禁升级匹配到独立补丁/第三方兼容包（如 Archery Target Remodel、Water in Wells）
+        const isTargetPatch = /patch|fix|addon|hotfix|compat/i.test(tName) || (targetFile.category_id !== 1 && targetFile.category_id !== 4);
+        if (!isMinePatch && isTargetPatch && targetFile.category_id !== mine.category_id) return false;
+
+        // 补丁准则 2：如果本地装的是特定第三方补丁，目标必须命中同宿主（例如 For ModX Patch 只能升同款 ModX Patch）
+        if (isMinePatch) {
+          const mHost = mineFullName.match(/fors+([a-z0-9_-]+)/i);
+          if (mHost && mHost[1]) {
+            const hostKey = mHost[1].toLowerCase();
+            if (!tName.includes(hostKey)) return false;
+          }
+        }
         return true;
       }
 
