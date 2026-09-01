@@ -11,6 +11,7 @@
 - 自动穿透 Nexus Web Component Shadow DOM (`mod-file-download`) 并触发慢速下载。
 - 自动处理 5 秒人机校验倒计时，无感提取带合法签名（`key` / `expires` / `user_id`）的真实 NXM 协议流。
 - 支持 AE/SE/NG/CC 等版本由清单和 Nexus 文件页共同核对；不按相邻 file ID 猜版本。
+- **强制核验 Mod 介绍页面与更新日志 (Description & Changelog)**：在下载和更新前必须核验 Mod 介绍页、前置需求 (Requirements) 和置顶评论，确保目标文件、多子包补丁、游戏本体版本（AE 1.6.1170）与配套汉化 (CHS) 版本完全精确匹配。
 - 支持 `DOWNLOAD`、`MANUAL`、`HOLD_PATCH`、`HOLD_TRANSLATION` 等动作字段，人工项不会被误触发。
 - 下载前检查 MO2 Downloads 中是否已经存在同一 `modID/fileID` 的完整归档，默认返回 `SKIP_DUPLICATE`。
 - 通过 Python `subprocess([nxmhandler, nxm])` 传递完整 NXM 参数，不使用会拆分 `&` 的 `cmd /c start`。
