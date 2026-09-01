@@ -240,6 +240,26 @@ process.stderr.write(`rows=${rows.length}\n`);
     }
   }
 
+  
+  // 智能汉化配对与依赖闭合推导 (Smart CHS Linking)
+  const chsItems = outdated.filter(o => /chs|chinese|汉化|中文/i.test(o.name || ''));
+  const coreItems = outdated.filter(o => !/chs|chinese|汉化|中文/i.test(o.name || ''));
+  for (const c of coreItems) {
+    if (c.action !== 'DOWNLOAD') continue;
+    const cName = (c.name || '').toLowerCase().replace(/[^a-z0-9]/g, '');
+    const matchedChs = rows.find(r => {
+      const rName = (r.name || '').toLowerCase();
+      return /chs|chinese|汉化|中文/i.test(rName) && rName.replace(/[^a-z0-9]/g, '').includes(cName.slice(0, 8));
+    });
+    if (matchedChs) {
+      const chsOutdated = chsItems.find(x => x.modId === matchedChs.modId);
+      if (!chsOutdated || compareVersions(chsOutdated.latestVersion, c.latestVersion) < 0) {
+        c.action = 'HOLD_NO_CHS';
+        c.note = (c.note || '') + ' [挂起: 汉化未跟进]';
+      }
+    }
+  }
+
   const workers = [];
   for (let c = 0; c < CONCURRENCY; c++) workers.push(worker());
   await Promise.all(workers);

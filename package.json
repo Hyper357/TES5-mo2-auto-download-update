@@ -1,6 +1,6 @@
 {
   "name": "tes5-mo2-auto-download-update",
-  "version": "1.8.0",
+  "version": "1.9.0",
   "private": true,
   "description": "Safe, file-ID-precise Nexus downloads and verification for Skyrim MO2.",
   "type": "commonjs",
