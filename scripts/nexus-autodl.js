@@ -623,7 +623,7 @@ async function downloadOne(page, e, args, installedMap, apiKeyOverride) {
   //   a) 同文件升级（旧 fileID 在 Nexus 已 ARCHIVED/OLD_VERSION）→ 放行，这是更新目标；
   //   b) 真变体（旧 fileID 仍是当前 MAIN/OPTIONAL，与新目标并行存在）→ 拦截。
   // 判断依据：API 查旧 fileID 的 category。仅当本地旧 fileID 仍是活跃 MAIN/OPTIONAL 时拦截。
-  if (installedMap && e.modId && e.fileId) {
+  if (installedMap && e.modId && e.fileId && !args.ignoreVariantMismatch) {
     const installed = installedMap.get(String(e.modId));
     if (installed && installed.size && !installed.has(String(e.fileId))) {
       const oldFid = [...installed][0];

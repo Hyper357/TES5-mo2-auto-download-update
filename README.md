@@ -49,6 +49,10 @@ npm install
 
 - **智能汉化依赖闭合与挂起保护 (Smart CHS Linking & Hold)**：自动建立本体与汉化包（CHS）的关联。当本体发布重大新版但汉化作者尚未更新时，动作列自动标记为 `HOLD_NO_CHS`，防止玩家更新本体后出现大修文本回退为英文或 MCM 丢失的问题。
 
+## 性能与架构特性 (v2.0)
+
+- **AIO 多包合集 Hub 智能解耦与多目标下载**：针对如 doodlum 的 dTry Plugin Updates (85740) 等将多个独立插件作为平级 MAIN 托管在一个 Mod 页面中的合集 Hub，支持精准识别本地 modlist 启用的各个独立子插件，支持多文件并发独立下载，并新增 `--ignore-variant-mismatch` 放行指令。
+
 ## 性能与架构特性 (v1.8)
 
 - **时间戳优先排序与强制刷新支持 ()**：文件列表优先按 `uploaded_time` 倒序严格取最新，同时支持 `--no-cache` / `--force-refresh` 绕过本地磁盘缓存实时拉取 Nexus 刚上传的最新发布包。
