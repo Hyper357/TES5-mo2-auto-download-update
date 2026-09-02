@@ -5,3 +5,9 @@ Windows Registry Editor Version 5.00
 
 [HKEY_CURRENT_USER\Software\Policies\Microsoft\Edge\URLAllowlist]
 "1"="nxm://*"
+
+[HKEY_CURRENT_USER\Software\Policies\Google\Chrome]
+"AutoLaunchProtocolsFromOrigins"="[{\"allowed_origins\":[\"https://www.nexusmods.com\"],\"protocol\":\"nxm\"}]"
+
+[HKEY_CURRENT_USER\Software\Policies\Google\Chrome\URLAllowList]
+"1"="nxm://*"
