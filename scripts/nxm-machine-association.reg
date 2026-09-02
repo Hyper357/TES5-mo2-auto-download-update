@@ -1,0 +1,12 @@
+Windows Registry Editor Version 5.00
+
+; 导入时需要管理员权限；路径按本机 MO2 实例填写。
+[HKEY_LOCAL_MACHINE\SOFTWARE\Classes\nxm]
+@="URL:NXM Protocol"
+"URL Protocol"=""
+
+[HKEY_LOCAL_MACHINE\SOFTWARE\Classes\nxm\DefaultIcon]
+@="E:\\SkyrimAE\\mo2\\nxmhandler.exe,0"
+
+[HKEY_LOCAL_MACHINE\SOFTWARE\Classes\nxm\shell\open\command]
+@="\"E:\\SkyrimAE\\mo2\\nxmhandler.exe\" \"%1\""
