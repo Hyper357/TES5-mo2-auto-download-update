@@ -94,7 +94,12 @@ $env:MO2_7Z = 'C:\Program Files\7-Zip\7z.exe'
 
 ## 启动浏览器会话
 
-使用独立浏览器配置，避免污染日常浏览器。登录一次 Nexus 后保持窗口打开：
+使用项目提供的启动脚本打开独立浏览器配置，避免污染日常浏览器。它检查实际的 CDP 端口，不会因为普通 Edge 已经打开而误判。登录一次 Nexus 后保持窗口打开：
+
+    scripts\start-cdp-edge.cmd
+
+如需自定义 Edge 路径或独立配置目录，可先设置 `MO2_EDGE` 和 `MO2_EDGE_USERDATA`。
+也可以手动使用下面的等价命令：
 
 ```powershell
 & 'C:\Program Files (x86)\Microsoft\Edge\Application\msedge.exe' `
