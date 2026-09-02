@@ -122,6 +122,8 @@ $env:MO2_7Z = 'C:\Program Files\7-Zip\7z.exe'
 
 该入口只负责提交下载，不安装、启用或修改模组排序。
 
+如果需要修复 Edge 的外部协议交接，可导入 `scripts\edge-nxm-policy.reg`，然后完全退出并重启 Edge。该文件只允许 Nexus 的 `nxm` 协议调用，并不放行其他协议。
+
 检查登录态：
 
 ```powershell
