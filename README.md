@@ -112,6 +112,16 @@ $env:MO2_7Z = 'C:\Program Files\7-Zip\7z.exe'
 
 如果使用 Chrome，把可执行文件路径替换为 Chrome，并确保端口仍为 9222。不要在报告中复制完整签名 NXM。
 
+## 浏览器 NXM 失效时的手动单条下载
+
+如果普通 Edge 的倒计时结束后没有把 NXM 链接交给 MO2，可使用本地桥接脚本，不需要把签名链接发送给项目或聊天：
+
+1. 在 Nexus 文件页点击下载，倒计时结束后，在 `Start download manually` 上右键，选择“复制链接地址”。
+2. 双击 `scripts\send-nxm-to-mo2.cmd`。
+3. 脚本只从剪贴板读取本次完整的 Skyrim NXM 链接，并把它作为一个参数交给当前 MO2 handler；不会回显、保存或写入日志。
+
+该入口只负责提交下载，不安装、启用或修改模组排序。
+
 检查登录态：
 
 ```powershell
