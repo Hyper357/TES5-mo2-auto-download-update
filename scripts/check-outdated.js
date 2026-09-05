@@ -1,5 +1,5 @@
 #!/usr/bin/env node
-// High-precision update scan. v4.0 adds profile-aware MO2 Environment Graph evidence.
+// High-precision update scan. v4.1 adds an Update Eligibility Gate before Main/Component decisions.
 
 const fs = require('fs');
 const path = require('path');
@@ -14,6 +14,7 @@ const { readApiKey, createFilesClient } = require('./lib/nexus-api');
 const { defaultPolicyFile, loadVariantPolicies, getVariantPolicy, resolveVariantPolicy } = require('./lib/variant-policy');
 const { classifyComponent, componentFamily } = require('./lib/component-discovery');
 const { buildEnvironmentGraph, enabledContextNames, compactEnvironmentSummary, normalizeName } = require('./lib/mo2-environment');
+const { assessUpdateEligibility, eligibilityCounts } = require('./lib/update-eligibility');
 
 const rootDir = path.resolve(__dirname, '..');
 const modsDir = process.argv[2];
@@ -89,6 +90,36 @@ function choiceFromPolicy(mine, target, policy) {
   return { decision: 'DOWNLOAD', confidence: 'high', target, margin: 999, ranked: [] };
 }
 
+function choiceFromEligibility(files, mine, eligibility, selectorChoice) {
+  const targetId = String(eligibility?.target?.fileId || '');
+  const exactTarget = targetId ? files.find(f => String(f.file_id || '') === targetId) : null;
+  if (!exactTarget) return selectorChoice;
+
+  if (eligibility.reason === 'NEXUS_EXACT_UPDATE_CHAIN') {
+    return {
+      decision: 'DOWNLOAD',
+      confidence: 'high',
+      target: exactTarget,
+      margin: 999,
+      ranked: selectorChoice.ranked || [],
+      source: 'UPDATE_ELIGIBILITY_CHAIN',
+    };
+  }
+
+  const selectorTargetId = String(selectorChoice?.target?.file_id || '');
+  if (selectorTargetId && selectorTargetId !== targetId) {
+    return {
+      decision: 'HOLD_UPDATE_TARGET_DIVERGENCE',
+      confidence: 'low',
+      target: exactTarget,
+      margin: selectorChoice.margin ?? null,
+      ranked: selectorChoice.ranked || [],
+      source: 'UPDATE_ELIGIBILITY_DIVERGENCE',
+    };
+  }
+  return selectorChoice;
+}
+
 function samePageComponents(files, target, installedFileIds, mainName) {
   const installed = new Set((installedFileIds || []).map(String));
   const targetId = String(target?.file_id || '');
@@ -114,6 +145,36 @@ function samePageComponents(files, target, installedFileIds, mainName) {
     });
   }
   return out;
+}
+
+function compactEligibilitySkip(r, mine, eligibility, resolvedReason) {
+  const target = eligibility.target || null;
+  const note = [
+    `updateEligibility=${eligibility.status}:${eligibility.reason}`,
+    `priority=${eligibility.priority || 0}`,
+    `mo2Signal=${eligibility.mo2?.signal ? 'YES' : 'NO'}:${eligibility.mo2?.reason || 'UNKNOWN'}`,
+    `local=${mine?.file_id || ''}:${mine?.version || ''}`,
+    `target=${target?.fileId || mine?.file_id || ''}:${target?.version || mine?.version || ''}`,
+  ].join('; ');
+  return {
+    ...r,
+    localFileId: String(mine?.file_id || ''),
+    localApiVersion: mine?.version || '',
+    localRole: mine ? categoryRole(mine) : '',
+    latestFileId: target?.fileId || String(mine?.file_id || ''),
+    latestVersion: target?.version || mine?.version || '',
+    latestName: target?.name || mine?.name || r.name,
+    latestRole: target?.role || (mine ? categoryRole(mine) : ''),
+    action: eligibility.status,
+    reason: eligibility.reason,
+    confidence: eligibility.status === 'SKIP_METADATA_FALSE_POSITIVE' || eligibility.status === 'SKIP_UP_TO_DATE' ? 'high' : 'medium',
+    sourceResolution: resolvedReason,
+    note,
+    updateEligibility: eligibility,
+    manualReview: eligibility.status === 'HOLD_UPDATE_ELIGIBILITY' ? { type: 'UPDATE_ELIGIBILITY', required: true, reason: eligibility.reason } : null,
+    aux: { translations: [], patches: [], components: [] },
+    candidates: eligibility.candidates || [],
+  };
 }
 
 async function main() {
@@ -151,12 +212,27 @@ async function main() {
       modId: String(m.modId),
       name: m.folderName,
       installedVersion: m.version,
+      newestVersion: m.newestVersion || '',
+      ignoredVersion: m.ignoredVersion || '',
+      nexusFileStatus: Number(m.nexusFileStatus || 0),
+      lastNexusQuery: m.lastNexusQuery || '',
+      lastNexusUpdate: m.lastNexusUpdate || '',
+      nexusLastModified: m.nexusLastModified || '',
       instFile: m.installationFile,
       fileId: m.installedFiles[0] ? String(m.installedFiles[0]) : null,
       installedFiles: m.installedFiles.map(String),
       fomodPlugins: m.fomodPlugins,
       profileState: envMod?.state || (environment.profile?.usableForApplicability ? 'UNLISTED' : 'UNKNOWN'),
     };
+  });
+
+  // Yellow-arrow-equivalent entries are queried first. This affects latency, not truth.
+  rows.sort((a, b) => {
+    const aSignal = a.ignoredVersion && a.newestVersion && compareVersions(a.ignoredVersion, a.newestVersion) === 0
+      ? 0 : ((a.newestVersion && compareVersions(a.installedVersion, a.newestVersion) < 0) || ![1,2,3,5].includes(Number(a.nexusFileStatus)) ? 1 : 0);
+    const bSignal = b.ignoredVersion && b.newestVersion && compareVersions(b.ignoredVersion, b.newestVersion) === 0
+      ? 0 : ((b.newestVersion && compareVersions(b.installedVersion, b.newestVersion) < 0) || ![1,2,3,5].includes(Number(b.nexusFileStatus)) ? 1 : 0);
+    return bSignal - aSignal || Number(a.modId) - Number(b.modId);
   });
 
   const results = [];
@@ -172,25 +248,53 @@ async function main() {
       try {
         const data = await api.getFiles(r.modId, apiKey);
         const files = Array.isArray(data.files) ? data.files : [];
+        const fileUpdates = Array.isArray(data.file_updates) ? data.file_updates : (Array.isArray(data.fileUpdates) ? data.fileUpdates : []);
         if (!files.length) {
-          results.push({ ...r, action: 'HOLD_NO_FILES', reason: 'NO_FILES', confidence: 'low' });
+          results.push({ ...r, action: 'HOLD_NO_FILES', reason: 'NO_FILES', confidence: 'low', updateEligibility: { status: 'HOLD_UPDATE_ELIGIBILITY', reason: 'NO_NEXUS_FILES', priority: 40 } });
           continue;
         }
 
         const resolved = resolveInstalledFile(files, r);
         if (!resolved.mine) {
+          const eligibility = {
+            status: 'HOLD_UPDATE_ELIGIBILITY',
+            reason: resolved.reason === 'MULTI_SOURCE' ? 'LOCAL_MULTI_SOURCE_IDENTITY' : 'LOCAL_FILE_IDENTITY_UNRESOLVED',
+            updateNeeded: false,
+            priority: 65,
+            mo2: null,
+            target: null,
+            evidence: [],
+          };
           results.push({
             ...r,
-            action: resolved.reason === 'MULTI_SOURCE' ? 'HOLD_MULTI_SOURCE' : 'HOLD_UNRESOLVED_LOCAL',
-            reason: resolved.reason,
+            action: 'HOLD_UPDATE_ELIGIBILITY',
+            reason: eligibility.reason,
             confidence: 'low',
+            updateEligibility: eligibility,
             localCandidates: (resolved.candidates || []).map(f => ({ fileId: f.file_id, name: f.name, version: f.version })),
+            manualReview: { type: 'UPDATE_ELIGIBILITY', required: true, reason: eligibility.reason },
           });
           continue;
         }
 
         const mine = resolved.mine;
-        const baseChoice = selectUpdateTarget({ files, mine, localName: r.name, installationFile: r.instFile, profile });
+        const updateEligibility = assessUpdateEligibility({
+          files,
+          fileUpdates,
+          mine,
+          meta: r,
+          localName: r.name,
+          installationFile: r.instFile,
+          profile,
+        });
+
+        if (!updateEligibility.updateNeeded) {
+          results.push(compactEligibilitySkip(r, mine, updateEligibility, resolved.reason));
+          continue;
+        }
+
+        const selectorChoice = selectUpdateTarget({ files, mine, localName: r.name, installationFile: r.instFile, profile });
+        const baseChoice = choiceFromEligibility(files, mine, updateEligibility, selectorChoice);
         const variantReview = detectVariantReview({ files, mine, localNames: allLocalNames });
         const rememberedPolicy = getVariantPolicy(policies, r.modId);
         const policyResolution = resolveVariantPolicy(variantReview, rememberedPolicy);
@@ -224,8 +328,17 @@ async function main() {
           }
         } else {
           if (action === 'DOWNLOAD' && choice.confidence !== 'high') action = 'HOLD_REVIEW';
+          const exactChainProvedBranch = updateEligibility.reason === 'NEXUS_EXACT_UPDATE_CHAIN';
           const decisionNeedsMainChoice = !['SKIP_CURRENT', 'SKIP_DOWNGRADE'].includes(choice.decision);
-          if (variantReview.required && (decisionNeedsMainChoice || variantReview.recommendedDifferentFromCurrent)) action = 'HOLD_VARIANT_REVIEW';
+          if (!exactChainProvedBranch && variantReview.required && (decisionNeedsMainChoice || variantReview.recommendedDifferentFromCurrent)) action = 'HOLD_VARIANT_REVIEW';
+        }
+
+        if (action === 'HOLD_UPDATE_TARGET_DIVERGENCE') {
+          results.push({
+            ...compactEligibilitySkip(r, mine, { ...updateEligibility, status: 'HOLD_UPDATE_ELIGIBILITY', reason: 'ELIGIBILITY_SELECTOR_TARGET_DIVERGENCE', updateNeeded: false }, resolved.reason),
+            candidates: (selectorChoice.ranked || []).slice(0, 8).map(x => ({ fileId: x.file.file_id, name: x.file.name, version: x.file.version, score: x.score, reasons: x.reasons })),
+          });
+          continue;
         }
 
         const aux = groupLatestAuxFiles(files);
@@ -237,7 +350,7 @@ async function main() {
 
         const target = choice.target || mine;
         const components = samePageComponents(files, target, r.installedFiles, target?.name || r.name);
-        const topCandidates = (baseChoice.ranked || []).slice(0, 12).map(x => ({
+        const topCandidates = (selectorChoice.ranked || []).slice(0, 12).map(x => ({
           fileId: x.file.file_id,
           name: x.file.name,
           fileName: x.file.file_name || '',
@@ -250,6 +363,9 @@ async function main() {
         }));
 
         const noteParts = [
+          `updateEligibility=${updateEligibility.status}:${updateEligibility.reason}`,
+          `updatePriority=${updateEligibility.priority}`,
+          `mo2Signal=${updateEligibility.mo2?.signal ? 'YES' : 'NO'}:${updateEligibility.mo2?.reason || 'UNKNOWN'}`,
           `decision=${choice.decision}`,
           `confidence=${choice.confidence}`,
           `profileState=${r.profileState}`,
@@ -281,6 +397,7 @@ async function main() {
           margin: choice.margin,
           sourceResolution: resolved.reason,
           note: noteParts.join('; '),
+          updateEligibility,
           variantPolicy: rememberedPolicy ? {
             branchKey: rememberedPolicy.branchKey,
             lastConfirmedFileId: rememberedPolicy.lastConfirmedFileId || '',
@@ -308,17 +425,18 @@ async function main() {
         });
       } catch (err) {
         apiFail++;
-        results.push({ ...r, action: 'HOLD_API_ERROR', reason: 'API_ERROR', confidence: 'low', error: err.message });
+        results.push({ ...r, action: 'HOLD_API_ERROR', reason: 'API_ERROR', confidence: 'low', error: err.message, updateEligibility: { status: 'HOLD_UPDATE_ELIGIBILITY', reason: 'API_ERROR', priority: 50 } });
       }
     }
   }
 
   await Promise.all(Array.from({ length: CONCURRENCY }, () => worker()));
-  results.sort((a, b) => Number(a.modId) - Number(b.modId) || a.name.localeCompare(b.name));
+  results.sort((a, b) => Number(b.updateEligibility?.priority || 0) - Number(a.updateEligibility?.priority || 0) || Number(a.modId) - Number(b.modId) || a.name.localeCompare(b.name));
 
   const counts = {};
   for (const r of results) counts[r.action] = (counts[r.action] || 0) + 1;
-  console.error(`done rows=${rows.length} apiFail=${apiFail} ${Object.entries(counts).map(([k, v]) => `${k}=${v}`).join(' ')}`);
+  const updateCounts = eligibilityCounts(results);
+  console.error(`done rows=${rows.length} apiFail=${apiFail} updates=${JSON.stringify(updateCounts)} ${Object.entries(counts).map(([k, v]) => `${k}=${v}`).join(' ')}`);
 
   if (outFile) {
     const lines = results.map(o => [
@@ -329,6 +447,13 @@ async function main() {
 
   const payload = {
     generatedAt: new Date().toISOString(),
+    updateEligibilityGate: true,
+    updateEligibilityCounts: updateCounts,
+    updateEvidencePolicy: {
+      priority: ['NEXUS_EXACT_UPDATE_CHAIN', 'NEWER_COMPATIBLE_FILE_UPLOAD', 'MO2_UPDATE_SIGNAL'],
+      metadataOnlyDoesNotProveUpdate: true,
+      mo2WarningIconsTrusted: false,
+    },
     variantPolicyFile: policyFile,
     variantPolicyCount: Object.keys(policies.policies || {}).length,
     componentClosure: true,
