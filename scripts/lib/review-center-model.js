@@ -50,6 +50,11 @@ function compactPatchCandidate(candidate, mainModId) {
 function buildReviewPayload(plan, discoveryDoc, closure, metadata = {}) {
   const discoveryMap = new Map((discoveryDoc.items || []).map(x => [keyOf(x.modId, x.mainFileId), x]));
   const closureMap = new Map((closure.items || []).map(x => [keyOf(x.modId, x.fileId), x]));
+  const planTargetMap = new Map();
+  for (const p of plan.items || []) {
+    const fid = p.latestFileId || p.fileId || '';
+    if (p.modId && fid) planTargetMap.set(keyOf(p.modId, fid), p);
+  }
   const map = new Map();
 
   function ensure(item) {
@@ -58,18 +63,23 @@ function buildReviewPayload(plan, discoveryDoc, closure, metadata = {}) {
       id,
       modId: String(item.modId),
       localName: item.name || item.localName || '',
-      mainName: item.latestName || item.name || '',
+      mainName: item.latestName || item.mainName || item.name || '',
       localFileId: item.localFileId || item.fileId || '',
       action: item.action || '',
+      targetMainFileId: item.targetMainFileId || item.latestFileId || '',
+      targetMainVersion: item.targetMainVersion || item.latestVersion || '',
+      targetMainName: item.targetMainName || item.latestName || item.mainName || item.name || '',
       variantPolicy: item.variantPolicy || null,
       mainOptions: [],
       componentFamilies: [],
-      // Compatibility alias populated later for older consumers.
       patchFamilies: [],
       blockers: [],
     });
     const row = map.get(id);
     if (!row.variantPolicy && item.variantPolicy) row.variantPolicy = item.variantPolicy;
+    if (!row.targetMainFileId && (item.targetMainFileId || item.latestFileId)) row.targetMainFileId = item.targetMainFileId || item.latestFileId;
+    if (!row.targetMainVersion && (item.targetMainVersion || item.latestVersion)) row.targetMainVersion = item.targetMainVersion || item.latestVersion;
+    if (!row.targetMainName && (item.targetMainName || item.latestName || item.mainName)) row.targetMainName = item.targetMainName || item.latestName || item.mainName;
     return row;
   }
 
@@ -97,9 +107,7 @@ function buildReviewPayload(plan, discoveryDoc, closure, metadata = {}) {
         selectable: true,
       }));
     }
-    if (item.action === 'HOLD_VARIANT_REVIEW') {
-      row.blockers.push('检测到多个互斥 Main 分支：程序不会自动从当前分支迁移到另一分支。');
-    }
+    if (item.action === 'HOLD_VARIANT_REVIEW') row.blockers.push('检测到多个互斥 Main 分支：程序不会自动从当前分支迁移到另一分支。');
     if (item.action === 'HOLD_VARIANT_POLICY_CHANGED') {
       const oldBranch = item.variantPolicy?.branchKey || item.manualReview?.policy?.branchKey || '未知分支';
       row.blockers.push(`已记住的 Main 分支 ${oldBranch} 在当前文件结构中无法安全复用；必须重新确认，绝不会自动回退到其他分支。`);
@@ -108,11 +116,15 @@ function buildReviewPayload(plan, discoveryDoc, closure, metadata = {}) {
 
   for (const discovery of discoveryDoc.items || []) {
     if (discovery.complete) continue;
+    const planItem = planTargetMap.get(keyOf(discovery.modId, discovery.mainFileId)) || {};
     const row = ensure({
+      ...planItem,
       modId: discovery.modId,
-      name: discovery.mainName,
-      latestName: discovery.mainName,
-      localFileId: '',
+      name: planItem.name || discovery.mainName,
+      latestName: planItem.latestName || discovery.mainName,
+      targetMainFileId: discovery.mainFileId,
+      targetMainVersion: discovery.mainVersion,
+      targetMainName: discovery.mainName,
       action: 'HOLD_COMPONENT_DISCOVERY',
     });
     row.action = row.action || 'HOLD_COMPONENT_DISCOVERY';
@@ -126,13 +138,7 @@ function buildReviewPayload(plan, discoveryDoc, closure, metadata = {}) {
       const family = candidate.family || 'GENERAL';
       const groupKey = `${kind}:${family}`;
       if (!families.has(groupKey)) {
-        families.set(groupKey, {
-          key: groupKey,
-          kind,
-          family,
-          reason: `未解决 ${kind} component family`,
-          candidates: [],
-        });
+        families.set(groupKey, { key: groupKey, kind, family, reason: `未解决 ${kind} component family`, candidates: [] });
       }
       families.get(groupKey).candidates.push(compactComponentCandidate(candidate, discovery.modId));
     }
@@ -140,7 +146,7 @@ function buildReviewPayload(plan, discoveryDoc, closure, metadata = {}) {
   }
 
   for (const row of map.values()) {
-    const targetId = row.mainOptions.find(x => x.recommended)?.fileId || row.localFileId || '';
+    const targetId = row.mainOptions.find(x => x.recommended)?.fileId || row.targetMainFileId || row.localFileId || '';
     const closureItem = closureMap.get(keyOf(row.modId, targetId));
     if (closureItem?.closure === 'FAILED') {
       if (closureItem.missingKinds?.length) row.blockers.push(`Closure 未完成：${closureItem.missingKinds.join(', ')}`);
@@ -161,13 +167,7 @@ function buildReviewPayload(plan, discoveryDoc, closure, metadata = {}) {
     patch: items.filter(x => x.componentFamilies.some(f => ['PATCH', 'HOTFIX'].includes(f.kind))).length,
     other: items.filter(x => x.mainOptions.length <= 1 && !x.componentFamilies.length).length,
   };
-  return {
-    generatedAt: new Date().toISOString(),
-    version: 4,
-    ...metadata,
-    counts,
-    items,
-  };
+  return { generatedAt: new Date().toISOString(), version: 4, ...metadata, counts, items };
 }
 
 module.exports = { keyOf, compactMainOption, compactComponentCandidate, compactPatchCandidate, buildReviewPayload };
