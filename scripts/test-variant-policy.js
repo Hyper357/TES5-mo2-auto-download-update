@@ -4,6 +4,7 @@ const assert = require('assert');
 const fs = require('fs');
 const os = require('os');
 const path = require('path');
+const { hardVariantConflicts } = require('./lib/file-selector');
 const { branchKey, detectVariantReview } = require('./lib/variant-review');
 const {
   loadVariantPolicies,
@@ -41,6 +42,15 @@ try {
 
   const changedReview = detectVariantReview({ files: [files[0], files[1]], mine: files[0], localNames: [] });
   assert.strictEqual(resolveVariantPolicy(changedReview, policy).status, 'CHANGED');
+
+  // A remembered semantic branch must never override a changed MO2 environment.
+  // Example: an old CBBE preference becomes unsafe after the environment moves to BHUNP.
+  const envConflicts = hardVariantConflicts(
+    'Example Armor CBBE',
+    'Example Armor CBBE 2.0',
+    { bodyType: 'BHUNP', platform: 'UNKNOWN', textureTier: 'UNKNOWN' },
+  );
+  assert.ok(envConflicts.some(x => /profile-body/.test(x)), 'profile drift must produce a hard variant conflict');
 
   const generic = rememberVariantPolicy(file, { modId: '9', fileId: '9', branchKey: 'GENERIC' });
   assert.strictEqual(generic.saved, false);
