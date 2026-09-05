@@ -1,13 +1,13 @@
 {
   "name": "tes5-mo2-auto-download-update",
-  "version": "3.4.0-beta.1",
+  "version": "3.5.0-beta.1",
   "private": true,
-  "description": "Evidence-bound Nexus update planning with isolated browser automation, queue-aware idempotency, diagnostics, and verified MO2 downloads for Skyrim SE/AE.",
+  "description": "Evidence-bound Nexus update planning with isolated browser automation, queue-aware idempotency, MO2 UI duplicate guards, diagnostics, and verified downloads for Skyrim SE/AE.",
   "type": "commonjs",
   "main": "index.js",
   "scripts": {
-    "check": "node --check index.js && node --check scripts/nexus-autodl.js && node --check scripts/check-outdated.js && node --check scripts/closure-gate.js && node --check scripts/audit-registry.js && node --check scripts/build-review-queue.js && node --check scripts/execute-plan.js && node --check scripts/diagnose.js && node --check scripts/browser-manager.js && node --check scripts/queue-status.js && node --check scripts/lib/file-selector.js && node --check scripts/lib/aux-registry.js && node --check scripts/lib/profile.js && node --check scripts/lib/diagnostics.js && node --check scripts/lib/browser-session.js && node --check scripts/lib/download-guard.js",
-    "test": "node scripts/test-selector.js && node scripts/test-profile.js && node scripts/test-registry.js && node scripts/test-closure.js && node scripts/test-diagnostics.js && node scripts/test-browser-isolation.js && node scripts/test-download-guard.js",
+    "check": "node --check index.js && node --check scripts/nexus-autodl.js && node --check scripts/check-outdated.js && node --check scripts/closure-gate.js && node --check scripts/audit-registry.js && node --check scripts/build-review-queue.js && node --check scripts/execute-plan.js && node --check scripts/diagnose.js && node --check scripts/browser-manager.js && node --check scripts/queue-status.js && node --check scripts/mo2-ui.js && node --check scripts/lib/file-selector.js && node --check scripts/lib/aux-registry.js && node --check scripts/lib/profile.js && node --check scripts/lib/diagnostics.js && node --check scripts/lib/browser-session.js && node --check scripts/lib/download-guard.js && node --check scripts/lib/mo2-ui-guard.js",
+    "test": "node scripts/test-selector.js && node scripts/test-profile.js && node scripts/test-registry.js && node scripts/test-closure.js && node scripts/test-diagnostics.js && node scripts/test-browser-isolation.js && node scripts/test-download-guard.js && node scripts/test-mo2-ui-guard.js",
     "verify": "node scripts/nexus-autodl.js verify",
     "audit-registry": "node scripts/audit-registry.js",
     "diagnose": "node scripts/diagnose.js",
@@ -16,6 +16,7 @@
     "browser:status": "node scripts/browser-manager.js status",
     "browser:stop": "node scripts/browser-manager.js stop",
     "queue:status": "node scripts/queue-status.js",
+    "mo2:status": "node scripts/mo2-ui.js",
     "pipeline": "node index.js"
   },
   "dependencies": {
