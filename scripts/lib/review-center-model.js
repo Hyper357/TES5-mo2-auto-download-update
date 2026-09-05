@@ -39,6 +39,13 @@ function compactComponentCandidate(candidate, mainModId) {
     optionalHint: !!candidate.optionalHint,
     installedContextMatch: !!candidate.installedContextMatch,
     localMatches: candidate.localMatches || [],
+    environmentDecision: candidate.environmentDecision ? {
+      resolved: !!candidate.environmentDecision.resolved,
+      status: candidate.environmentDecision.status || 'UNRESOLVED',
+      confidence: candidate.environmentDecision.confidence || 'none',
+      reason: candidate.environmentDecision.reason || '',
+      evidence: candidate.environmentDecision.evidence || [],
+    } : null,
     selectable: !!(modId && candidate.fileId),
   };
 }
@@ -66,6 +73,7 @@ function buildReviewPayload(plan, discoveryDoc, closure, metadata = {}) {
       mainName: item.latestName || item.mainName || item.name || '',
       localFileId: item.localFileId || item.fileId || '',
       action: item.action || '',
+      profileState: item.profileState || 'UNKNOWN',
       targetMainFileId: item.targetMainFileId || item.latestFileId || '',
       targetMainVersion: item.targetMainVersion || item.latestVersion || '',
       targetMainName: item.targetMainName || item.latestName || item.mainName || item.name || '',
@@ -80,6 +88,7 @@ function buildReviewPayload(plan, discoveryDoc, closure, metadata = {}) {
     if (!row.targetMainFileId && (item.targetMainFileId || item.latestFileId)) row.targetMainFileId = item.targetMainFileId || item.latestFileId;
     if (!row.targetMainVersion && (item.targetMainVersion || item.latestVersion)) row.targetMainVersion = item.targetMainVersion || item.latestVersion;
     if (!row.targetMainName && (item.targetMainName || item.latestName || item.mainName)) row.targetMainName = item.targetMainName || item.latestName || item.mainName;
+    if (row.profileState === 'UNKNOWN' && item.profileState) row.profileState = item.profileState;
     return row;
   }
 
@@ -167,7 +176,7 @@ function buildReviewPayload(plan, discoveryDoc, closure, metadata = {}) {
     patch: items.filter(x => x.componentFamilies.some(f => ['PATCH', 'HOTFIX'].includes(f.kind))).length,
     other: items.filter(x => x.mainOptions.length <= 1 && !x.componentFamilies.length).length,
   };
-  return { generatedAt: new Date().toISOString(), version: 4, ...metadata, counts, items };
+  return { generatedAt: new Date().toISOString(), version: 5, ...metadata, counts, items };
 }
 
 module.exports = { keyOf, compactMainOption, compactComponentCandidate, compactPatchCandidate, buildReviewPayload };
