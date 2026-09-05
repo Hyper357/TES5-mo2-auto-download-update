@@ -39,6 +39,7 @@ function esc(s) {
 }
 
 function decorateHtml(html, runDir) {
+  if (html.includes('data-auto-summary="embedded"')) return html;
   const r = loadJson(path.join(runDir, 'final-report.json'), null);
   if (!r) return html;
   const requested = Number(r.requested ?? r.downloadReady ?? r.download ?? 0) || 0;
