@@ -1,5 +1,5 @@
 #!/usr/bin/env node
-// v3.6 high-precision pipeline: Main selection -> Patch Discovery Graph -> closure -> verified transaction download.
+// v3.7 hybrid pipeline: auto-download high-confidence items, defer complex variants/patches to a local human review center.
 
 const cp = require('child_process');
 const path = require('path');
@@ -10,7 +10,7 @@ const { createLogger, classifyFailure, sanitizeString } = require('./scripts/lib
 const rootDir = __dirname;
 
 function parseCli(argv) {
-  const out = { positional: [], go: false, diagnose: false, debug: false, forceRefresh: false, continueOnError: false, reconnect: true, maxAgeDays: 14, timeoutSec: 1200, pollSec: 5, maxSubmitAttempts: 2, retryDelaySec: 5 };
+  const out = { positional: [], go: false, diagnose: false, debug: false, forceRefresh: false, continueOnError: false, reconnect: true, openReview: true, maxAgeDays: 14, timeoutSec: 1200, pollSec: 5, maxSubmitAttempts: 2, retryDelaySec: 5 };
   for (let i = 0; i < argv.length; i++) {
     const a = argv[i];
     if (a === '--go') out.go = true;
@@ -19,6 +19,7 @@ function parseCli(argv) {
     else if (a === '--force-refresh' || a === '--no-cache') out.forceRefresh = true;
     else if (a === '--continue-on-error') out.continueOnError = true;
     else if (a === '--no-reconnect') out.reconnect = false;
+    else if (a === '--no-open-review') out.openReview = false;
     else if (a === '--max-age-days') out.maxAgeDays = Number(argv[++i]) || 14;
     else if (a === '--timeout-sec') out.timeoutSec = Number(argv[++i]) || 1200;
     else if (a === '--poll-sec') out.pollSec = Number(argv[++i]) || 5;
@@ -42,6 +43,17 @@ function runNode(args, options = {}) {
 function parseTsvLine(line) { const [modId,name,ver,note,fileId,action] = line.split('\t'); return { modId,name,ver,note,fileId,action }; }
 function safeJson(text, fallback = null) { try { return JSON.parse(text); } catch { return fallback; } }
 
+function launchReviewServer(runDir) {
+  const logFile = path.join(runDir, 'review-server-launch.log');
+  const fd = fs.openSync(logFile, 'a');
+  const child = cp.spawn(process.execPath, [path.join(rootDir,'scripts','review-server.js'),'--run',runDir,'--open'], {
+    cwd: rootDir, windowsHide: true, detached: true, stdio: ['ignore', fd, fd],
+  });
+  child.unref();
+  try { fs.closeSync(fd); } catch (_) {}
+  return { pid: child.pid, logFile };
+}
+
 async function run() {
   const cli = parseCli(process.argv.slice(2));
   const modsDir = cli.positional[0] || process.env.MO2_MODS_DIR || 'E:\\SkyrimAE\\mo2\\mods';
@@ -57,8 +69,8 @@ async function run() {
   const logger = createLogger(runDir, { debug: cli.debug, runId: stamp });
 
   console.log('========================================================');
-  console.log('🛡️ Skyrim MO2 高精度更新流水线 v3.6');
-  console.log(`模式: ${cli.diagnose ? 'DIAGNOSE' : (cli.go ? 'DOWNLOAD' : 'AUDIT')} | Debug=${cli.debug ? 'ON':'OFF'}`);
+  console.log('🛡️ Skyrim MO2 高精度更新流水线 v3.7');
+  console.log(`模式: ${cli.diagnose ? 'DIAGNOSE' : (cli.go ? 'DOWNLOAD + DEFERRED REVIEW' : 'AUDIT')} | Debug=${cli.debug ? 'ON':'OFF'}`);
   console.log(`runDir: ${runDir}`);
   console.log('========================================================');
   logger.info('PIPELINE', 'pipeline started', { mode: cli.diagnose ? 'DIAGNOSE' : (cli.go ? 'DOWNLOAD' : 'AUDIT'), debug: cli.debug });
@@ -96,16 +108,19 @@ async function run() {
   const closureJson = path.join(runDir,'closure.json');
   const reviewJson = path.join(runDir,'review-queue.json');
   const reviewTsv = path.join(runDir,'review-queue.tsv');
+  const reviewCenterJson = path.join(runDir,'review-center.json');
+  const reviewCenterHtml = path.join(runDir,'review-center.html');
+  const reviewCenterConfig = path.join(runDir,'review-center-config.json');
   const executionState = path.join(runDir,'execution-state.json');
   const finalReport = path.join(runDir,'final-report.json');
 
-  console.log('\n[Step 1/8] Main File 精确选择 + 同页附属证据...');
+  console.log('\n[Step 1/9] Main File 精确选择；多分支页面直接标记人工复核...');
   const checkArgs = [path.join(rootDir,'scripts','check-outdated.js'),modsDir,apiKeyFile,'--out',rawManifest,'--report',planJson];
   if (cli.forceRefresh) checkArgs.push('--force-refresh');
   runNode(checkArgs);
   logger.info('SCAN','planning scan completed',{ report:planJson });
 
-  console.log('\n[Step 2/8] Patch Discovery Graph：Requirements 反向依赖 + Description + 同页 Files + 本地环境...');
+  console.log('\n[Step 2/9] Patch Discovery Graph：Requirements + Description + 同页 Files + 本地环境...');
   const discoveryRun = runNode([
     path.join(rootDir,'scripts','discover-patches.js'), planJson, modsDir,
     '--registry',auxRegistry,'--relations',patchRelations,
@@ -115,15 +130,14 @@ async function run() {
   console.log(`  targets=${discoverySummary.targets || 0} complete=${discoverySummary.complete || 0} held=${discoverySummary.held || 0} unresolved=${discoverySummary.unresolvedCandidates || 0}`);
   logger.info('PATCH_DISCOVERY','patch graph built',{ ...discoverySummary, report:patchDiscoveryJson, tasks:patchTasksTsv });
 
-  console.log('\n[Step 3/8] 审计 REQUIRED aux 的精确 modId/fileId/version...');
+  console.log('\n[Step 3/9] 审计 REQUIRED aux 的精确 modId/fileId/version...');
   const registryArgs = [path.join(rootDir,'scripts','audit-registry.js'),auxRegistry,apiKeyFile,'--out',registryAuditJson];
   if (cli.forceRefresh) registryArgs.push('--force-refresh');
   const registryAuditRun = runNode(registryArgs,{ capture:true });
   const registryAudit = safeJson(registryAuditRun.stdout, {});
   console.log(`  registry audit: ${JSON.stringify(registryAudit.counts || {})}`);
-  logger.info('REGISTRY','aux registry audit completed',{ counts:registryAudit.counts || {} });
 
-  console.log('\n[Step 4/8] 强制 Patch Discovery + PATCH / TRANSLATION 闭合...');
+  console.log('\n[Step 4/9] 强制 Patch Discovery + PATCH / TRANSLATION 闭合...');
   const closureRun = runNode([
     path.join(rootDir,'scripts','closure-gate.js'),rawManifest,auxRegistry,
     '--plan',planJson,'--patch-discovery',patchDiscoveryJson,'--registry-audit',registryAuditJson,
@@ -131,47 +145,60 @@ async function run() {
   ], { capture:true });
   const closureSummary = safeJson(closureRun.stdout, {});
   console.log(`  appendedAux=${closureSummary.appendedAux || 0} holds=${closureSummary.holdClosure || 0}`);
-  logger.info('CLOSURE','closure completed',{ appendedAux:closureSummary.appendedAux || 0, holds:closureSummary.holdClosure || 0 });
 
-  console.log('\n[Step 5/8] 生成 Pi/AI Agent review queue...');
+  console.log('\n[Step 5/9] 生成 Agent review queue + 人工 Review Center...');
   runNode([path.join(rootDir,'scripts','build-review-queue.js'),planJson,closureJson,'--patch-discovery',patchDiscoveryJson,'--out',reviewJson,'--tsv',reviewTsv]);
-  logger.info('REVIEW_QUEUE','review queue generated',{ json:reviewJson, tsv:reviewTsv, patchTasks:patchTasksTsv });
+  const centerRun = runNode([path.join(rootDir,'scripts','build-review-center.js'),planJson,patchDiscoveryJson,closureJson,'--out',reviewCenterJson,'--html',reviewCenterHtml], { capture:true });
+  const centerSummary = safeJson(centerRun.stdout, { items:0, counts:{} });
+  fs.writeFileSync(reviewCenterConfig, JSON.stringify({
+    generatedAt:new Date().toISOString(), modsDir, downloadsDir, apiKeyFile, sevenzip, debug:cli.debug,
+    timeoutSec:cli.timeoutSec, pollSec:cli.pollSec,
+  }, null, 2), 'utf8');
+  console.log(`  humanReview=${centerSummary.items || 0} | ${reviewCenterHtml}`);
+  logger.info('REVIEW_CENTER','human review center generated',{ items:centerSummary.items || 0, html:reviewCenterHtml });
 
   const lines = fs.readFileSync(finalManifest,'utf8').split(/\r?\n/).filter(Boolean);
   const rows = lines.map(parseTsvLine);
   const byAction = new Map();
   for (const row of rows) byAction.set(row.action,(byAction.get(row.action)||0)+1);
-
-  console.log('\n[Step 6/8] 最终门禁结果:');
-  for (const [action,count] of [...byAction.entries()].sort()) console.log(`  ${action}: ${count}`);
-  console.log(`  patch tasks: ${patchTasksTsv}`);
-  console.log(`  review queue: ${reviewTsv}`);
   const downloadRows = rows.filter(r => r.action === 'DOWNLOAD' && r.modId && r.fileId);
   const holdRows = rows.filter(r => /^HOLD_/.test(r.action || ''));
-  logger.info('GATE','final planning gate evaluated',{ downloadReady:downloadRows.length, holds:holdRows.length, actions:Object.fromEntries(byAction) });
-  if (holdRows.length) {
-    console.log(`\n⚠️ ${holdRows.length} 项未通过门禁，不会进入真实下载。`);
-    for (const r of holdRows.slice(0,20)) console.log(`  - ${r.action} | ${r.modId}:${r.fileId} | ${r.name}`);
-  }
+
+  console.log('\n[Step 6/9] 自动阶段门禁结果:');
+  for (const [action,count] of [...byAction.entries()].sort()) console.log(`  ${action}: ${count}`);
+  console.log(`  自动可下载=${downloadRows.length} | 延后人工复核=${centerSummary.items || 0}`);
+  if (holdRows.length) for (const r of holdRows.slice(0,20)) console.log(`  - ${r.action} | ${r.modId}:${r.fileId} | ${r.name}`);
+
+  const rebuildCenter = () => runNode([path.join(rootDir,'scripts','build-review-center.js'),planJson,patchDiscoveryJson,closureJson,'--auto-report',finalReport,'--out',reviewCenterJson,'--html',reviewCenterHtml], { capture:true, allowFailure:true });
+  const maybeOpenReview = () => {
+    if (!cli.go || !cli.openReview || !(centerSummary.items > 0)) return null;
+    const launched = launchReviewServer(runDir);
+    logger.info('REVIEW_CENTER','review server launched after automatic stage',{ pid:launched.pid, logFile:launched.logFile });
+    console.log(`\n🎛️ 已启动人工决策中心 pid=${launched.pid}；将使用你的默认浏览器打开。`);
+    return launched;
+  };
 
   if (!downloadRows.length) {
-    fs.writeFileSync(finalReport,JSON.stringify({ generatedAt:new Date().toISOString(),mode:'AUDIT',runDir,download:0,holds:holdRows.length,actions:Object.fromEntries(byAction),patchDiscovery:patchDiscoveryJson,patchTasks:patchTasksTsv,logs:logger.files },null,2));
-    logger.info('PIPELINE','no download-ready items; stopped safely',{ holds:holdRows.length });
-    console.log('\n✅ 没有同时通过 Main + Patch Discovery + Closure 的下载项。未触发任何下载。');
+    fs.writeFileSync(finalReport,JSON.stringify({ generatedAt:new Date().toISOString(),mode:cli.go?'DOWNLOAD':'AUDIT',runDir,downloadReady:0,verified:0,holds:holdRows.length,humanReview:centerSummary.items || 0,actions:Object.fromEntries(byAction),patchDiscovery:patchDiscoveryJson,reviewCenter:reviewCenterHtml,logs:logger.files },null,2));
+    rebuildCenter();
+    console.log('\n✅ 没有高置信自动下载项；复杂项目已全部留在 Review Center。');
+    if (!cli.go) console.log(`打开只读报告: ${reviewCenterHtml}\n可操作模式: npm run review -- --run "${runDir}"`);
+    else maybeOpenReview();
     return;
   }
 
   const runManifest = path.join(runDir,'run.tsv');
   fs.writeFileSync(runManifest,downloadRows.map(r => [r.modId,r.name,r.ver,r.note,r.fileId,'DOWNLOAD'].join('\t')).join('\n')+'\n','utf8');
-  console.log(`\n通过全部门禁的精确 DOWNLOAD 项: ${downloadRows.length}`);
+  console.log(`\n通过全部门禁的精确自动 DOWNLOAD 项: ${downloadRows.length}`);
   if (!cli.go) {
-    fs.writeFileSync(finalReport,JSON.stringify({ generatedAt:new Date().toISOString(),mode:'AUDIT',runDir,downloadReady:downloadRows.length,holds:holdRows.length,actions:Object.fromEntries(byAction),patchDiscovery:patchDiscoveryJson,patchTasks:patchTasksTsv,reviewQueue:reviewJson,logs:logger.files },null,2));
-    logger.info('PIPELINE','audit completed; no real download requested',{ downloadReady:downloadRows.length });
-    console.log('\n🔎 AUDIT 完成。先处理 Patch Discovery / review queue，再运行 --go。');
+    fs.writeFileSync(finalReport,JSON.stringify({ generatedAt:new Date().toISOString(),mode:'AUDIT',runDir,downloadReady:downloadRows.length,holds:holdRows.length,humanReview:centerSummary.items || 0,actions:Object.fromEntries(byAction),reviewCenter:reviewCenterHtml,logs:logger.files },null,2));
+    rebuildCenter();
+    console.log(`\n🔎 AUDIT 完成。自动项=${downloadRows.length}，人工复核=${centerSummary.items || 0}。`);
+    console.log(`只读 HTML: ${reviewCenterHtml}\n可操作模式: npm run review -- --run "${runDir}"`);
     return;
   }
 
-  console.log('\n[Step 7/8] 按事务逐项提交：MAIN → PATCH(es) → TRANSLATION，每项必须 VERIFIED...');
+  console.log('\n[Step 7/9] 自动处理高置信事务：MAIN → PATCH(es) → TRANSLATION...');
   const execArgs = [path.join(rootDir,'scripts','execute-plan.js'),runManifest,'--downloads',downloadsDir,'--installed-dir',modsDir,'--api-key-file',apiKeyFile,'--state',executionState,'--run-dir',runDir,'--timeout-sec',String(cli.timeoutSec),'--poll-sec',String(cli.pollSec),'--max-submit-attempts',String(cli.maxSubmitAttempts),'--retry-delay-sec',String(cli.retryDelaySec)];
   if (sevenzip) execArgs.push('--sevenzip',sevenzip);
   if (cli.reconnect) execArgs.push('--reconnect');
@@ -182,14 +209,13 @@ async function run() {
   const execSummary = safeJson(execRun.stdout,{ ok:execRun.ok });
   if (!execRun.ok) { const e = classifyFailure(execRun.stderr || execRun.stdout); logger.error('EXECUTOR','transaction executor returned failure',{ errorCode:e.code,layer:e.layer,action:e.action }); }
 
-  console.log('\n[Step 8/8] 全局 verify...');
+  console.log('\n[Step 8/9] 全局 verify 自动阶段...');
   const verifyArgs = [path.join(rootDir,'scripts','nexus-autodl.js'),'verify',runManifest,'--downloads',downloadsDir,'--json'];
   if (sevenzip) verifyArgs.push('--sevenzip',sevenzip);
   const verifyRun = runNode(verifyArgs,{ capture:true, allowFailure:true });
   const verifyRows = safeJson(verifyRun.stdout,[]);
   const verifyCounts = {};
   for (const r of Array.isArray(verifyRows) ? verifyRows : []) verifyCounts[r.status]=(verifyCounts[r.status]||0)+1;
-  logger.info('VERIFY','global verification completed',{ counts:verifyCounts,processOk:verifyRun.ok });
 
   const localMods = scanModsDirectory(modsDir);
   const fomodTips = formatFomodTips(generateFomodReport(localMods,downloadRows.map(r => ({ modId:r.modId }))));
@@ -197,12 +223,16 @@ async function run() {
   if (fomodTips) { tipsFile=path.join(runDir,'fomod-install-tips.txt'); fs.writeFileSync(tipsFile,fomodTips,'utf8'); }
   const verified = verifyCounts.VERIFIED || 0;
   const failed = downloadRows.length - verified;
-  const report = { generatedAt:new Date().toISOString(),mode:'DOWNLOAD',runDir,requested:downloadRows.length,verified,failed,execution:execSummary,verifyCounts,holds:holdRows.length,actions:Object.fromEntries(byAction),patchDiscovery:patchDiscoveryJson,patchTasks:patchTasksTsv,executionState,fomodTips:tipsFile,logs:logger.files,failedItems:path.join(runDir,'diagnostics','failed-items.json') };
+  const report = { generatedAt:new Date().toISOString(),mode:'DOWNLOAD',runDir,requested:downloadRows.length,verified,failed,execution:execSummary,verifyCounts,holds:holdRows.length,humanReview:centerSummary.items || 0,actions:Object.fromEntries(byAction),patchDiscovery:patchDiscoveryJson,patchTasks:patchTasksTsv,reviewCenter:reviewCenterHtml,executionState,fomodTips:tipsFile,logs:logger.files,failedItems:path.join(runDir,'diagnostics','failed-items.json') };
   fs.writeFileSync(finalReport,JSON.stringify(report,null,2),'utf8');
-  logger[failed ? 'error':'info']('PIPELINE',failed ? 'pipeline completed with non-VERIFIED items':'pipeline completed successfully',{ requested:downloadRows.length,verified,failed });
-  console.log(`\n✅ requested=${downloadRows.length}, VERIFIED=${verified}, failed/not-verified=${failed}`);
-  console.log(`最终报告: ${finalReport}`);
-  if (failed > 0 || !execRun.ok) { console.log('⚠️ 未 VERIFIED 的归档不得安装。'); process.exitCode=2; }
+  rebuildCenter();
+  logger[failed ? 'error':'info']('PIPELINE',failed ? 'automatic stage completed with non-VERIFIED items':'automatic stage completed successfully',{ requested:downloadRows.length,verified,failed,humanReview:centerSummary.items || 0 });
+
+  console.log('\n[Step 9/9] 自动阶段汇报 + 延后人工决策...');
+  console.log(`✅ 自动阶段 requested=${downloadRows.length}, VERIFIED=${verified}, failed/not-verified=${failed}`);
+  console.log(`🎛️ 人工复核项目=${centerSummary.items || 0} | ${reviewCenterHtml}`);
+  maybeOpenReview();
+  if (failed > 0 || !execRun.ok) { console.log('⚠️ 自动阶段存在未 VERIFIED 项；Review Center 不会把这些失败当作成功。'); process.exitCode=2; }
 }
 
 run().catch(err => { const msg=sanitizeString(err.message); console.error(`\n❌ Pipeline aborted: ${msg}`); process.exit(1); });
