@@ -83,9 +83,7 @@ async function inspectTarget(target, options = {}) {
     }
 
     latestEval = evaluateSnapshot(latestSnapshot, target);
-    if (latestEval.ambiguousDialogs.length) {
-      ambiguousSeen = latestEval.ambiguousDialogs;
-    }
+    if (latestEval.ambiguousDialogs.length) ambiguousSeen = latestEval.ambiguousDialogs;
 
     if (dismissSafe) {
       for (const action of latestEval.safeActions) {
@@ -102,7 +100,6 @@ async function inspectTarget(target, options = {}) {
     await sleep(intervalMs);
   } while (true);
 
-  // Final snapshot after any safe dismissals, so callers see what remains on screen.
   if (dismissSafe && handled.some(h => h.result?.ok)) {
     await sleep(200);
     const finalSnap = snapshot();
@@ -124,7 +121,7 @@ async function inspectTarget(target, options = {}) {
     redownloadPromptCancelled: handledKinds.includes('REDOWNLOAD_PROMPT'),
     safety: {
       clickedAffirmativeRedownload: false,
-      policy: 'Only exact duplicate OK and strong-name re-download NO are invokable',
+      policy: 'Only reliable duplicate-info OK and strong-name re-download NO/Cancel are invokable',
     },
   };
 }
@@ -136,12 +133,13 @@ async function main() {
     name: argValue('--name'),
   };
   const dismissSafe = process.argv.includes('--dismiss-safe');
+  const strict = process.argv.includes('--strict');
   const watchMs = Number(argValue('--watch-ms', '0')) || 0;
   const intervalMs = Number(argValue('--interval-ms', '300')) || 300;
   const result = await inspectTarget(target, { dismissSafe, watchMs, intervalMs });
   console.log(JSON.stringify(result, null, 2));
   if (!result.ok) process.exitCode = 2;
-  else if (result.evaluation?.safety?.hasAmbiguousDuplicateDialog) process.exitCode = 3;
+  else if ((dismissSafe || strict) && result.evaluation?.safety?.hasAmbiguousDuplicateDialog) process.exitCode = 3;
 }
 
 if (require.main === module) {
