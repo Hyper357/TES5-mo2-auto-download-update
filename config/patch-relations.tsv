@@ -1,0 +1,10 @@
+# v3.6 learned/discovered independent patch-page relations.
+# Format:
+# mainModId<TAB>auxModId<TAB>family<TAB>source<TAB>note
+#
+# This file is NOT an approval list. A relation only means "inspect this independent page as a patch candidate".
+# It never means REQUIRED by itself. Applicability must still be resolved against the exact target mainFileId
+# in config/aux-registry.tsv v3 and REQUIRED aux file IDs must pass registry audit.
+#
+# Example:
+# 12345	67890	LUX	REQUIREMENTS_REVERSE	Independent Lux compatibility patch page
