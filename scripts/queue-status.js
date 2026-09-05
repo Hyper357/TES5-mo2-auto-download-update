@@ -4,6 +4,7 @@
 const fs = require('fs');
 const path = require('path');
 const { scanExactDownload, loadLedger, shouldSuppressResubmit } = require('./lib/download-guard');
+const { inspectTarget } = require('./mo2-ui');
 
 function argValue(name, fallback = '') {
   const i = process.argv.indexOf(name);
@@ -26,7 +27,7 @@ function compactDisk(s) {
   };
 }
 
-function main() {
+async function main() {
   const downloads = argValue('--downloads', process.env.MO2_DOWNLOADS_DIR || 'E:\\SkyrimAE\\mo2\\downloads');
   const sharedStateDir = argValue('--shared-state-dir', path.resolve(__dirname, '..', '.runtime', 'state'));
   const ledgerFile = argValue('--ledger', path.join(sharedStateDir, 'submission-ledger.json'));
@@ -35,6 +36,8 @@ function main() {
   const positional = process.argv.slice(2).filter((a, i, arr) => !a.startsWith('--') && !(i > 0 && arr[i - 1].startsWith('--')));
   const modId = argValue('--mod-id', positional[0] || '');
   const fileId = argValue('--file-id', positional[1] || '');
+  const name = argValue('--name', '');
+  const noUi = process.argv.includes('--no-ui');
 
   const ledger = loadLedger(ledgerFile);
   let lock = null;
@@ -61,6 +64,7 @@ function main() {
     const entry = ledger.items?.[key] || null;
     payload.target = {
       key,
+      name,
       disk: compactDisk(disk),
       ledger: entry,
       resubmitGuard: shouldSuppressResubmit(entry, ttlMin * 60 * 1000),
@@ -71,7 +75,27 @@ function main() {
       .map(([key, e]) => ({ key, status: e.status, submittedAt: e.submittedAt || null, updatedAt: e.updatedAt || null, name: e.name || '' }));
   }
 
+  if (!noUi && process.platform === 'win32') {
+    try {
+      const ui = await inspectTarget({ modId, fileId, name }, { dismissSafe: false, watchMs: 0 });
+      payload.mo2Ui = ui.ok ? {
+        ok: true,
+        process: ui.evaluation?.process || null,
+        queue: ui.evaluation?.queue || null,
+        dialogs: ui.evaluation?.dialogs || [],
+        safety: ui.evaluation?.safety || null,
+      } : { ok: false, error: ui.error || 'MO2_UI_SNAPSHOT_FAILED' };
+    } catch (e) {
+      payload.mo2Ui = { ok: false, error: e.message };
+    }
+  } else {
+    payload.mo2Ui = { ok: false, skipped: true, reason: noUi ? '--no-ui' : 'non-Windows' };
+  }
+
   console.log(JSON.stringify(payload, null, 2));
 }
 
-main();
+main().catch(err => {
+  console.error(`queue-status failed: ${err.message}`);
+  process.exit(1);
+});
