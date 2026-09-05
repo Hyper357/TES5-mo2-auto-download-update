@@ -1,0 +1,13 @@
+# mainModId	mainVersion	kind	status	auxModId	auxFileId	auxVersion	auxName	note
+#
+# 规则：每个准备自动更新的主 MOD，必须同时有 PATCH 与 TRANSLATION 两类结论。
+# kind = PATCH | TRANSLATION | SELF
+# status = NONE | REQUIRED | AUX
+#
+# 示例（不要照抄 ID）：
+# 12345	2.4.1	PATCH	NONE					已核验 Files/Requirements，无独立必需补丁
+# 12345	2.4.1	TRANSLATION	REQUIRED	67890	135790	2.4.1	Example Mod Chinese Translation	与主版本 2.4.1 对应
+# 67890	*	SELF	AUX					该 modId 本身就是汉化页，不递归要求其 PATCH/TRANSLATION 闭合
+#
+# 如果某结论对所有未来版本都稳定（例如纯 DLL 无文本，且明确不需要汉化），mainVersion 可写 *。
+# 但 PATCH/TRANSLATION 是否仍适配新主版本通常会变化，优先写精确版本。
