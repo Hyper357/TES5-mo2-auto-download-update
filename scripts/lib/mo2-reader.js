@@ -11,6 +11,14 @@ function parseMetaIni(filePath) {
   const meta = {
     modid: 0,
     version: '',
+    newestVersion: '',
+    ignoredVersion: '',
+    nexusFileStatus: 1,
+    lastNexusQuery: '',
+    lastNexusUpdate: '',
+    nexusLastModified: '',
+    repository: 'Nexus',
+    gameName: '',
     installationFile: '',
     installedFiles: [],
     fomodPlugins: []
@@ -36,6 +44,14 @@ function parseMetaIni(filePath) {
         const v = trimmed.substring(eq + 1).trim();
         if (k === 'modid') meta.modid = Number(v) || 0;
         else if (k === 'version') meta.version = v;
+        else if (k === 'newestVersion') meta.newestVersion = v;
+        else if (k === 'ignoredVersion') meta.ignoredVersion = v;
+        else if (k === 'nexusFileStatus') meta.nexusFileStatus = Number(v) || 0;
+        else if (k === 'lastNexusQuery') meta.lastNexusQuery = v;
+        else if (k === 'lastNexusUpdate') meta.lastNexusUpdate = v;
+        else if (k === 'nexusLastModified') meta.nexusLastModified = v;
+        else if (k === 'repository') meta.repository = v || 'Nexus';
+        else if (k === 'gameName') meta.gameName = v;
         else if (k === 'installationFile') meta.installationFile = v;
       }
     } else if (inInstalledFiles) {
@@ -81,6 +97,14 @@ function scanModsDirectory(modsDir) {
       folderName: ent.name,
       modId: meta.modid,
       version: meta.version,
+      newestVersion: meta.newestVersion,
+      ignoredVersion: meta.ignoredVersion,
+      nexusFileStatus: meta.nexusFileStatus,
+      lastNexusQuery: meta.lastNexusQuery,
+      lastNexusUpdate: meta.lastNexusUpdate,
+      nexusLastModified: meta.nexusLastModified,
+      repository: meta.repository,
+      gameName: meta.gameName,
       installationFile: meta.installationFile,
       installedFiles: meta.installedFiles,
       fomodPlugins: meta.fomodPlugins
