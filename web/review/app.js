@@ -5,7 +5,7 @@ const root = document.getElementById('root');
 const statusEl = document.getElementById('status');
 const state = { decisions: {} };
 const h = s => String(s ?? '').replace(/[&<>"']/g, c => ({ '&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;' }[c]));
-const decision = id => state.decisions[id] || (state.decisions[id] = { patches: {} });
+const decision = id => state.decisions[id] || (state.decisions[id] = { patches: {}, components: {} });
 
 function summary() {
   const auto = D.autoSummary;
@@ -16,9 +16,10 @@ function summary() {
     '<span class="pill">延后人工复核 ' + auto.humanReview + '</span>' : '';
   document.getElementById('summary').innerHTML =
     '<span class="pill">待复核 ' + D.items.length + '</span>' +
-    '<span class="pill">多分支 ' + D.counts.variant + '</span>' +
-    '<span class="pill">Patch 未闭合 ' + D.counts.patch + '</span>' +
-    '<span class="pill">其他不确定 ' + D.counts.other + '</span>';
+    '<span class="pill">多分支 ' + (D.counts.variant || 0) + '</span>' +
+    '<span class="pill">Component 未闭合 ' + (D.counts.component ?? D.counts.patch ?? 0) + '</span>' +
+    '<span class="pill">Patch/Hotfix ' + (D.counts.patch || 0) + '</span>' +
+    '<span class="pill">其他不确定 ' + (D.counts.other || 0) + '</span>';
 }
 
 function renderMainOptions(it) {
@@ -42,18 +43,29 @@ function renderMainOptions(it) {
   return out + '</div>';
 }
 
-function renderPatchFamilies(it) {
-  if (!it.patchFamilies?.length) return '';
-  let out = '<div class="section"><h3>Patch / Hotfix 决策</h3>';
-  for (const f of it.patchFamilies) {
-    out += '<div class="patch"><div><b>' + h(f.family) + '</b> <span class="meta">' + h(f.reason || '需要确认') + '</span></div>' +
-      '<div style="margin:8px 0"><select data-patch-decision="' + h(it.id) + '" data-family="' + h(f.family) + '">' +
+function componentGroups(it) {
+  if (it.componentFamilies?.length) return it.componentFamilies;
+  return (it.patchFamilies || []).map(f => ({ kind: 'PATCH', key: 'PATCH:' + f.family, ...f }));
+}
+
+function renderComponentFamilies(it) {
+  const groups = componentGroups(it);
+  if (!groups.length) return '';
+  let out = '<div class="section"><h3>Required Components / Patch / Hotfix 决策</h3>' +
+    '<div class="meta">候选只是“发现到了”，不是默认要下载。每一族都必须明确决定；只有 DOWNLOAD 才会提交 exact modId:fileId。</div>';
+  for (const f of groups) {
+    const groupKey = f.key || ((f.kind || 'PATCH') + ':' + (f.family || 'GENERAL'));
+    out += '<div class="patch"><div><b>' + h(f.kind || 'PATCH') + ' · ' + h(f.family) + '</b> <span class="meta">' + h(f.reason || '需要确认') + '</span></div>' +
+      '<div style="margin:8px 0"><select data-component-decision="' + h(it.id) + '" data-component-key="' + h(groupKey) + '">' +
       '<option value="">请选择…</option><option value="DOWNLOAD">下载一个候选</option><option value="NOT_APPLICABLE">不适用于当前环境</option>' +
       '<option value="ALREADY_INCLUDED">已包含/已有</option><option value="OBSOLETE">已废弃/无需</option><option value="SKIP_FOR_NOW">本次跳过整个 MOD</option></select></div>';
     for (const p of f.candidates || []) {
-      out += '<label class="option"><div class="row"><input type="radio" name="patch-' + h(it.id) + '-' + h(f.family) + '" value="' + h(p.modId) + ':' + h(p.fileId) + '" ' + (!p.selectable ? 'disabled' : '') + '><div><b>' + h(p.name || ('候选 ' + p.key)) + '</b>' +
-        (p.installedContextMatch ? '<span class="tag">本地环境命中</span>' : '') + (!p.selectable ? '<span class="tag">需 Pi 补 exact fileId</span>' : '') +
-        '<div class="meta">' + h(p.source) + ' · modId ' + h(p.modId || '?') + ' · fileId ' + h(p.fileId || '?') + ' · v' + h(p.version || '?') + '</div>' +
+      out += '<label class="option"><div class="row"><input type="radio" name="component-' + h(it.id) + '-' + h(groupKey) + '" value="' + h(p.modId) + ':' + h(p.fileId) + '" ' + (!p.selectable ? 'disabled' : '') + '><div><b>' + h(p.name || ('候选 ' + p.key)) + '</b>' +
+        (p.requiredHint ? '<span class="tag">Requirements 指向</span>' : '') +
+        (p.optionalHint ? '<span class="tag">Optional 线索</span>' : '') +
+        (p.installedContextMatch ? '<span class="tag">本地环境命中</span>' : '') +
+        (!p.selectable ? '<span class="tag">需 Pi 补 exact fileId</span>' : '') +
+        '<div class="meta">' + h(p.kind || f.kind || 'PATCH') + ' · ' + h(p.source) + ' · modId ' + h(p.modId || '?') + ' · fileId ' + h(p.fileId || '?') + ' · v' + h(p.version || '?') + '</div>' +
         (p.evidence ? '<div class="desc">' + h(p.evidence) + '</div>' : '') + '</div></div></label>';
     }
     out += '</div>';
@@ -74,7 +86,7 @@ function render() {
     const blockers = (it.blockers || []).map(x => '<div class="blocker">⚠ ' + h(x) + '</div>').join('');
     card.innerHTML = '<div class="head"><div><b>' + h(it.localName || it.mainName || ('Mod ' + it.modId)) + '</b><div class="meta">modId ' + h(it.modId) + ' · ' + h(it.action || 'REVIEW') + '</div></div>' +
       '<a class="link" target="_blank" href="https://www.nexusmods.com/skyrimspecialedition/mods/' + encodeURIComponent(it.modId) + '?tab=files">打开 Nexus Files ↗</a></div>' +
-      '<div class="body">' + blockers + renderMainOptions(it) + renderPatchFamilies(it) +
+      '<div class="body">' + blockers + renderMainOptions(it) + renderComponentFamilies(it) +
       '<div class="section"><button class="btn secondary" data-skip="' + h(it.id) + '">本次跳过这个 MOD</button></div></div>';
     root.appendChild(card);
   }
@@ -100,13 +112,15 @@ function collect() {
     const d = decision(it.id);
     const main = document.querySelector('input[name="main-' + CSS.escape(it.id) + '"]:checked');
     if (main) d.mainFileId = main.value;
-    for (const f of it.patchFamilies || []) {
-      const select = document.querySelector('select[data-patch-decision="' + CSS.escape(it.id) + '"][data-family="' + CSS.escape(f.family) + '"]');
+    for (const f of componentGroups(it)) {
+      const groupKey = f.key || ((f.kind || 'PATCH') + ':' + (f.family || 'GENERAL'));
+      const select = document.querySelector('select[data-component-decision="' + CSS.escape(it.id) + '"][data-component-key="' + CSS.escape(groupKey) + '"]');
       if (!select) continue;
-      const x = { decision: select.value };
-      const chosen = document.querySelector('input[name="patch-' + CSS.escape(it.id) + '-' + CSS.escape(f.family) + '"]:checked');
+      const x = { decision: select.value, kind: f.kind || 'PATCH', family: f.family || 'GENERAL' };
+      const chosen = document.querySelector('input[name="component-' + CSS.escape(it.id) + '-' + CSS.escape(groupKey) + '"]:checked');
       if (chosen) [x.modId, x.fileId] = chosen.value.split(':');
-      d.patches[f.family] = x;
+      d.components[groupKey] = x;
+      if ((f.kind || 'PATCH') === 'PATCH') d.patches[f.family] = x;
     }
   }
   return state.decisions;
