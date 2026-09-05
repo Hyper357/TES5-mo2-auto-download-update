@@ -93,8 +93,6 @@ function evaluateSnapshot(snapshot, target = {}) {
       safeButton: null,
     };
 
-    // A duplicate-queue information dialog has no destructive affirmative action;
-    // acknowledging it is safe when either the exact IDs or a strong target-name match is present.
     if (kind === 'DUPLICATE_QUEUE_INFO' && (exactIds || strongName)) {
       record.safe = true;
       record.safeButton = 'OK';
@@ -156,8 +154,10 @@ function evaluateSnapshot(snapshot, target = {}) {
 }
 
 function buttonRegexForRole(role) {
-  if (role === 'OK') return '^(确定|OK|Ok|ok)$';
-  if (role === 'NO') return '^(否|No|NO|no|取消|Cancel)$';
+  // MO2/Qt may expose accelerators as 否(N), No(&N), OK(O), etc.
+  const accelerator = '(?:\\(&?[A-Za-z]\\))?';
+  if (role === 'OK') return `^(确定|OK|Ok|ok)${accelerator}$`;
+  if (role === 'NO') return `^(否|No|NO|no|取消|Cancel)${accelerator}$`;
   throw new Error(`unsupported safe button role: ${role}`);
 }
 
