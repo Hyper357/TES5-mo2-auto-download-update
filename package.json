@@ -6,7 +6,7 @@
   "type": "commonjs",
   "main": "index.js",
   "scripts": {
-    "check": "node --check scripts/nexus-autodl.js && node --check scripts/check-outdated.js && node --check scripts/lib/file-selector.js",
+    "check": "node --check index.js && node --check scripts/nexus-autodl.js && node --check scripts/check-outdated.js && node --check scripts/closure-gate.js && node --check scripts/lib/file-selector.js",
     "test": "node scripts/test-selector.js",
     "verify": "node scripts/nexus-autodl.js verify",
     "pipeline": "node index.js"
