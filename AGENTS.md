@@ -215,10 +215,10 @@ npm run queue:status
 查询一个精确文件：
 
 ```powershell
-node scripts/queue-status.js --mod-id <modId> --file-id <fileId>
+node scripts/queue-status.js --mod-id <modId> --file-id <fileId> --name "<Nexus file name>"
 ```
 
-Agent 看到 MO2 的“此文件已在下载队列中”或“重新下载?”弹窗时，第一动作不是再点一次，而是读取 `queue:status + submission-ledger + execution-state`。
+`queue-status` 从 v3.5 起也会附带 MO2 UI 队列匹配和重复弹窗状态。
 
 `--force-resubmit` 是人工恢复逃生口。Pi Agent **禁止自行使用**，除非用户明确授权，并且已有证据证明旧队列/在途下载已经不存在。
 
@@ -315,3 +315,47 @@ VERIFIED
 13. 按精确 `modId:fileId` 定点恢复，不整批重提；
 14. 只报告 VERIFIED；
 15. 不安装、不启用、不排序，除非用户另外明确授权。
+
+## 17. v3.5 MO2 UI Guard：重复弹窗只能安全取消/确认
+
+MO2 UIAutomation 只是一层额外保险，不能覆盖 fileId/ledger/verify 的权威证据。
+
+可用状态查询：
+
+```powershell
+npm run mo2:status
+node scripts/mo2-ui.js --mod-id <modId> --file-id <fileId> --name "<target name>"
+```
+
+`queue:status` 在 Windows 上也会返回 `mo2Ui.queue`、`mo2Ui.dialogs` 与 `mo2Ui.safety`。
+
+真实 NXM 提交后，`wake-mo2-download.ps1` 会短暂运行 UI Guard。允许的自动动作只有：
+
+- `DUPLICATE_QUEUE_INFO`：目标 IDs 或名称可靠匹配时点击 `确定/OK`；
+- `REDOWNLOAD_PROMPT`：目标名称可靠匹配时点击 `否/No/取消`。
+
+**绝对禁止自动点击：**
+
+- `是(Y)` / `Yes`；
+- `重新下载` / Retry / Download；
+- 身份不明确弹窗中的任何按钮。
+
+按钮匹配必须唯一；匹配到多个控件时 fail-closed，不点击。
+
+如果弹窗与当前目标无法可靠关联，状态为：
+
+```text
+MO2_DIALOG_AMBIGUOUS
+```
+
+Agent 必须停止自动操作并核对，不得为了消灭弹窗而扩大名称匹配、改成模糊点击或发送快捷键 `Y/Enter`。
+
+如果 UIAutomation 不可用：
+
+```text
+MO2_UI_UNAVAILABLE
+```
+
+继续依赖 Downloads 精确 `.meta/.unfinished`、submission ledger 和 verify；不要用坐标点击替代。
+
+如果 UI Guard 已对“重新下载？”选择了 `否`，意味着它只阻止了重复覆盖，并没有证明目标已经 VERIFIED。Agent 后续仍必须检查精确 `modId:fileId` 的队列/磁盘/ledger，不能马上再次提交。
