@@ -1,29 +1,12 @@
 #!/usr/bin/env node
 'use strict';
 
-const cp = require('child_process');
 const fs = require('fs');
 const path = require('path');
-
-function argValue(name, fallback = '') {
-  const i = process.argv.indexOf(name);
-  return i >= 0 ? process.argv[i + 1] : fallback;
-}
-function load(file, fallback = null) {
-  if (!file || !fs.existsSync(file)) return fallback;
-  return JSON.parse(fs.readFileSync(file, 'utf8'));
-}
-function save(file, value) {
-  fs.mkdirSync(path.dirname(file), { recursive: true });
-  fs.writeFileSync(file, JSON.stringify(value, null, 2), 'utf8');
-}
-function safeCell(v) { return String(v ?? '').replace(/[\t\r\n]+/g, ' ').trim(); }
-function runNode(args, options = {}) {
-  return cp.spawnSync(process.execPath, args, {
-    encoding: 'utf8', windowsHide: true,
-    stdio: options.inherit ? 'inherit' : ['ignore', 'pipe', 'pipe'],
-  });
-}
+const { argValue } = require('./lib/cli');
+const { loadJson, saveJson } = require('./lib/fs-json');
+const { formatManifest } = require('./lib/manifest');
+const { runNode } = require('./lib/process-runner');
 
 const RESOLVED = new Set(['NOT_APPLICABLE', 'ALREADY_INCLUDED', 'OBSOLETE']);
 
@@ -113,14 +96,14 @@ function validateAndBuild(review, decisions) {
 }
 
 function main() {
-  const runDir = path.resolve(argValue('--run', process.argv[2] || ''));
+  const runDir = path.resolve(argValue(process.argv, '--run', process.argv[2] || ''));
   if (!runDir || !fs.existsSync(runDir)) throw new Error('缺少有效 --run <runDir>');
   const reviewFile = path.join(runDir, 'review-center.json');
-  const decisionsFile = argValue('--decisions', path.join(runDir, 'review-decisions.json'));
+  const decisionsFile = argValue(process.argv, '--decisions', path.join(runDir, 'review-decisions.json'));
   const configFile = path.join(runDir, 'review-center-config.json');
-  const review = load(reviewFile, { items: [] });
-  const decisionsDoc = load(decisionsFile, { decisions: {} });
-  const config = load(configFile, {});
+  const review = loadJson(reviewFile, { items: [] });
+  const decisionsDoc = loadJson(decisionsFile, { decisions: {} });
+  const config = loadJson(configFile, {});
   const built = validateAndBuild(review, decisionsDoc.decisions || decisionsDoc);
 
   const stamp = new Date().toISOString().replace(/[:.]/g, '-');
@@ -129,7 +112,7 @@ function main() {
   const jobFile = path.join(jobDir, 'job.json');
   const manifest = path.join(jobDir, 'review-run.tsv');
   const state = path.join(jobDir, 'execution-state.json');
-  const writeJob = extra => save(jobFile, { generatedAt: new Date().toISOString(), runDir, jobDir, ...built, ...extra });
+  const writeJob = extra => saveJson(jobFile, { generatedAt: new Date().toISOString(), runDir, jobDir, ...built, ...extra });
 
   if (built.errors.length) {
     writeJob({ status: 'BLOCKED', errors: built.errors });
@@ -142,33 +125,32 @@ function main() {
     return;
   }
 
-  const required = ['modsDir', 'downloadsDir', 'apiKeyFile'];
-  for (const k of required) if (!config[k]) throw new Error(`review-center-config 缺少 ${k}`);
+  for (const k of ['modsDir', 'downloadsDir', 'apiKeyFile']) {
+    if (!config[k]) throw new Error(`review-center-config 缺少 ${k}`);
+  }
 
-  // Re-run environment health gate. User clicking a button must not bypass preflight.
-  const diagnose = path.join(__dirname, 'diagnose.js');
-  const diagArgs = [diagnose, '--mods-dir', config.modsDir, '--downloads', config.downloadsDir, '--api-key-file', config.apiKeyFile, '--run-dir', jobDir];
+  // User review authorizes exact candidates, but never bypasses environment health checks.
+  const diagArgs = [path.join(__dirname, 'diagnose.js'), '--mods-dir', config.modsDir, '--downloads', config.downloadsDir, '--api-key-file', config.apiKeyFile, '--run-dir', jobDir];
   if (config.sevenzip) diagArgs.push('--sevenzip', config.sevenzip);
-  const dr = runNode(diagArgs);
-  if (dr.status !== 0) {
+  const dr = runNode(diagArgs, { capture: true, allowFailure: true });
+  if (!dr.ok) {
     writeJob({ status: 'PREFLIGHT_FAILED', stdout: dr.stdout || '', stderr: dr.stderr || '' });
     console.log(JSON.stringify({ ok: false, status: 'PREFLIGHT_FAILED', jobDir }, null, 2));
     process.exit(2);
   }
 
-  fs.writeFileSync(manifest, built.rows.map(r => [r.modId,r.name,r.ver,r.note,r.fileId,r.action].map(safeCell).join('\t')).join('\n') + '\n', 'utf8');
+  fs.writeFileSync(manifest, formatManifest(built.rows), 'utf8');
   writeJob({ status: 'RUNNING', manifest, state });
 
-  const exec = path.join(__dirname, 'execute-plan.js');
-  const args = [exec, manifest, '--downloads', config.downloadsDir, '--installed-dir', config.modsDir, '--api-key-file', config.apiKeyFile, '--state', state, '--run-dir', jobDir, '--reconnect'];
+  const args = [path.join(__dirname, 'execute-plan.js'), manifest, '--downloads', config.downloadsDir, '--installed-dir', config.modsDir, '--api-key-file', config.apiKeyFile, '--state', state, '--run-dir', jobDir, '--reconnect'];
   if (config.sevenzip) args.push('--sevenzip', config.sevenzip);
   if (config.debug) args.push('--debug');
   if (config.timeoutSec) args.push('--timeout-sec', String(config.timeoutSec));
   if (config.pollSec) args.push('--poll-sec', String(config.pollSec));
-  const er = runNode(args, { inherit: true });
-  const finalStatus = er.status === 0 ? 'COMPLETED' : 'FAILED';
+  const er = runNode(args, { allowFailure: true });
+  const finalStatus = er.ok ? 'COMPLETED' : 'FAILED';
   writeJob({ status: finalStatus, manifest, state, exitCode: er.status });
-  if (er.status !== 0) process.exit(er.status || 1);
+  if (!er.ok) process.exit(er.status || 1);
 }
 
 if (require.main === module) {
