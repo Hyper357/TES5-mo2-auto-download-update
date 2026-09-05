@@ -2,108 +2,197 @@
 
 面向 Skyrim SE/AE + Mod Organizer 2 的**证据驱动 Nexus 更新流水线**。
 
-目标不是“尽量多下载”，而是：
-
 > **简单、证据充分的 MOD 自动完成；多分支、多组件、低置信项目集中交给用户确认；只有 VERIFIED 才算成功。**
 
-当前版本：**v3.9 beta**。
+当前版本：**v4.0 beta**。
 
 ## 核心能力
 
-- 以本地 `meta.ini / installationFile / fileId` 为锚点选择正确 Main File；
-- 识别 AE/SE/VR、身形、分辨率、CC、Vanilla/KS/HDT 等互斥变体；
-- **Variant Decision Memory**：用户明确选择过的 Main 语义分支会被记住；分支消失或环境冲突时重新 HOLD，不自动回退；
-- **Component Discovery**：同页 Files、Forward Requirements、Reverse Requirements、Description、本地 MO2、FOMOD 线索；
-- **Generalized Component Closure**：`RESOURCE / MESH / TEXTURE / PHYSICS / BODYSLIDE / CONFIG / HOTFIX / PATCH / TRANSLATION / OPTIONAL_COMPONENT`；
+- exact `meta.ini / installationFile / fileId` 锚定正确 Main File；
+- **MO2 Environment Graph**：读取 active Profile 的 `modlist.txt / plugins.txt / loadorder.txt`；
+- 只用当前 Profile **已启用** MOD 推断 runtime/body/compatibility 环境；禁用 MOD 仍可扫描更新，但不污染当前环境判断；
+- Variant Decision Memory：记住用户确认过的 Main 语义分支；
+- Generalized Component Discovery/Closure：`RESOURCE / MESH / TEXTURE / PHYSICS / BODYSLIDE / CONFIG / HOTFIX / PATCH / TRANSLATION / OPTIONAL_COMPONENT`；
+- Forward Requirements 查 Main 自己的依赖，Reverse Requirements 查独立 Patch/附属页；
 - 多分支/多组件/低置信项目延期到本地 Review Center；
-- 独立自动化浏览器，不控制日常 Edge；
-- `modId:fileId` 精确 NXM 提交、MO2 queue 幂等、跨运行 submission ledger；
-- MO2 重复下载弹窗安全 Guard：只允许确定/否，不自动点重新下载；
-- Flight Recorder：结构化日志、错误码、诊断快照；
-- 事务式执行：Main 与所有用户/registry 确认的 REQUIRED 组件逐项 VERIFIED；
-- `agent:status`：给 Pi/AI Agent 的小型状态 API，避免每次读取整个仓库。
+- Browser Isolation、exact NXM handoff、MO2 queue 幂等、UI Guard、Flight Recorder；
+- Main 与所有 REQUIRED Components 必须逐项 VERIFIED；
+- `agent:status` 提供给 Pi/AI 的小型状态接口。
 
-## 环境
+## v4.0：MO2 Environment Graph
 
-- Windows + Mod Organizer 2
-- Node.js 22+
-- Nexus Mods 登录账户
-- Nexus API key
-- 推荐 Chrome for Testing 作为项目专用自动化浏览器
-- 推荐 7-Zip，用于归档完整性验证
+环境图的事实源是：
 
-路径可通过命令参数/环境变量配置。仓库中的示例路径不是强制默认环境依据。
+```text
+<profile>/modlist.txt
+<profile>/plugins.txt
+<profile>/loadorder.txt
+mods/*/meta.ini
+mods/*/*.esp|esm|esl
+```
 
-## 第一次使用
+查看当前解析结果：
+
+```powershell
+npm run environment:status
+```
+
+常见输出包括：
+
+```text
+profileName
+profileSource
+enabledMods
+disabledMods
+unlistedMods
+pluginsEnabled
+missingModlistEntries
+```
+
+### Active Profile 怎么确定
+
+优先级：
+
+1. `MO2_PROFILE_DIR`；
+2. `MO2_PROFILE_NAME`；
+3. `ModOrganizer.ini` 的 selected profile；
+4. 只有一个 Profile 时才唯一推断。
+
+如果存在多个 Profile 又无法证明当前使用哪一个：
+
+```text
+PROFILE_UNRESOLVED
+```
+
+此时程序仍可扫描更新，但**不会使用缺席/禁用状态自动做兼容性 NOT_APPLICABLE 推断**。
+
+### MO2 红色感叹号不等于 MOD 有问题
+
+MO2/Nexus 的版本元数据可能由作者填写异常，从而产生红色感叹号或版本警告。v4.0 明确规定：
+
+```text
+MO2 UI warning icon = observational signal only
+trustedForUpdateDecision = false
+```
+
+因此红感叹号本身不会触发：
+
+- 更新；
+- 重下；
+- Main 分支切换；
+- 文件损坏结论；
+- `--force-resubmit`。
+
+真正决定文件身份的是：
+
+```text
+meta.ini
+installationFile
+exact fileId
+Nexus Files API
+verified relationship evidence
+```
+
+## Environment Graph 如何减少人工 Patch 判断
+
+例如当前 Profile：
+
+```text
++ USSEP
++ KS Hairdos HDT-SMP
+- Lux
+```
+
+发现候选：
+
+```text
+USSEP compatibility patch
+Lux compatibility patch
+Required Framework
+```
+
+v4.0 可以得出：
+
+```text
+USSEP patch
+→ counterpart ENABLED
+→ 仍需确认 REQUIRED / INCLUDED / OBSOLETE
+
+Lux patch
+→ counterpart DISABLED_ONLY
+→ high-confidence NOT_APPLICABLE
+
+Required Framework
+→ 如果未启用/不存在
+→ REQUIRED_DEPENDENCY_DISABLED / ABSENT
+→ HOLD，而不是 NOT_APPLICABLE
+```
+
+自动环境排除严格限定为：
+
+```text
+PATCH / HOTFIX
++ recognized compatibility family
++ active Profile 已可靠解析
++ counterpart 明确 disabled-only / absent
+```
+
+`RESOURCE / PHYSICS / BODYSLIDE / TEXTURE` 等不会因为“没看到”就自动排除。
+
+## 推荐工作流
+
+第一次/更新代码：
 
 ```powershell
 git pull
 npm install
 npm run check
 npm test
+npm run environment:status
 npm run browser:start
 npm run browser:status
 ```
 
-首次启动专用浏览器后，在该浏览器中登录 Nexus。
-
-环境体检：
-
-```powershell
-node index.js "E:\SkyrimAE\mo2\mods" "E:\SkyrimAE\tools\.nexus_api_key" --diagnose
-```
-
-## 推荐工作流
-
-### 1. Audit
+先 Audit：
 
 ```powershell
 node index.js "E:\SkyrimAE\mo2\mods" "E:\SkyrimAE\tools\.nexus_api_key" --force-refresh
 ```
 
-Audit 不触发真实下载。
-
-### 2. 看 Agent 精简状态
+看精简状态：
 
 ```powershell
 npm run agent:status
 ```
 
-常见状态：
-
-```text
-COMPLETE
-READY_FOR_GO
-REVIEW_REQUIRED
-COMPONENT_REVIEW_REQUIRED
-ATTENTION
-IN_PROGRESS_OR_ABORTED
-```
-
-### 3. 用户授权后真实下载
-
-```powershell
-node index.js "E:\SkyrimAE\mo2\mods" "E:\SkyrimAE\tools\.nexus_api_key" --go --debug
-```
-
-自动阶段只处理通过全部门禁的高置信 exact fileId。
-
-### 4. 集中处理复杂 MOD
+需要人工复核：
 
 ```powershell
 npm run review
 ```
 
+用户明确授权后真实下载：
+
+```powershell
+node index.js "E:\SkyrimAE\mo2\mods" "E:\SkyrimAE\tools\.nexus_api_key" --go --debug
+```
+
+## Review Center
+
 Review Center 会显示：
 
-- 本轮自动请求 / VERIFIED / 失败数量；
-- 当前已装 Main 分支与可选 exact Main fileId；
-- 用户已记住的 Main 分支；
-- 未闭合 Component family；
-- `RESOURCE / PHYSICS / BODYSLIDE / HOTFIX / PATCH / TRANSLATION ...` 候选；
-- 候选来源、Requirements 提示、本地环境命中、exact `modId:fileId`。
+- active MO2 Profile；
+- 当前 MOD 的 `ENABLED / DISABLED / UNLISTED` 状态；
+- Main 分支与 exact fileId；
+- Component family；
+- Forward/Reverse Requirements 证据；
+- Environment reason，例如：
+  - `COMPAT_COUNTERPART_ENABLED`
+  - `REQUIRED_DEPENDENCY_DISABLED`
+  - `REQUIRED_DEPENDENCY_ABSENT`
+- 用户记住的 Main 分支。
 
-每个组件族必须明确选择：
+Component 决策仍然是：
 
 ```text
 DOWNLOAD
@@ -113,11 +202,11 @@ OBSOLETE
 SKIP_FOR_NOW
 ```
 
-`DOWNLOAD` 只能选择报告中已有的 exact `modId:fileId`，不能由网页任意构造。
+只有 `DOWNLOAD` 会授权报告中已有的 exact `modId:fileId`。
 
 ## Variant Decision Memory
 
-例如页面同时有：
+多 Main 页面例如：
 
 ```text
 Vanilla
@@ -125,42 +214,34 @@ KS Hairdos Full
 KS Hairdos HDT-SMP
 ```
 
-第一次用户在 Review Center 明确点击 KS HDT 后，本机保存的是语义分支，而不是一次性的 fileId：
+用户明确选择一次 KS HDT 后，语义分支保存在：
 
 ```text
 .runtime/state/variant-policies.json
 ```
 
-以后仍有该分支时沿分支更新；如果分支消失、改名或与当前 runtime/body/resolution/CC 环境硬冲突：
-
-```text
-HOLD_VARIANT_POLICY_CHANGED
-```
-
-查看/清除：
+新版本同分支存在且环境无硬冲突时沿分支更新；分支消失/环境变化则 `HOLD_VARIANT_POLICY_CHANGED`，绝不自动退回 Vanilla。
 
 ```powershell
 npm run variant:status
 npm run variant:forget -- <modId>
 ```
 
-## Generalized Component Closure
+## Component Closure
 
-Main File 在进入自动下载前，Component Discovery 会检查：
+Main 进入下载前检查：
 
 ```text
-同页 Files
+Same-page Files
 Forward Nexus Requirements
 Reverse Mods requiring this file
 Description links/text
-本地 MO2 环境
-本地 FOMOD 线索
-已知独立 Patch 关系
+Active MO2 Environment Graph
+FOMOD clues
+known independent relationships
 ```
 
-发现到组件**不等于必须下载**。
-
-每个发现的 Component family 必须对精确 `mainFileId` 得到结论：
+发现组件不等于必须下载。每个 Component family 必须得到：
 
 ```text
 REQUIRED
@@ -169,7 +250,7 @@ ALREADY_INCLUDED
 OBSOLETE
 ```
 
-只有 `REQUIRED` 会进入下载事务，而且必须保存并 audit 精确：
+`REQUIRED` 必须具有并 audit：
 
 ```text
 auxModId
@@ -178,47 +259,13 @@ auxVersion
 auxName
 ```
 
-如果页面覆盖无法证明完成，或仍有未解决候选：
+未解决：`HOLD_COMPONENT_DISCOVERY`；规则缺失/过期：`HOLD_COMPONENT_CLOSURE`；冲突：`HOLD_CLOSURE_CONFLICT`。
 
-```text
-HOLD_COMPONENT_DISCOVERY
-```
+Translation 仍是独立显式闭合链。
 
-如果 registry 规则缺失、过期、冲突或无效：
+## 成功定义与防重复
 
-```text
-HOLD_COMPONENT_CLOSURE
-HOLD_CLOSURE_CONFLICT
-```
-
-Translation 仍保持独立且显式的闭合要求。
-
-详细设计：`docs/v3.9-phase2-component-closure.md`。
-
-## Reviewed Main 恢复
-
-如果 Main 已经由确定性选择器选对，只是因为 Component Discovery 未闭合而被 HOLD，Review Center 会保留该 exact Main target。
-
-用户解决组件后，reviewed download 会恢复为一个事务：
-
-```text
-exact Main target
-+ exact selected REQUIRED components
-```
-
-不会只下载补丁/资源却漏掉原本被 HOLD 的 Main。
-
-## 下载成功的定义
-
-以下都不算完成：
-
-```text
-点击下载
-拿到 nxm://
-交给 nxmhandler
-MO2 队列出现
-SUBMITTED
-```
+这些都不是成功：点击下载、拿到 `nxm://`、SUBMITTED、MO2 队列出现。
 
 只有：
 
@@ -226,72 +273,45 @@ SUBMITTED
 VERIFIED
 ```
 
-才算成功。
-
-前项失败会阻断同一事务后续项。
-
-## 防重复提交
-
-同一 exact `modId:fileId` 提交前会综合检查：
+提交 exact `modId:fileId` 前综合检查：
 
 ```text
-MO2 Downloads .meta/.unfinished
-.runtime/state/submission-ledger.json
-.runtime/state/download-executor.lock
+Downloads .meta/.unfinished
+submission-ledger.json
+download-executor.lock
 MO2 UI queue
 ```
 
-已 COMPLETE / INFLIGHT / 近期 SUBMITTED 时只等待验证，不再提交第二个 NXM。
+已 COMPLETE/INFLIGHT/近期 SUBMITTED → 等待验证，不重复 NXM。
 
 ```powershell
 npm run queue:status
 npm run mo2:status
 ```
 
-## 浏览器隔离
+## Diagnostics / artifacts
 
-```powershell
-npm run browser:install
-npm run browser:start
-npm run browser:status
-npm run browser:stop
-```
-
-Pi/自动化只允许连接项目管理的独立浏览器 Profile。9222 被普通浏览器占用时返回：
-
-```text
-BROWSER_PROFILE_MISMATCH
-```
-
-不会接管日常浏览器。
-
-## Diagnostics
-
-每轮运行位于：
+每轮：
 
 ```text
 .runtime/runs/<timestamp>/
 ```
 
-常见文件：
+重要文件：
 
 ```text
-logs/errors.jsonl
-diagnostics/failed-items.json
-execution-state.json
-patch-discovery.json          # 历史文件名；v3.9 Phase 2 内容已是 Component Discovery
-patch-discovery-tasks.tsv     # 历史文件名；内容已是 Component tasks
+mo2-environment.json
+plan.json
+patch-discovery.json          # 历史文件名，内容是 Component Discovery
+patch-discovery-tasks.tsv     # 历史文件名，内容是 Component tasks
+closure.json
 review-center.html
+execution-state.json
 final-report.json
+logs/errors.jsonl
 ```
 
-不要默认全部读取。先：
-
-```powershell
-npm run agent:status
-```
-
-然后根据 errorCode / nextActions 定点查看。
+先 `npm run agent:status`，再按 errorCode/nextActions 定点读取，不要一次塞整个仓库给 Agent。
 
 ## 常用命令
 
@@ -299,6 +319,7 @@ npm run agent:status
 npm run check
 npm test
 npm run agent:status
+npm run environment:status
 npm run diagnose
 npm run browser:start
 npm run browser:status
@@ -309,38 +330,26 @@ npm run mo2:status
 npm run review
 ```
 
-`npm run discover-patches` 保留为兼容别名。
-
 ## 安全边界
 
-默认流水线只负责审计和下载。除非用户另行明确授权，否则不会：
+默认只负责审计和下载。除非另行明确授权，不会自动安装、操作 FOMOD、启用/禁用 MOD、调整左侧优先级、排序插件或删除归档。
 
-- 安装 MOD；
-- 自动操作 FOMOD 安装器；
-- 启用/禁用 MOD；
-- 调整 MO2 左侧顺序；
-- 修改插件排序；
-- 删除旧归档；
-- 强制重新下载已经在途的文件。
-
-不得提交或打印 Nexus API key、Cookie、Authorization、完整签名 NXM 或私有浏览器会话数据。
+不得提交 Nexus API key、Cookie、Authorization、完整签名 NXM 或私有浏览器会话数据。
 
 ## 代码结构
 
 ```text
 index.js                           流水线协调器
-scripts/check-outdated.js          Main 选择 + 同页 Component 候选
-scripts/discover-patches.js        历史文件名；现为 Component Discovery 页面调查
+scripts/check-outdated.js          Main 选择 + Environment-aware planning
+scripts/lib/mo2-environment.js     Active Profile / mod / plugin 环境图
+scripts/environment-status.js      Environment Graph CLI
+scripts/discover-patches.js        Component Discovery（历史文件名）
+scripts/lib/component-discovery.js Component 分类与 closure decision
 scripts/closure-gate.js            Generalized Component Closure
 scripts/review-*.js                人工复核服务/执行
 scripts/execute-plan.js            VERIFIED 事务执行器
 scripts/nexus-autodl.js            Nexus/NXM/MO2 底层驱动
 scripts/agent-status.js            Agent 精简状态入口
-scripts/lib/component-discovery.js Component 分类/解析/闭合决策模型
-scripts/lib/variant-policy.js      用户 Main 分支记忆
-web/review/                        Review Center 前端源码
-config/aux-registry.tsv            精确 Component 决策
-config/patch-relations.tsv         已知独立 Patch 页面关系
 ```
 
-AI Agent 强制规则见 `AGENTS.md`；任务操作指南见 `SKILL.md`；历史架构演进见 `docs/`。
+详细 v4.0 设计见 `docs/v4.0-mo2-environment-graph.md`。
