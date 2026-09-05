@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 // scripts/check-outdated.js
 // 高精度更新检测：以本地 fileId 为锚点，结合文件角色、变体、版本、名称族与上传时间做确定性选择。
-// 职责边界：这里只决定“主文件候选是否可信”并收集 Patch/汉化证据；是否闭合由 closure-gate 独占决定。
+// v3.7: 多个互斥 Main 分支不再由 AI 强猜，统一进入 HUMAN REVIEW CENTER。
 
 const fs = require('fs');
 const path = require('path');
@@ -14,6 +14,7 @@ const {
   selectUpdateTarget,
   tokenSimilarity,
 } = require('./lib/file-selector');
+const { detectVariantReview } = require('./lib/variant-review');
 
 const agent = new https.Agent({ keepAlive: true, maxSockets: 20 });
 const CACHE_DIR = path.join(__dirname, '.api_cache');
@@ -43,7 +44,7 @@ function apiGet(modId, key) {
     const req = https.get({
       hostname: 'api.nexusmods.com',
       path: `/v1/games/skyrimspecialedition/mods/${modId}/files.json`,
-      headers: { apikey: key, Accept: 'application/json', 'User-Agent': 'TES5-mo2-auto-download-update/3.1' },
+      headers: { apikey: key, Accept: 'application/json', 'User-Agent': 'TES5-mo2-auto-download-update/3.7' },
       timeout: 15000,
       agent,
     }, res => {
@@ -72,9 +73,7 @@ function resolveInstalledFile(files, row) {
     .filter(Boolean);
 
   if (matches.length === 1) return { mine: matches[0], reason: 'single-fileId' };
-  if (matches.length > 1) {
-    return { mine: null, reason: 'MULTI_SOURCE', candidates: matches };
-  }
+  if (matches.length > 1) return { mine: null, reason: 'MULTI_SOURCE', candidates: matches };
 
   if (row.fileId) {
     const exact = files.find(f => String(f.file_id) === String(row.fileId));
@@ -158,16 +157,15 @@ async function main() {
         }
 
         const mine = resolved.mine;
-        const choice = selectUpdateTarget({
-          files,
-          mine,
-          localName: r.name,
-          installationFile: r.instFile,
-          profile,
-        });
-
+        const choice = selectUpdateTarget({ files, mine, localName: r.name, installationFile: r.instFile, profile });
         let action = choice.decision;
         if (action === 'DOWNLOAD' && choice.confidence !== 'high') action = 'HOLD_REVIEW';
+
+        const variantReview = detectVariantReview({ files, mine, localNames: allLocalNames });
+        const decisionNeedsMainChoice = !['SKIP_CURRENT', 'SKIP_DOWNGRADE'].includes(choice.decision);
+        if (variantReview.required && (decisionNeedsMainChoice || variantReview.recommendedDifferentFromCurrent)) {
+          action = 'HOLD_VARIANT_REVIEW';
+        }
 
         const aux = groupLatestAuxFiles(files);
         const missingTranslations = aux.filter(f => categoryRole(f) === 'TRANSLATION' && !r.installedFiles.includes(String(f.file_id)));
@@ -176,14 +174,14 @@ async function main() {
           .map(f => ({ file: f, match: likelyRelevantPatch(f, allLocalNames) }))
           .filter(x => x.match.relevant);
 
-        // 注意：发现附属候选不再修改主文件 action。
-        // 它们只是证据，由 closure-gate 与 aux-registry 做唯一的最终闭合决策。
         const target = choice.target || mine;
-        const topCandidates = (choice.ranked || []).slice(0, 5).map(x => ({
+        const topCandidates = (choice.ranked || []).slice(0, 12).map(x => ({
           fileId: x.file.file_id,
           name: x.file.name,
+          fileName: x.file.file_name || '',
           version: x.file.version,
           category: x.file.category_name,
+          description: String(x.file.description || '').replace(/\s+/g, ' ').trim().slice(0, 800),
           score: x.score,
           similarity: x.similarity,
           reasons: x.reasons,
@@ -196,6 +194,7 @@ async function main() {
           `target=${target?.file_id || ''}:${target?.version || ''}`,
         ];
         if (choice.margin !== undefined) noteParts.push(`margin=${choice.margin}`);
+        if (variantReview.required) noteParts.push(`variantReview=${variantReview.reason}`);
         if (missingTranslations.length) noteParts.push(`translationCandidates=${missingTranslations.map(f => f.file_id).join(',')}`);
         if (relevantPatches.length) noteParts.push(`patchCandidates=${relevantPatches.map(x => x.file.file_id).join(',')}`);
 
@@ -209,11 +208,12 @@ async function main() {
           latestName: target?.name || '',
           latestRole: target ? categoryRole(target) : '',
           action,
-          reason: choice.decision,
+          reason: action === 'HOLD_VARIANT_REVIEW' ? 'MULTI_VARIANT_REVIEW' : choice.decision,
           confidence: choice.confidence,
           margin: choice.margin,
           sourceResolution: resolved.reason,
           note: noteParts.join('; '),
+          manualReview: variantReview.required ? { type: 'MULTI_VARIANT', ...variantReview } : null,
           aux: {
             translations: missingTranslations.map(f => ({ fileId: f.file_id, name: f.name, version: f.version, category: f.category_name || '' })),
             patches: relevantPatches.map(x => ({ fileId: x.file.file_id, name: x.file.name, version: x.file.version, category: x.file.category_name || '', why: x.match.why })),
@@ -236,12 +236,7 @@ async function main() {
 
   if (outFile) {
     const lines = results.map(o => [
-      o.modId,
-      o.latestName || o.name,
-      o.latestVersion || '',
-      o.note || o.reason || '',
-      o.latestFileId || '',
-      o.action || 'HOLD_REVIEW',
+      o.modId, o.latestName || o.name, o.latestVersion || '', o.note || o.reason || '', o.latestFileId || '', o.action || 'HOLD_REVIEW',
     ].join('\t'));
     fs.writeFileSync(outFile, lines.join('\n') + '\n', 'utf8');
   }
@@ -255,10 +250,7 @@ async function main() {
       confidence: profile.confidence,
       evidence: profile.evidence,
     },
-    total: rows.length,
-    apiFail,
-    counts,
-    items: results,
+    total: rows.length, apiFail, counts, items: results,
   };
   if (reportFile) fs.writeFileSync(reportFile, JSON.stringify(payload, null, 2), 'utf8');
   if (asJson) console.log(JSON.stringify(payload, null, 2));
