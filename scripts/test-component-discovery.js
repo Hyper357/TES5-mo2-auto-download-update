@@ -5,6 +5,7 @@ const {
   classifyComponent,
   componentFamily,
   mergeComponentCandidates,
+  candidateRuleMatches,
   assessComponentDiscovery,
   countsByKind,
 } = require('./lib/component-discovery');
@@ -23,6 +24,16 @@ const optional = mergeComponentCandidates([
 ]);
 assert.strictEqual(optional[0].kind, 'TEXTURE');
 assert.strictEqual(optional[0].optionalHint, true, 'explicit Optional wording should be visible as a hint but not auto-resolved');
+
+// Same Nexus page is not enough when both sides have exact file IDs.
+assert.strictEqual(candidateRuleMatches(
+  { kind:'PHYSICS', auxModId:'123', fileId:'200', family:'CUSTOM:HDT' },
+  { kind:'PHYSICS', auxModId:'123', auxFileId:'201', family:'CUSTOM:HDT', status:'REQUIRED' },
+), false);
+assert.strictEqual(candidateRuleMatches(
+  { kind:'PHYSICS', auxModId:'123', fileId:'200', family:'CUSTOM:HDT' },
+  { kind:'PHYSICS', auxModId:'123', auxFileId:'200', family:'CUSTOM:OTHER', status:'REQUIRED' },
+), true);
 
 const raw = [
   { source: 'REQUIREMENTS_FORWARD', kind: 'RESOURCE', auxModId: '10', name: 'Required Framework', evidence: 'Nexus requirements', mainName: 'Example Main', requiredHint: true },
