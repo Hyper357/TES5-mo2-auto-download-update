@@ -164,6 +164,8 @@ async function main() {
   if (shouldOpen) openDefault(target);
 }
 
-main().catch(err => { console.error(`review-server failed: ${err.message}`); process.exit(1); });
+if (require.main === module) {
+  main().catch(err => { console.error(`review-server failed: ${err.message}`); process.exit(1); });
+}
 
 module.exports = { findLatestReviewRun, decorateHtml };
