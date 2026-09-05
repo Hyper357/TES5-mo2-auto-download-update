@@ -85,7 +85,18 @@ function compactOption(file, mine, localNames) {
 
 function detectVariantReview({ files, mine, localNames = [] }) {
   const mains = (files || []).filter(f => isActive(f) && categoryRole(f) === 'MAIN');
-  if (mains.length < 2) return { required: false, options: [], reason: 'single-main-branch' };
+  if (mains.length < 2) {
+    return {
+      required: false,
+      options: mains.map(f => compactOption(f, mine, localNames)),
+      reason: 'single-main-branch',
+      currentFileId: String(mine?.file_id || ''),
+      currentBranch: branchKey(mine),
+      recommendedFileId: '',
+      recommendedBranch: '',
+      recommendedDifferentFromCurrent: false,
+    };
+  }
 
   // Collapse historical releases within the same semantic branch, while keeping materially different branches.
   const byKey = new Map();
