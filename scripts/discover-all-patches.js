@@ -1,6 +1,7 @@
 #!/usr/bin/env node
 'use strict';
 
+// Historical filename kept for compatibility. v3.9 Phase 2 discovers all explicit component kinds, not only patches.
 const cp = require('child_process');
 const fs = require('fs');
 const path = require('path');
@@ -20,7 +21,7 @@ function main() {
   const modsDir = process.argv[3];
   const outFile = argValue('--out');
   if (!planFile || !modsDir || !outFile) {
-    console.error('Usage: node discover-all-patches.js <plan.json> <modsDir> --out patch-discovery.json [discover-patches options]');
+    console.error('Usage: node discover-all-patches.js <plan.json> <modsDir> --out component-discovery.json [component discovery options]');
     process.exit(2);
   }
   const plan = JSON.parse(fs.readFileSync(planFile, 'utf8'));
@@ -28,7 +29,7 @@ function main() {
     ...plan,
     items: (plan.items || []).map(item => REVIEW_ACTIONS.has(item.action) ? { ...item, discoveryOriginalAction: item.action, action: 'DOWNLOAD' } : item),
   };
-  const tempPlan = path.join(path.dirname(outFile), 'plan-patch-discovery-view.json');
+  const tempPlan = path.join(path.dirname(outFile), 'plan-component-discovery-view.json');
   fs.writeFileSync(tempPlan, JSON.stringify(transformed, null, 2), 'utf8');
 
   const childArgs = [path.join(__dirname, 'discover-patches.js'), tempPlan, modsDir];
