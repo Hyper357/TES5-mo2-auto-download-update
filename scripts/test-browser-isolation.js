@@ -13,6 +13,7 @@ const {
   managedSessionStatus,
 } = require('./lib/browser-session');
 const {
+  CANONICAL_CDP_PORT,
   browserCandidates,
   systemBrowserCandidates,
 } = require('./browser-manager');
@@ -39,6 +40,9 @@ async function main() {
   {
     assert.ok(Number.isInteger(getCdpPort()));
     assert.ok(getCdpPort() > 0);
+    // v4.1.2 persisted fallback ports while two legacy consumers still used 9222.
+    // Until those consumers are migrated, startup must preserve one canonical endpoint.
+    assert.strictEqual(CANONICAL_CDP_PORT, 9222);
   }
 
   {
@@ -53,8 +57,18 @@ async function main() {
   }
 
   {
+    // Regression from the real Windows incident: PowerShell -Command with $args[0]
+    // arrived as null on the user's host, so Chrome for Testing could never install.
+    const managerSource = fs.readFileSync(path.join(__dirname, 'browser-manager.js'), 'utf8');
+    assert.strictEqual(managerSource.includes('Expand-Archive -LiteralPath $args[0]'), false);
+    assert.ok(managerSource.includes('Expand-Archive -LiteralPath'));
+    assert.ok(managerSource.includes('browser-startup.log'));
+    assert.ok(managerSource.includes('nexus-autodl-edge'));
+  }
+
+  {
     // Regression: an HTTP service on the CDP port that returns 404/non-JSON is not
-    // "browser stopped". It is an occupied/mismatched port and browser-manager must move away.
+    // "browser stopped". It is an occupied/mismatched port and manager must not wait.
     const server = http.createServer((req, res) => {
       res.statusCode = 404;
       res.setHeader('content-type', 'text/plain');
