@@ -1,22 +1,26 @@
 #!/usr/bin/env node
-// High-precision update scan. v3.8 keeps v3.7 behavior while sharing API/cache infrastructure.
+// High-precision update scan. v3.9 phase 1 adds persistent user-confirmed variant branch policies.
 
 const fs = require('fs');
 const path = require('path');
 const { scanModsDirectory } = require('./lib/mo2-reader');
 const ModProfile = require('./lib/profile');
-const { categoryRole, groupLatestAuxFiles, selectUpdateTarget, tokenSimilarity } = require('./lib/file-selector');
-const { detectVariantReview } = require('./lib/variant-review');
+const { categoryRole, isActive, groupLatestAuxFiles, selectUpdateTarget, tokenSimilarity } = require('./lib/file-selector');
+const { detectVariantReview, branchKey } = require('./lib/variant-review');
+const { compareVersions } = require('./lib/semver');
 const { argValue, hasFlag } = require('./lib/cli');
 const { saveJson } = require('./lib/fs-json');
 const { readApiKey, createFilesClient } = require('./lib/nexus-api');
+const { defaultPolicyFile, loadVariantPolicies, getVariantPolicy, resolveVariantPolicy } = require('./lib/variant-policy');
 
+const rootDir = path.resolve(__dirname, '..');
 const modsDir = process.argv[2];
 const keyArg = process.argv[3];
 const asJson = hasFlag(process.argv, '--json');
 const forceRefresh = hasFlag(process.argv, '--force-refresh') || hasFlag(process.argv, '--no-cache');
 const outFile = argValue(process.argv, '--out', null);
 const reportFile = argValue(process.argv, '--report', null);
+const policyFile = defaultPolicyFile(rootDir);
 const api = createFilesClient({
   cacheDir: path.join(__dirname, '.api_cache'),
   forceRefresh,
@@ -53,6 +57,37 @@ function likelyRelevantPatch(patch, allLocalNames) {
     : { relevant: false, why: best.score ? `weak:${best.score.toFixed(2)}` : 'no-match' };
 }
 
+function newestInPolicyBranch(files, wantedBranch) {
+  const list = (files || [])
+    .filter(f => isActive(f) && categoryRole(f) === 'MAIN' && branchKey(f) === wantedBranch)
+    .sort((a, b) => {
+      const v = compareVersions(b.version || '', a.version || '');
+      if (v !== 0) return v;
+      const bt = Date.parse(b.uploaded_time || '') || 0;
+      const at = Date.parse(a.uploaded_time || '') || 0;
+      if (bt !== at) return bt - at;
+      return Number(b.file_id || 0) - Number(a.file_id || 0);
+    });
+  return list[0] || null;
+}
+
+function choiceFromPolicy(mine, target, policy) {
+  if (!target) return { decision: 'HOLD_VARIANT_POLICY_CHANGED', confidence: 'low', target: null, margin: null, ranked: [] };
+  if (String(target.file_id) === String(mine.file_id)) {
+    return { decision: 'SKIP_CURRENT', confidence: 'high', target: mine, margin: 999, ranked: [] };
+  }
+  const cmp = compareVersions(target.version || '', mine.version || '');
+  if (cmp < 0) return { decision: 'SKIP_DOWNGRADE', confidence: 'high', target: mine, margin: 999, ranked: [] };
+
+  const localBranch = branchKey(mine);
+  if (cmp === 0 && localBranch === policy.branchKey) {
+    return { decision: 'HOLD_SAME_VERSION_REPLACEMENT', confidence: 'medium', target, margin: 999, ranked: [] };
+  }
+
+  // Cross-branch migration is allowed only because the user explicitly confirmed this semantic branch.
+  return { decision: 'DOWNLOAD', confidence: 'high', target, margin: 999, ranked: [] };
+}
+
 async function main() {
   if (!modsDir) {
     console.error('用法: node check-outdated.js <modsDir> [apiKeyFile] [--json] [--out manifest.tsv] [--report plan.json]');
@@ -64,6 +99,7 @@ async function main() {
     process.exit(1);
   }
 
+  const policies = loadVariantPolicies(policyFile);
   const rawMods = scanModsDirectory(modsDir);
   console.error(`rows=${rawMods.length}`);
   const profile = ModProfile.analyzeFromMods(rawMods);
@@ -111,13 +147,29 @@ async function main() {
         }
 
         const mine = resolved.mine;
-        const choice = selectUpdateTarget({ files, mine, localName: r.name, installationFile: r.instFile, profile });
-        let action = choice.decision;
-        if (action === 'DOWNLOAD' && choice.confidence !== 'high') action = 'HOLD_REVIEW';
-
+        const baseChoice = selectUpdateTarget({ files, mine, localName: r.name, installationFile: r.instFile, profile });
         const variantReview = detectVariantReview({ files, mine, localNames: allLocalNames });
-        const decisionNeedsMainChoice = !['SKIP_CURRENT', 'SKIP_DOWNGRADE'].includes(choice.decision);
-        if (variantReview.required && (decisionNeedsMainChoice || variantReview.recommendedDifferentFromCurrent)) action = 'HOLD_VARIANT_REVIEW';
+        const rememberedPolicy = getVariantPolicy(policies, r.modId);
+        const policyResolution = resolveVariantPolicy(variantReview, rememberedPolicy);
+
+        let choice = baseChoice;
+        let action = choice.decision;
+        let policyTarget = null;
+
+        if (rememberedPolicy) {
+          policyTarget = newestInPolicyBranch(files, rememberedPolicy.branchKey);
+          const stable = rememberedPolicy.branchKey && rememberedPolicy.branchKey !== 'GENERIC';
+          if (!stable || !policyTarget || ['CHANGED', 'AMBIGUOUS', 'UNUSABLE'].includes(policyResolution.status)) {
+            action = 'HOLD_VARIANT_POLICY_CHANGED';
+          } else {
+            choice = choiceFromPolicy(mine, policyTarget, rememberedPolicy);
+            action = choice.decision;
+          }
+        } else {
+          if (action === 'DOWNLOAD' && choice.confidence !== 'high') action = 'HOLD_REVIEW';
+          const decisionNeedsMainChoice = !['SKIP_CURRENT', 'SKIP_DOWNGRADE'].includes(choice.decision);
+          if (variantReview.required && (decisionNeedsMainChoice || variantReview.recommendedDifferentFromCurrent)) action = 'HOLD_VARIANT_REVIEW';
+        }
 
         const aux = groupLatestAuxFiles(files);
         const missingTranslations = aux.filter(f => categoryRole(f) === 'TRANSLATION' && !r.installedFiles.includes(String(f.file_id)));
@@ -127,7 +179,7 @@ async function main() {
           .filter(x => x.match.relevant);
 
         const target = choice.target || mine;
-        const topCandidates = (choice.ranked || []).slice(0, 12).map(x => ({
+        const topCandidates = (baseChoice.ranked || []).slice(0, 12).map(x => ({
           fileId: x.file.file_id,
           name: x.file.name,
           fileName: x.file.file_name || '',
@@ -145,11 +197,13 @@ async function main() {
           `local=${mine.file_id}:${mine.version || ''}`,
           `target=${target?.file_id || ''}:${target?.version || ''}`,
         ];
-        if (choice.margin !== undefined) noteParts.push(`margin=${choice.margin}`);
+        if (choice.margin !== undefined && choice.margin !== null) noteParts.push(`margin=${choice.margin}`);
         if (variantReview.required) noteParts.push(`variantReview=${variantReview.reason}`);
+        if (rememberedPolicy) noteParts.push(`variantPolicy=${rememberedPolicy.branchKey}:${policyResolution.status}`);
         if (missingTranslations.length) noteParts.push(`translationCandidates=${missingTranslations.map(f => f.file_id).join(',')}`);
         if (relevantPatches.length) noteParts.push(`patchCandidates=${relevantPatches.map(x => x.file.file_id).join(',')}`);
 
+        const manualReviewRequired = action === 'HOLD_VARIANT_REVIEW' || action === 'HOLD_VARIANT_POLICY_CHANGED';
         results.push({
           ...r,
           localFileId: String(mine.file_id),
@@ -160,12 +214,26 @@ async function main() {
           latestName: target?.name || '',
           latestRole: target ? categoryRole(target) : '',
           action,
-          reason: action === 'HOLD_VARIANT_REVIEW' ? 'MULTI_VARIANT_REVIEW' : choice.decision,
+          reason: action === 'HOLD_VARIANT_REVIEW' ? 'MULTI_VARIANT_REVIEW' : (action === 'HOLD_VARIANT_POLICY_CHANGED' ? (policyResolution.code || 'VARIANT_POLICY_CHANGED') : choice.decision),
           confidence: choice.confidence,
           margin: choice.margin,
           sourceResolution: resolved.reason,
           note: noteParts.join('; '),
-          manualReview: variantReview.required ? { type: 'MULTI_VARIANT', ...variantReview } : null,
+          variantPolicy: rememberedPolicy ? {
+            branchKey: rememberedPolicy.branchKey,
+            lastConfirmedFileId: rememberedPolicy.lastConfirmedFileId || '',
+            lastConfirmedVersion: rememberedPolicy.lastConfirmedVersion || '',
+            lastConfirmedName: rememberedPolicy.lastConfirmedName || '',
+            resolution: policyResolution.status,
+            targetFileId: policyTarget ? String(policyTarget.file_id) : '',
+          } : null,
+          manualReview: manualReviewRequired ? {
+            type: 'MULTI_VARIANT',
+            required: true,
+            ...variantReview,
+            policy: rememberedPolicy || null,
+            policyResolution: policyResolution.status,
+          } : (variantReview.required ? { type: 'MULTI_VARIANT', ...variantReview } : null),
           aux: {
             translations: missingTranslations.map(f => ({ fileId: f.file_id, name: f.name, version: f.version, category: f.category_name || '' })),
             patches: relevantPatches.map(x => ({ fileId: x.file.file_id, name: x.file.name, version: x.file.version, category: x.file.category_name || '', why: x.match.why })),
@@ -195,6 +263,8 @@ async function main() {
 
   const payload = {
     generatedAt: new Date().toISOString(),
+    variantPolicyFile: policyFile,
+    variantPolicyCount: Object.keys(policies.policies || {}).length,
     profile: {
       platform: profile.platform,
       bodyType: profile.bodyType,
