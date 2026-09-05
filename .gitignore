@@ -8,3 +8,6 @@ node_modules/
 *.log
 *.unfinished
 *.meta
+.runtime/
+scripts/.api_cache/
+scripts/.registry_cache/
