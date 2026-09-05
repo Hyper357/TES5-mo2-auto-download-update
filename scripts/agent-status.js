@@ -7,6 +7,7 @@ const { argValue, hasFlag } = require('./lib/cli');
 const { loadJson, saveJson } = require('./lib/fs-json');
 const { findLatestRun, latestReviewJob } = require('./lib/runtime');
 const { managedSessionStatus } = require('./lib/browser-session');
+const { defaultPolicyFile, loadVariantPolicies } = require('./lib/variant-policy');
 
 const rootDir = path.resolve(__dirname, '..');
 
@@ -21,6 +22,7 @@ function sourceHintsFor(code) {
   if (/^(META_|FILEID_|VERSION_|ARCHIVE_|VERIFY_|SEVENZIP_)/.test(c)) return ['scripts/execute-plan.js', 'search scripts/nexus-autodl.js verify'];
   if (/^(MO2_DIALOG|MO2_UI)/.test(c)) return ['scripts/lib/mo2-ui-guard.js', 'scripts/mo2-ui.js', 'scripts/mo2-ui-state.ps1'];
   if (/^(MO2_QUEUE|MO2_DOWNLOAD|CONCURRENT_|LEDGER_)/.test(c)) return ['scripts/lib/download-guard.js', 'scripts/execute-plan.js'];
+  if (/^VARIANT_POLICY/.test(c)) return ['scripts/lib/variant-policy.js', 'scripts/lib/variant-review.js', 'npm run variant:status'];
   if (/^(CLOSURE_|REGISTRY_|VARIANT_|AMBIGUOUS_MAIN)/.test(c)) return ['scripts/closure-gate.js', 'scripts/lib/file-selector.js', 'scripts/lib/variant-review.js'];
   if (/PATCH/.test(c)) return ['scripts/discover-patches.js', 'scripts/lib/patch-discovery.js'];
   return [];
@@ -60,6 +62,16 @@ function ledgerSummary() {
   };
 }
 
+function variantMemorySummary() {
+  const file = defaultPolicyFile(rootDir);
+  const doc = loadVariantPolicies(file);
+  return {
+    file,
+    count: Object.keys(doc.policies || {}).length,
+    updatedAt: doc.updatedAt || null,
+  };
+}
+
 function pipelineState({ report, review, errors, patchTasks, latestJob }) {
   if (!report) return 'IN_PROGRESS_OR_ABORTED';
   if ((report.failed || 0) > 0 || errors.length) return 'ATTENTION';
@@ -90,7 +102,7 @@ async function buildStatus(runDir) {
   const browser = await managedSessionStatus({ timeout: 800 }).catch(err => ({ state: 'ERROR', errorCode: err.code || 'BROWSER_STATUS_FAILED' }));
   const job = latestReviewJob(runDir);
   const summary = {
-    version: 1,
+    version: 2,
     generatedAt: new Date().toISOString(),
     runDir,
     browser: { state: browser.state || 'UNKNOWN', managed: browser.state === 'MANAGED' },
@@ -108,6 +120,7 @@ async function buildStatus(runDir) {
       other: Number(review.counts?.other || 0),
       latestJob: job ? { status: job.status || 'UNKNOWN', jobDir: job.jobDir || null } : null,
     },
+    variantMemory: variantMemorySummary(),
     patchTasks,
     errors,
     queue: ledgerSummary(),
@@ -126,7 +139,7 @@ async function main() {
   const requested = argValue(process.argv, '--run', '');
   const runDir = requested ? path.resolve(requested) : findLatestRun(rootDir);
   if (!runDir || !fs.existsSync(runDir)) {
-    const empty = { version: 1, generatedAt: new Date().toISOString(), state: 'NO_RUN', nextActions: ['Run an AUDIT first.'] };
+    const empty = { version: 2, generatedAt: new Date().toISOString(), state: 'NO_RUN', variantMemory: variantMemorySummary(), nextActions: ['Run an AUDIT first.'] };
     console.log(JSON.stringify(empty, null, hasFlag(process.argv, '--compact') ? 0 : 2));
     return;
   }
@@ -140,4 +153,4 @@ if (require.main === module) {
   main().catch(err => { console.error(JSON.stringify({ state: 'STATUS_FAILED', error: err.message })); process.exit(1); });
 }
 
-module.exports = { buildStatus, pipelineState, readRecentErrors, sourceHintsFor };
+module.exports = { buildStatus, pipelineState, readRecentErrors, sourceHintsFor, variantMemorySummary };
