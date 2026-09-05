@@ -25,6 +25,50 @@ npm run agent:status
 - Profile/环境问题 → `npm run environment:status`；
 - 程序性 bug → 根据 sourceHints 定点读模块，不先读 60KB 下载器全文。
 
+### 用户意图分流：不要把完整更新错误地停在 Audit
+
+以下表达视为**完整更新授权**：
+
+```text
+开始项目
+开始更新
+跑完整流程
+更新我的 MOD
+开始完整更新
+```
+
+Agent 完成自检后应直接运行：
+
+```powershell
+npm run update
+```
+
+`npm run update` 本身代表：允许对**通过全部 Update Eligibility / Main / Variant / Component Closure / Preflight 安全门禁**的高置信项目进行真实下载。不要在 Audit 完成、列出 `UPDATE_CONFIRMED` 后再次问“是否开始下载”。
+
+以下表达才是**只审计**：
+
+```text
+检查一下
+扫描一下
+看看有哪些更新
+只审计
+不要下载
+```
+
+此时运行：
+
+```powershell
+npm run audit
+```
+
+完整更新模式中：
+
+- 高置信且闭合的安全项继续自动下载并逐项 VERIFIED；
+- 多分支、资格不确定、Component/Patch 未闭合或冲突项自动延期到 Review Center；
+- 单个 MOD/NXM/CDN 临时失败不得让其余安全项停工，保持失败项 NOT VERIFIED 并继续；
+- 自动阶段结束后自动打开 Review Center（若存在人工项）；
+- 只有真正的硬门禁/环境不可信才允许整条流水线停止。
+
 ## 2. Update Eligibility 是所有更新逻辑的第一门禁
 
 在讨论 Main、分支、Patch、Resource 之前，必须先回答：
@@ -146,19 +190,61 @@ npm run browser:status
 
 Nexus 自动化只允许项目管理的独立浏览器/Profile。不得给日常 Edge 开远程调试。`BROWSER_PROFILE_MISMATCH` 必须停止，不能绕过。
 
-## 5. 默认 AUDIT；真实下载必须有用户授权
+`npm run update` 与 `npm run audit` 会先确保项目管理浏览器启动，再进入总控流水线。
+
+## 5. 启动语义：FULL UPDATE 与 AUDIT ONLY
+
+### FULL UPDATE：完整流水线，不在 Audit 后再次询问
+
+当用户表达“开始项目/开始更新/跑完整流程”等完整更新意图时：
 
 ```powershell
-node index.js "<mods>" "<api-key-file>" --force-refresh
+npm run update
 ```
 
-只有用户明确允许真实下载时才可：
+其固定语义为：
+
+```text
+浏览器/Preflight
+→ 全库扫描
+→ Update Eligibility
+→ Main / Variant
+→ Component Discovery / Closure
+→ 自动下载全部高置信安全项
+→ 单项失败继续其余事务
+→ 全局 VERIFIED
+→ 自动打开 Review Center（若有人工项）
+```
+
+Agent **不得**在以下中间节点停下来重新索取方向：
+
+- 扫描完成；
+- `updates:status` 汇总完成；
+- 已找到若干 `UPDATE_CONFIRMED`；
+- 已生成 Component/Patch tasks；
+- 已区分“自动项”和“人工项”。
+
+这些都是完整更新的一部分，不是新的授权点。
+
+只有以下情况可以整条停止并报告：
+
+- Preflight/浏览器隔离等硬门禁不可信；
+- 运行所需关键配置缺失且无法安全推断；
+- 程序性故障导致总控无法继续。
+
+普通复杂项应 HOLD 到 Review Center；普通单项下载失败应继续其他事务并在最终汇报标记 NOT VERIFIED。
+
+### AUDIT ONLY：用户明确只想看、不下载
+
+当用户明确说“检查/扫描/只审计/不要下载”时：
 
 ```powershell
-node index.js "<mods>" "<api-key-file>" --go
+npm run audit
 ```
 
-不得直接调用底层下载器绕过总控。默认不安装、不启用、不禁用、不排序。
+Audit 只生成 Update Eligibility、Main/Component 计划、Review Center 与状态报告，不真实提交 NXM。
+
+不得直接调用底层下载器绕过总控。无论 FULL UPDATE 还是 AUDIT，默认都**不安装、不启用、不禁用、不排序、不自动操作 FOMOD**。
 
 ## 6. Main File：只处理 UPDATE_CONFIRMED
 
@@ -254,4 +340,4 @@ VERIFIED
 
 不得伪造 NONE、删除 HOLD、用 Agent 偏好代替用户选择、把 MO2 红感叹号或黄色箭头单独当更新事实，或在未授权时安装/启用/排序/FOMOD 自动安装。
 
-**核心原则：先证明“要不要更新”，再决定“更新哪个文件”；exact identity 描述文件身份；Profile 描述当前环境；确定性程序做门禁；VERIFIED 定义完成。**
+**核心原则：先证明“要不要更新”，再决定“更新哪个文件”；完整更新一旦启动就连续跑到自动阶段终点；复杂项交给 Review Center；exact identity 描述文件身份；Profile 描述当前环境；确定性程序做门禁；VERIFIED 定义完成。**
