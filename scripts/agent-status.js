@@ -8,6 +8,7 @@ const { loadJson, saveJson } = require('./lib/fs-json');
 const { findLatestRun, latestReviewJob } = require('./lib/runtime');
 const { managedSessionStatus } = require('./lib/browser-session');
 const { defaultPolicyFile, loadVariantPolicies } = require('./lib/variant-policy');
+const { compactEnvironmentSummary } = require('./lib/mo2-environment');
 
 const rootDir = path.resolve(__dirname, '..');
 
@@ -22,10 +23,11 @@ function sourceHintsFor(code) {
   if (/^(META_|FILEID_|VERSION_|ARCHIVE_|VERIFY_|SEVENZIP_)/.test(c)) return ['scripts/execute-plan.js', 'search scripts/nexus-autodl.js verify'];
   if (/^(MO2_DIALOG|MO2_UI)/.test(c)) return ['scripts/lib/mo2-ui-guard.js', 'scripts/mo2-ui.js', 'scripts/mo2-ui-state.ps1'];
   if (/^(MO2_QUEUE|MO2_DOWNLOAD|CONCURRENT_|LEDGER_)/.test(c)) return ['scripts/lib/download-guard.js', 'scripts/execute-plan.js'];
+  if (/^(MO2_ENVIRONMENT|PROFILE_)/.test(c)) return ['scripts/lib/mo2-environment.js', 'npm run environment:status'];
   if (/^VARIANT_POLICY/.test(c)) return ['scripts/lib/variant-policy.js', 'scripts/lib/variant-review.js', 'npm run variant:status'];
-  if (/COMPONENT|RESOURCE|BODYSLIDE|PHYSICS|HOTFIX/.test(c)) return ['scripts/discover-patches.js', 'scripts/lib/component-discovery.js', 'scripts/closure-gate.js'];
+  if (/COMPONENT|RESOURCE|BODYSLIDE|PHYSICS|HOTFIX/.test(c)) return ['scripts/discover-patches.js', 'scripts/lib/component-discovery.js', 'scripts/lib/mo2-environment.js', 'scripts/closure-gate.js'];
   if (/^(CLOSURE_|REGISTRY_|VARIANT_|AMBIGUOUS_MAIN)/.test(c)) return ['scripts/closure-gate.js', 'scripts/lib/file-selector.js', 'scripts/lib/variant-review.js'];
-  if (/PATCH/.test(c)) return ['scripts/discover-patches.js', 'scripts/lib/component-discovery.js', 'scripts/lib/patch-discovery.js'];
+  if (/PATCH/.test(c)) return ['scripts/discover-patches.js', 'scripts/lib/component-discovery.js', 'scripts/lib/patch-discovery.js', 'scripts/lib/mo2-environment.js'];
   return [];
 }
 
@@ -80,6 +82,7 @@ function pipelineState({ report, review, errors, componentTasks, latestJob }) {
 function nextActions(state, summary) {
   const actions = [];
   if (summary.browser.state !== 'MANAGED') actions.push('npm run browser:start');
+  if (summary.environment && !summary.environment.profileResolved) actions.push('MO2 active profile is unresolved; set MO2_PROFILE_NAME or MO2_PROFILE_DIR before relying on automatic applicability decisions.');
   if (state === 'ATTENTION') actions.push('Use errors[].sourceHints; do not read large source files wholesale.');
   if (summary.componentTasks > 0) actions.push('Process component discovery tasks before changing any HOLD; do not assume every candidate is REQUIRED.');
   if ((summary.review.total || 0) > 0) actions.push('Open Review Center with npm run review; do not guess complex variants/components.');
@@ -91,16 +94,20 @@ function nextActions(state, summary) {
 async function buildStatus(runDir) {
   const report = loadJson(path.join(runDir, 'final-report.json'), null);
   const review = loadJson(path.join(runDir, 'review-center.json'), { counts: {}, items: [] });
+  const environmentFile = path.join(runDir, 'mo2-environment.json');
+  const environmentGraph = loadJson(environmentFile, null);
+  const environment = compactEnvironmentSummary(environmentGraph);
   const errors = readRecentErrors(runDir, 5);
-  const taskFile = path.join(runDir, 'patch-discovery-tasks.tsv'); // historical filename; contents are generalized component tasks in v3.9 phase 2.
+  const taskFile = path.join(runDir, 'patch-discovery-tasks.tsv');
   const componentTasks = countTsvRows(taskFile);
   const browser = await managedSessionStatus({ timeout: 800 }).catch(err => ({ state: 'ERROR', errorCode: err.code || 'BROWSER_STATUS_FAILED' }));
   const job = latestReviewJob(runDir);
   const summary = {
-    version: 3,
+    version: 4,
     generatedAt: new Date().toISOString(),
     runDir,
     browser: { state: browser.state || 'UNKNOWN', managed: browser.state === 'MANAGED' },
+    environment,
     automatic: {
       mode: report?.mode || null,
       requested: Number(report?.requested ?? report?.downloadReady ?? report?.download ?? 0) || 0,
@@ -122,6 +129,7 @@ async function buildStatus(runDir) {
     errors,
     queue: ledgerSummary(),
     artifacts: {
+      environment: environmentGraph ? environmentFile : null,
       reviewCenter: fs.existsSync(path.join(runDir, 'review-center.html')) ? path.join(runDir, 'review-center.html') : null,
       failedItems: fs.existsSync(path.join(runDir, 'diagnostics', 'failed-items.json')) ? path.join(runDir, 'diagnostics', 'failed-items.json') : null,
       componentTasks: componentTasks ? taskFile : null,
@@ -137,7 +145,7 @@ async function main() {
   const requested = argValue(process.argv, '--run', '');
   const runDir = requested ? path.resolve(requested) : findLatestRun(rootDir);
   if (!runDir || !fs.existsSync(runDir)) {
-    const empty = { version: 3, generatedAt: new Date().toISOString(), state: 'NO_RUN', variantMemory: variantMemorySummary(), nextActions: ['Run an AUDIT first.'] };
+    const empty = { version: 4, generatedAt: new Date().toISOString(), state: 'NO_RUN', variantMemory: variantMemorySummary(), nextActions: ['Run an AUDIT first.'] };
     console.log(JSON.stringify(empty, null, hasFlag(process.argv, '--compact') ? 0 : 2));
     return;
   }
