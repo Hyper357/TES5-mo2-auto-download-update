@@ -9,6 +9,19 @@ const { buildReviewPayload } = require('./lib/review-center-model');
 
 const assetDir = path.resolve(__dirname, '..', 'web', 'review');
 
+function summarizeAutoReport(report) {
+  if (!report) return null;
+  const requested = Number(report.requested ?? report.downloadReady ?? report.download ?? 0) || 0;
+  const verified = Number(report.verified ?? 0) || 0;
+  return {
+    mode: report.mode || 'AUDIT',
+    requested,
+    verified,
+    failed: Number(report.failed ?? Math.max(0, requested - verified)) || 0,
+    humanReview: Number(report.humanReview ?? 0) || 0,
+  };
+}
+
 function renderHtml(payload) {
   const template = fs.readFileSync(path.join(assetDir, 'template.html'), 'utf8');
   const style = fs.readFileSync(path.join(assetDir, 'style.css'), 'utf8');
@@ -16,6 +29,7 @@ function renderHtml(payload) {
   const data = JSON.stringify(payload).replace(/</g, '\\u003c');
   return template
     .replace('/*__STYLE__*/', style)
+    .replace('__AUTO_MARKER__', payload.autoSummary ? 'data-auto-summary="embedded"' : '')
     .replace('__REVIEW_DATA__', data)
     .replace('/*__APP__*/', app);
 }
@@ -41,6 +55,7 @@ function main() {
       patchDiscovery: patchFile || null,
       closure: closureFile || null,
       autoReport: autoReport || null,
+      autoSummary: summarizeAutoReport(loadJson(autoReport, null)),
     });
 
   saveJson(outJson, payload, { atomic: false });
@@ -50,4 +65,4 @@ function main() {
 
 if (require.main === module) main();
 
-module.exports = { renderHtml };
+module.exports = { renderHtml, summarizeAutoReport };
