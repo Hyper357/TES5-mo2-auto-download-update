@@ -54,6 +54,27 @@ function compactPatchCandidate(candidate, mainModId) {
   return compactComponentCandidate({ kind: 'PATCH', ...candidate }, mainModId);
 }
 
+function eligibilityOption(item) {
+  const t = item.updateEligibility?.target;
+  if (!t?.fileId) return null;
+  return {
+    modId: String(item.modId),
+    fileId: String(t.fileId),
+    name: t.name || item.latestName || item.name || '',
+    fileName: t.fileName || '',
+    version: t.version || '',
+    category: t.category || t.role || 'Main Files',
+    description: '',
+    branchKey: '',
+    tags: [],
+    current: String(t.fileId) === String(item.localFileId || item.fileId || ''),
+    recommended: true,
+    environmentScore: 0,
+    environmentMatch: '',
+    selectable: true,
+  };
+}
+
 function buildReviewPayload(plan, discoveryDoc, closure, metadata = {}) {
   const discoveryMap = new Map((discoveryDoc.items || []).map(x => [keyOf(x.modId, x.mainFileId), x]));
   const closureMap = new Map((closure.items || []).map(x => [keyOf(x.modId, x.fileId), x]));
@@ -74,6 +95,7 @@ function buildReviewPayload(plan, discoveryDoc, closure, metadata = {}) {
       localFileId: item.localFileId || item.fileId || '',
       action: item.action || '',
       profileState: item.profileState || 'UNKNOWN',
+      updateEligibility: item.updateEligibility || null,
       targetMainFileId: item.targetMainFileId || item.latestFileId || '',
       targetMainVersion: item.targetMainVersion || item.latestVersion || '',
       targetMainName: item.targetMainName || item.latestName || item.mainName || item.name || '',
@@ -85,6 +107,7 @@ function buildReviewPayload(plan, discoveryDoc, closure, metadata = {}) {
     });
     const row = map.get(id);
     if (!row.variantPolicy && item.variantPolicy) row.variantPolicy = item.variantPolicy;
+    if (!row.updateEligibility && item.updateEligibility) row.updateEligibility = item.updateEligibility;
     if (!row.targetMainFileId && (item.targetMainFileId || item.latestFileId)) row.targetMainFileId = item.targetMainFileId || item.latestFileId;
     if (!row.targetMainVersion && (item.targetMainVersion || item.latestVersion)) row.targetMainVersion = item.targetMainVersion || item.latestVersion;
     if (!row.targetMainName && (item.targetMainName || item.latestName || item.mainName)) row.targetMainName = item.targetMainName || item.latestName || item.mainName;
@@ -93,12 +116,12 @@ function buildReviewPayload(plan, discoveryDoc, closure, metadata = {}) {
   }
 
   for (const item of plan.items || []) {
-    const isReview = ['HOLD_VARIANT_REVIEW', 'HOLD_VARIANT_POLICY_CHANGED', 'HOLD_REVIEW', 'HOLD_AMBIGUOUS', 'HOLD_LOW_CONFIDENCE', 'HOLD_SAME_VERSION_REPLACEMENT'].includes(item.action);
+    const isReview = ['HOLD_UPDATE_ELIGIBILITY', 'HOLD_VARIANT_REVIEW', 'HOLD_VARIANT_POLICY_CHANGED', 'HOLD_REVIEW', 'HOLD_AMBIGUOUS', 'HOLD_LOW_CONFIDENCE', 'HOLD_SAME_VERSION_REPLACEMENT'].includes(item.action);
     if (!isReview && !item.manualReview?.required) continue;
     const row = ensure(item);
     if (item.manualReview?.options?.length) {
       row.mainOptions = item.manualReview.options.map(option => compactMainOption(option, item));
-    } else {
+    } else if ((item.candidates || []).some(x => x.fileId)) {
       row.mainOptions = (item.candidates || []).filter(x => x.fileId).map(option => ({
         modId: String(item.modId),
         fileId: String(option.fileId),
@@ -115,6 +138,16 @@ function buildReviewPayload(plan, discoveryDoc, closure, metadata = {}) {
         environmentMatch: '',
         selectable: true,
       }));
+    } else {
+      const eo = eligibilityOption(item);
+      if (eo) row.mainOptions = [eo];
+    }
+
+    if (item.action === 'HOLD_UPDATE_ELIGIBILITY') {
+      const e = item.updateEligibility || {};
+      row.blockers.push(`更新资格尚未被证明：${e.reason || item.reason || 'UNKNOWN'}。MO2 黄色箭头只是优先信号，必须由 exact file/update-chain/真实新上传证据确认。`);
+      if (e.mo2?.signal) row.blockers.push(`MO2 更新信号：${e.mo2.reason || 'YES'}；该信号本身不能授权下载。`);
+      if (e.evidence?.length) row.blockers.push(`已取得证据：${e.evidence.join(' + ')}`);
     }
     if (item.action === 'HOLD_VARIANT_REVIEW') row.blockers.push('检测到多个互斥 Main 分支：程序不会自动从当前分支迁移到另一分支。');
     if (item.action === 'HOLD_VARIANT_POLICY_CHANGED') {
@@ -169,14 +202,15 @@ function buildReviewPayload(plan, discoveryDoc, closure, metadata = {}) {
     row.patchFamilies = row.componentFamilies.filter(x => x.kind === 'PATCH' || x.kind === 'HOTFIX');
   }
 
-  const items = [...map.values()].sort((a, b) => Number(a.modId) - Number(b.modId));
+  const items = [...map.values()].sort((a, b) => Number(b.updateEligibility?.priority || 0) - Number(a.updateEligibility?.priority || 0) || Number(a.modId) - Number(b.modId));
   const counts = {
-    variant: items.filter(x => x.mainOptions.length > 1).length,
+    updateEligibility: items.filter(x => x.action === 'HOLD_UPDATE_ELIGIBILITY').length,
+    variant: items.filter(x => x.mainOptions.length > 1 && x.action !== 'HOLD_UPDATE_ELIGIBILITY').length,
     component: items.filter(x => x.componentFamilies.length || x.blockers.some(b => /Component|Closure/i.test(b))).length,
     patch: items.filter(x => x.componentFamilies.some(f => ['PATCH', 'HOTFIX'].includes(f.kind))).length,
-    other: items.filter(x => x.mainOptions.length <= 1 && !x.componentFamilies.length).length,
+    other: items.filter(x => x.mainOptions.length <= 1 && !x.componentFamilies.length && x.action !== 'HOLD_UPDATE_ELIGIBILITY').length,
   };
-  return { generatedAt: new Date().toISOString(), version: 5, ...metadata, counts, items };
+  return { generatedAt: new Date().toISOString(), version: 6, ...metadata, counts, items };
 }
 
-module.exports = { keyOf, compactMainOption, compactComponentCandidate, compactPatchCandidate, buildReviewPayload };
+module.exports = { keyOf, compactMainOption, compactComponentCandidate, compactPatchCandidate, eligibilityOption, buildReviewPayload };
