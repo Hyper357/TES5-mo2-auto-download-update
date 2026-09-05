@@ -9,15 +9,19 @@ const V2_COLUMNS = [
   'checkedAt', 'evidence', 'note',
 ];
 
-function clean(v) {
-  return String(v || '').trim();
-}
+const V3_COLUMNS = [
+  'mainModId', 'mainFileId', 'mainVersion', 'kind', 'family', 'status',
+  'auxModId', 'auxFileId', 'auxVersion', 'auxName',
+  'checkedAt', 'evidence', 'note',
+];
+
+function clean(v) { return String(v || '').trim(); }
 
 function ruleId(rule, index = 0) {
-  return [
-    rule.mainModId || '?', rule.mainFileId || '*', rule.mainVersion || '*',
-    rule.kind || '?', rule.status || '?', rule.auxModId || '-', rule.auxFileId || '-', index,
-  ].join(':');
+  const base = [rule.mainModId || '?', rule.mainFileId || '*', rule.mainVersion || '*', rule.kind || '?'];
+  if (rule.schema >= 3) base.push(rule.family || '*');
+  base.push(rule.status || '?', rule.auxModId || '-', rule.auxFileId || '-', index);
+  return base.join(':');
 }
 
 function parseRegistryText(text) {
@@ -28,23 +32,21 @@ function parseRegistryText(text) {
     if (!line.trim() || line.trimStart().startsWith('#')) continue;
     const parts = line.split('\t').map(clean);
     let row;
-    if (parts.length >= V2_COLUMNS.length) {
+    if (parts.length >= V3_COLUMNS.length) {
+      row = Object.fromEntries(V3_COLUMNS.map((k, i) => [k, parts[i] || '']));
+      row.schema = 3;
+    } else if (parts.length >= V2_COLUMNS.length) {
       row = Object.fromEntries(V2_COLUMNS.map((k, i) => [k, parts[i] || '']));
+      row.family = '';
       row.schema = 2;
     } else {
-      // v1 legacy:
-      // mainModId mainVersion kind status auxModId auxFileId auxVersion auxName note
       const [mainModId, mainVersion, kind, status, auxModId, auxFileId, auxVersion, auxName, note] = parts;
-      row = {
-        mainModId, mainFileId: '', mainVersion, kind, status,
-        auxModId, auxFileId, auxVersion, auxName,
-        checkedAt: '', evidence: 'legacy-v1', note,
-        schema: 1,
-      };
+      row = { mainModId, mainFileId: '', mainVersion, kind, family: '', status, auxModId, auxFileId, auxVersion, auxName, checkedAt: '', evidence: 'legacy-v1', note, schema: 1 };
     }
     row.mainVersion = row.mainVersion || '*';
     row.mainFileId = row.mainFileId || '*';
     row.kind = clean(row.kind).toUpperCase();
+    row.family = clean(row.family);
     row.status = clean(row.status).toUpperCase();
     row.id = ruleId(row, index++);
     if (row.mainModId && row.kind && row.status) rows.push(row);
@@ -79,25 +81,10 @@ function isFresh(rule, maxAgeDays = 14, now = Date.now()) {
 }
 
 function findRules(rules, { mainModId, mainFileId, mainVersion }) {
-  return (rules || []).filter(rule =>
-    String(rule.mainModId) === String(mainModId) &&
-    fileMatches(rule.mainFileId, mainFileId) &&
-    versionMatches(rule.mainVersion, mainVersion)
-  );
+  return (rules || []).filter(rule => String(rule.mainModId) === String(mainModId) && fileMatches(rule.mainFileId, mainFileId) && versionMatches(rule.mainVersion, mainVersion));
 }
 
-function serializeV2(rule) {
-  return V2_COLUMNS.map(k => clean(rule[k])).join('\t');
-}
+function serializeV2(rule) { return V2_COLUMNS.map(k => clean(rule[k])).join('\t'); }
+function serializeV3(rule) { return V3_COLUMNS.map(k => clean(rule[k])).join('\t'); }
 
-module.exports = {
-  V2_COLUMNS,
-  ruleId,
-  parseRegistryText,
-  parseRegistry,
-  versionMatches,
-  fileMatches,
-  isFresh,
-  findRules,
-  serializeV2,
-};
+module.exports = { V2_COLUMNS, V3_COLUMNS, ruleId, parseRegistryText, parseRegistry, versionMatches, fileMatches, isFresh, findRules, serializeV2, serializeV3 };

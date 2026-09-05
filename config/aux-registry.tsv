@@ -1,24 +1,42 @@
-# aux-registry v2
-# mainModId	mainFileId	mainVersion	kind	status	auxModId	auxFileId	auxVersion	auxName	checkedAt	evidence	note
+# aux-registry v3 (v2 rows remain readable for migration)
+# mainModId	mainFileId	mainVersion	kind	family	status	auxModId	auxFileId	auxVersion	auxName	checkedAt	evidence	note
 #
-# 每个准备自动更新的“主 MOD 目标 fileId”必须同时闭合 PATCH 与 TRANSLATION。
-# 不能只绑定版本：同一版本可能存在多个 Main File/热修替换包，因此 mainFileId 是强制锚点。
+# v3.6 invariant:
+# - PATCH is no longer one global YES/NO flag.
+# - Patch Discovery Graph discovers candidate families from same-page Files, Nexus reverse Requirements,
+#   description links/text, learned independent patch pages, installed MO2 context, and local FOMOD evidence.
+# - Every discovered family must be resolved for the exact target mainFileId before MAIN can download.
 #
-# kind   = PATCH | TRANSLATION | SELF
-# status = NONE | REQUIRED | AUX
+# kind = PATCH | TRANSLATION | SELF
+# PATCH status = REQUIRED | NOT_APPLICABLE | ALREADY_INCLUDED | OBSOLETE | NONE
+# TRANSLATION status = REQUIRED | NONE
+# SELF status = AUX
 #
-# NONE:
-#   已核验该目标 mainFileId 当前不需要/不存在该类附属项。
-#   checkedAt 必填；evidence 必填，建议写 Nexus Files/Requirements/Translations 页核验摘要。
+# PATCH family examples: USSEP, LUX, LUX_ORBIS, JK_SKYRIM, LOTD, WACCF, CUSTOM:...
+#
 # REQUIRED:
-#   必须提供精确 auxModId + auxFileId + auxVersion + auxName；执行前 audit-registry.js 会再次向 Nexus API 验证。
+#   Exact auxModId + auxFileId + auxVersion + auxName required; audit-registry.js verifies Nexus identity.
+# NOT_APPLICABLE:
+#   Candidate exists but the relevant counterpart mod is not active/present in this MO2 setup.
+# ALREADY_INCLUDED:
+#   Compatibility fix is incorporated in main/current package; evidence must say where this is stated.
+# OBSOLETE:
+#   Patch is superseded/deprecated for the target main file; evidence required.
+# NONE:
+#   Only useful when discovery itself found zero candidate families. Blanket PATCH=NONE cannot override discovered candidates.
 # AUX:
-#   仅配合 kind=SELF，表示该 modId 本身就是附属页，不递归要求它自己的 PATCH/TRANSLATION 闭合。
+#   kind=SELF only; marks an independent patch/translation page as an auxiliary transaction item.
 #
-# 示例（不要照抄 ID）：
-# 12345	246810	2.4.1	PATCH	NONE					2026-09-05	Files+Requirements checked; no required patch	当前目标主文件无必需补丁
-# 12345	246810	2.4.1	TRANSLATION	REQUIRED	67890	135790	2.4.1	Example Chinese Translation	2026-09-05	Translations page + file page	与主 fileId=246810 明确对应
-# 67890	*	*	SELF	AUX					2026-09-05	known auxiliary page	该 modId 本身就是汉化页
+# checkedAt + evidence are mandatory for decisions. Default freshness window is 14 days.
+# mainFileId is the hard anchor: never reuse a conclusion merely because the version string is equal.
 #
-# 结论默认 14 天过期；可通过 closure-gate.js --max-age-days 调整。
-# 旧 v1 9列记录仍可解析，但默认不能通过严格门禁；只用于迁移，不建议继续新增。
+# Examples (fake IDs):
+# 12345	246810	2.4.1	PATCH	USSEP	REQUIRED	67890	135790	1.2	Example USSEP Patch	2026-09-05	Requirements reverse link + Files page	USSEP installed locally
+# 12345	246810	2.4.1	PATCH	LUX	NOT_APPLICABLE					2026-09-05	Lux not present/enabled in MO2 context	Do not download Lux patch
+# 12345	246810	2.4.1	PATCH	CUSTOM:OLD_HOTFIX	OBSOLETE					2026-09-05	Author changelog says merged into 2.4.1	No separate file
+# 12345	246810	2.4.1	TRANSLATION		REQUIRED	77777	88888	2.4.1	Example Chinese Translation	2026-09-05	Translation page	Exact target
+# 67890	*	*	SELF		AUX					2026-09-05	known auxiliary page	Independent patch page
+#
+# Legacy v2 format is still parsed:
+# mainModId mainFileId mainVersion kind status auxModId auxFileId auxVersion auxName checkedAt evidence note
+# New Patch Discovery family decisions should use v3.
