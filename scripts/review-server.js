@@ -7,70 +7,40 @@ const fs = require('fs');
 const http = require('http');
 const path = require('path');
 const url = require('url');
+const { argValue } = require('./lib/cli');
+const { loadJson, saveJson } = require('./lib/fs-json');
+const { openDefault } = require('./lib/process-runner');
+const { findLatestReviewRun, latestReviewJob } = require('./lib/runtime');
 
-function argValue(name, fallback = '') {
-  const i = process.argv.indexOf(name);
-  return i >= 0 ? process.argv[i + 1] : fallback;
-}
 function json(res, status, value) {
   const body = Buffer.from(JSON.stringify(value, null, 2));
   res.writeHead(status, { 'content-type': 'application/json; charset=utf-8', 'content-length': body.length, 'cache-control': 'no-store', 'x-content-type-options': 'nosniff' });
   res.end(body);
 }
+
 function readBody(req, limit = 1024 * 1024) {
   return new Promise((resolve, reject) => {
     let size = 0; const chunks = [];
-    req.on('data', c => { size += c.length; if (size > limit) { reject(new Error('BODY_TOO_LARGE')); req.destroy(); } else chunks.push(c); });
-    req.on('end', () => { try { resolve(JSON.parse(Buffer.concat(chunks).toString('utf8') || '{}')); } catch (e) { reject(new Error('INVALID_JSON')); } });
+    req.on('data', c => {
+      size += c.length;
+      if (size > limit) { reject(new Error('BODY_TOO_LARGE')); req.destroy(); }
+      else chunks.push(c);
+    });
+    req.on('end', () => {
+      try { resolve(JSON.parse(Buffer.concat(chunks).toString('utf8') || '{}')); }
+      catch { reject(new Error('INVALID_JSON')); }
+    });
     req.on('error', reject);
   });
 }
-function saveJson(file, value) {
-  fs.mkdirSync(path.dirname(file), { recursive: true });
-  const tmp = `${file}.tmp`;
-  fs.writeFileSync(tmp, JSON.stringify(value, null, 2), 'utf8');
-  fs.renameSync(tmp, file);
-}
-function openDefault(target) {
-  try {
-    if (process.platform === 'win32') cp.spawn('cmd.exe', ['/c', 'start', '', target], { detached: true, stdio: 'ignore', windowsHide: true }).unref();
-    else if (process.platform === 'darwin') cp.spawn('open', [target], { detached: true, stdio: 'ignore' }).unref();
-    else cp.spawn('xdg-open', [target], { detached: true, stdio: 'ignore' }).unref();
-  } catch (_) {}
-}
-function latestJob(runDir) {
-  const dir = path.join(runDir, 'review-jobs');
-  if (!fs.existsSync(dir)) return null;
-  const names = fs.readdirSync(dir).sort().reverse();
-  for (const name of names) {
-    const file = path.join(dir, name, 'job.json');
-    if (!fs.existsSync(file)) continue;
-    try { return JSON.parse(fs.readFileSync(file, 'utf8')); } catch (_) {}
-  }
-  return null;
-}
-function findLatestReviewRun() {
-  const runsDir = path.resolve(__dirname, '..', '.runtime', 'runs');
-  if (!fs.existsSync(runsDir)) return '';
-  const dirs = fs.readdirSync(runsDir, { withFileTypes: true })
-    .filter(x => x.isDirectory())
-    .map(x => x.name)
-    .sort()
-    .reverse();
-  for (const name of dirs) {
-    const candidate = path.join(runsDir, name);
-    if (fs.existsSync(path.join(candidate, 'review-center.html')) && fs.existsSync(path.join(candidate, 'review-center.json'))) return candidate;
-  }
-  return '';
-}
+
 function esc(s) {
   return String(s ?? '').replace(/[&<>"']/g, c => ({ '&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;' }[c]));
 }
+
 function decorateHtml(html, runDir) {
-  const reportFile = path.join(runDir, 'final-report.json');
-  if (!fs.existsSync(reportFile)) return html;
-  let r;
-  try { r = JSON.parse(fs.readFileSync(reportFile, 'utf8')); } catch (_) { return html; }
+  const r = loadJson(path.join(runDir, 'final-report.json'), null);
+  if (!r) return html;
   const requested = Number(r.requested ?? r.downloadReady ?? r.download ?? 0) || 0;
   const verified = Number(r.verified ?? 0) || 0;
   const failed = Number(r.failed ?? Math.max(0, requested - verified)) || 0;
@@ -81,10 +51,10 @@ function decorateHtml(html, runDir) {
 }
 
 async function main() {
-  const requested = argValue('--run', process.argv[2] || '');
-  const resolved = requested ? path.resolve(requested) : findLatestReviewRun();
-  if (!resolved || !fs.existsSync(resolved)) throw new Error('找不到 Review Center 运行目录。先运行 pipeline，或使用 --run <runDir>。');
-  const runDir = resolved;
+  const rootDir = path.resolve(__dirname, '..');
+  const requested = argValue(process.argv, '--run', process.argv[2] || '');
+  const runDir = requested ? path.resolve(requested) : findLatestReviewRun(rootDir);
+  if (!runDir || !fs.existsSync(runDir)) throw new Error('找不到 Review Center 运行目录。先运行 pipeline，或使用 --run <runDir>。');
   const htmlFile = path.join(runDir, 'review-center.html');
   const reviewFile = path.join(runDir, 'review-center.json');
   const decisionsFile = path.join(runDir, 'review-decisions.json');
@@ -92,7 +62,7 @@ async function main() {
 
   const token = crypto.randomBytes(24).toString('hex');
   let activeChild = null;
-  const basePort = Math.max(1024, Number(argValue('--port', '3217')) || 3217);
+  const basePort = Math.max(1024, Number(argValue(process.argv, '--port', '3217')) || 3217);
   const shouldOpen = !process.argv.includes('--no-open');
 
   const server = http.createServer(async (req, res) => {
@@ -112,9 +82,8 @@ async function main() {
       return res.end(body);
     }
     if (req.method === 'GET' && parsed.pathname === '/api/state') {
-      let decisions = { decisions: {} };
-      try { if (fs.existsSync(decisionsFile)) decisions = JSON.parse(fs.readFileSync(decisionsFile, 'utf8')); } catch (_) {}
-      return json(res, 200, { decisions, activePid: activeChild && activeChild.exitCode === null ? activeChild.pid : null, latestJob: latestJob(runDir) });
+      const decisions = loadJson(decisionsFile, { decisions: {} });
+      return json(res, 200, { decisions, activePid: activeChild && activeChild.exitCode === null ? activeChild.pid : null, latestJob: latestReviewJob(runDir) });
     }
     if (req.method === 'POST' && parsed.pathname === '/api/save') {
       try {
@@ -133,13 +102,15 @@ async function main() {
         const logFile = path.join(runDir, 'review-download-launch.log');
         const fd = fs.openSync(logFile, 'a');
         activeChild = cp.spawn(process.execPath, [path.join(__dirname, 'review-download.js'), '--run', runDir, '--decisions', decisionsFile], {
-          cwd: path.resolve(__dirname, '..'), windowsHide: true, detached: false, stdio: ['ignore', fd, fd],
+          cwd: rootDir, windowsHide: true, detached: false, stdio: ['ignore', fd, fd],
         });
         activeChild.on('exit', () => { try { fs.closeSync(fd); } catch (_) {} });
         return json(res, 202, { ok: true, jobId: `pid-${activeChild.pid}`, pid: activeChild.pid, logFile });
       } catch (e) { return json(res, 400, { error: e.message }); }
     }
-    if (req.method === 'GET' && parsed.pathname === '/api/job') return json(res, 200, { activePid: activeChild && activeChild.exitCode === null ? activeChild.pid : null, latestJob: latestJob(runDir) });
+    if (req.method === 'GET' && parsed.pathname === '/api/job') {
+      return json(res, 200, { activePid: activeChild && activeChild.exitCode === null ? activeChild.pid : null, latestJob: latestReviewJob(runDir) });
+    }
     return json(res, 404, { error: 'NOT_FOUND' });
   });
 
@@ -152,7 +123,9 @@ async function main() {
         else reject(err);
       };
       const onListen = () => { server.removeListener('error', onError); resolve(); };
-      server.once('error', onError); server.once('listening', onListen); server.listen(port, '127.0.0.1');
+      server.once('error', onError);
+      server.once('listening', onListen);
+      server.listen(port, '127.0.0.1');
     }
     tryListen();
   });
