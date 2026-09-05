@@ -41,7 +41,7 @@ jobs:
               (Resolve-Path $file), [ref]$tokens, [ref]$errors
             ) | Out-Null
             if ($errors.Count -gt 0) {
-              $detail = ($errors | ForEach-Object { "$file:$($_.Extent.StartLineNumber): $($_.Message)" }) -join "`n"
+              $detail = ($errors | ForEach-Object { "${file}:$($_.Extent.StartLineNumber): $($_.Message)" }) -join "`n"
               throw "PowerShell parse errors:`n$detail"
             }
           }
