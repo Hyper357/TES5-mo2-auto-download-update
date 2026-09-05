@@ -1,42 +1,50 @@
 # aux-registry v3 (v2 rows remain readable for migration)
 # mainModId	mainFileId	mainVersion	kind	family	status	auxModId	auxFileId	auxVersion	auxName	checkedAt	evidence	note
 #
-# v3.6 invariant:
-# - PATCH is no longer one global YES/NO flag.
-# - Patch Discovery Graph discovers candidate families from same-page Files, Nexus reverse Requirements,
-#   description links/text, learned independent patch pages, installed MO2 context, and local FOMOD evidence.
-# - Every discovered family must be resolved for the exact target mainFileId before MAIN can download.
+# v3.9 Phase 2 invariant:
+# - Closure is no longer limited to PATCH + TRANSLATION.
+# - Component Discovery can surface required resources, meshes, textures, physics packs, BodySlide files,
+#   configs, hotfixes, patches, translations, and explicit optional components.
+# - Every discovered component family must be resolved for the exact target mainFileId before MAIN can be released.
+# - Discovery of a component does NOT mean it should be downloaded. Applicability is a separate decision.
 #
-# kind = PATCH | TRANSLATION | SELF
-# PATCH status = REQUIRED | NOT_APPLICABLE | ALREADY_INCLUDED | OBSOLETE | NONE
-# TRANSLATION status = REQUIRED | NONE
+# kind = RESOURCE | MESH | TEXTURE | PHYSICS | BODYSLIDE | CONFIG | HOTFIX | PATCH | TRANSLATION | OPTIONAL_COMPONENT | SELF
+# component status = REQUIRED | NOT_APPLICABLE | ALREADY_INCLUDED | OBSOLETE | NONE
 # SELF status = AUX
 #
-# PATCH family examples: USSEP, LUX, LUX_ORBIS, JK_SKYRIM, LOTD, WACCF, CUSTOM:...
+# family examples:
+#   PATCH: USSEP, LUX, JK_SKYRIM, LOTD, CUSTOM:...
+#   HOTFIX: CUSTOM:MISSING_TEXTURES
+#   PHYSICS: CUSTOM:HDT_SMP
+#   BODYSLIDE: CUSTOM:CBBE_3BA
+#   RESOURCE: CUSTOM:REQUIRED_FRAMEWORK
 #
 # REQUIRED:
 #   Exact auxModId + auxFileId + auxVersion + auxName required; audit-registry.js verifies Nexus identity.
 # NOT_APPLICABLE:
-#   Candidate exists but the relevant counterpart mod is not active/present in this MO2 setup.
+#   Candidate exists but does not apply to the active MO2 environment/branch.
 # ALREADY_INCLUDED:
-#   Compatibility fix is incorporated in main/current package; evidence must say where this is stated.
+#   Component is already incorporated in the selected Main/current package or otherwise already satisfied.
 # OBSOLETE:
-#   Patch is superseded/deprecated for the target main file; evidence required.
+#   Component is superseded/deprecated for the target main file.
 # NONE:
-#   Only useful when discovery itself found zero candidate families. Blanket PATCH=NONE cannot override discovered candidates.
+#   Only valid when discovery found zero candidates for that kind. NONE cannot override discovered candidates.
 # AUX:
-#   kind=SELF only; marks an independent patch/translation page as an auxiliary transaction item.
+#   kind=SELF only; marks an independent auxiliary page as an auxiliary transaction item.
 #
+# For non-TRANSLATION component decisions, v3 rows should use a family so the decision binds to one candidate family.
+# REQUIRED always needs exact identity. Negative decisions require evidence.
 # checkedAt + evidence are mandatory for decisions. Default freshness window is 14 days.
 # mainFileId is the hard anchor: never reuse a conclusion merely because the version string is equal.
 #
 # Examples (fake IDs):
+# 12345	246810	2.4.1	RESOURCE	CUSTOM:REQUIRED_FRAMEWORK	REQUIRED	55555	55556	3.2	Example Required Framework	2026-09-05	Forward Nexus Requirements	Required by selected Main
+# 12345	246810	2.4.1	PHYSICS	CUSTOM:HDT_SMP	REQUIRED	12345	246811	2.4.1	HDT-SMP Physics Files	2026-09-05	Same-page Optional Files + current HDT environment	Exact branch component
+# 12345	246810	2.4.1	BODYSLIDE	CUSTOM:CBBE_3BA	NOT_APPLICABLE					2026-09-05	BHUNP profile active; CBBE BodySlide not applicable	Do not download
 # 12345	246810	2.4.1	PATCH	USSEP	REQUIRED	67890	135790	1.2	Example USSEP Patch	2026-09-05	Requirements reverse link + Files page	USSEP installed locally
-# 12345	246810	2.4.1	PATCH	LUX	NOT_APPLICABLE					2026-09-05	Lux not present/enabled in MO2 context	Do not download Lux patch
-# 12345	246810	2.4.1	PATCH	CUSTOM:OLD_HOTFIX	OBSOLETE					2026-09-05	Author changelog says merged into 2.4.1	No separate file
+# 12345	246810	2.4.1	HOTFIX	CUSTOM:OLD_HOTFIX	OBSOLETE					2026-09-05	Author changelog says merged into 2.4.1	No separate file
 # 12345	246810	2.4.1	TRANSLATION		REQUIRED	77777	88888	2.4.1	Example Chinese Translation	2026-09-05	Translation page	Exact target
-# 67890	*	*	SELF		AUX					2026-09-05	known auxiliary page	Independent patch page
+# 67890	*	*	SELF		AUX					2026-09-05	known auxiliary page	Independent auxiliary page
 #
 # Legacy v2 format is still parsed:
 # mainModId mainFileId mainVersion kind status auxModId auxFileId auxVersion auxName checkedAt evidence note
-# New Patch Discovery family decisions should use v3.
