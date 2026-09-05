@@ -143,12 +143,10 @@ function scoreCandidate({ mine, candidate, localName = '', installationFile = ''
 
   if (!isActive(candidate)) rejects.push('retired-file');
   if (!roleCompatible(mine, candidate)) rejects.push(`role:${categoryRole(mine)}->${categoryRole(candidate)}`);
-  const variantConflicts = hardVariantConflicts(localText, candText, profile);
-  rejects.push(...variantConflicts);
+  rejects.push(...hardVariantConflicts(localText, candText, profile));
 
   const cmp = compareVersions(candidate?.version || '', mine?.version || '');
   if (cmp < 0) rejects.push('version-downgrade');
-
   if (rejects.length) return { accepted: false, score: -Infinity, reasons, rejects, similarity: 0 };
 
   let score = 0;
@@ -164,9 +162,7 @@ function scoreCandidate({ mine, candidate, localName = '', installationFile = ''
     reasons.push('main-update-category');
   }
 
-  const mineRole = categoryRole(mine);
-  const candRole = categoryRole(candidate);
-  if (mineRole === candRole) {
+  if (categoryRole(mine) === categoryRole(candidate)) {
     score += 12;
     reasons.push('same-role');
   }
@@ -204,14 +200,13 @@ function selectUpdateTarget({ files, mine, localName = '', installationFile = ''
 
   if (!ranked.length) return { decision: 'HOLD_NO_SAFE_TARGET', confidence: 'low', target: null, ranked };
 
-  const current = ranked.find(x => String(x.file.file_id) === String(mine.file_id));
   const alternatives = ranked.filter(x => String(x.file.file_id) !== String(mine.file_id));
   const best = alternatives[0];
-
   if (!best) return { decision: 'SKIP_CURRENT', confidence: 'high', target: mine, ranked };
 
   const second = alternatives[1];
-  const margin = second ? best.score - second.score : best.score - (current?.score || 0);
+  // margin 只比较“新目标之间”的差距。当前文件有 +100 锚点奖励，不能拿它参与候选置信度差值。
+  const margin = second ? best.score - second.score : best.score;
   const versionCmp = compareVersions(best.file.version || '', mine.version || '');
 
   if (best.score < minScore) {
