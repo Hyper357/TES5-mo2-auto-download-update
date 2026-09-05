@@ -14,16 +14,21 @@ const environment = {
   summary: { enabledMods: 1500, disabledMods: 400 },
   uiWarningTrustedForUpdateDecision: false,
 };
-const plan = { environment, items: [{
-  modId: '160675', name: 'Sassy SnW', profileState:'ENABLED', localFileId: '100', latestFileId:'300', latestVersion:'2', latestName:'KS Hairdos HDT', action: 'HOLD_VARIANT_REVIEW',
-  manualReview: {
-    required: true, recommendedFileId: '300',
-    options: [
+const plan = { environment, items: [
+  {
+    modId: '160675', name: 'Sassy SnW', profileState:'ENABLED', localFileId: '100', latestFileId:'300', latestVersion:'2', latestName:'KS Hairdos HDT', action: 'HOLD_VARIANT_REVIEW',
+    updateEligibility:{state:'UPDATE_CONFIRMED',eligible:true,confidence:'high',reason:'NEWER_EXACT_FILE_IN_SAME_LANE_BY_UPLOAD_TIME',mo2Agreement:'AGREES',mo2Hint:{installedVersion:'1',newestVersion:'2',wouldShowUpdateArrow:true},installed:{fileId:'100',version:'1'},newerCandidates:[{fileId:'300',version:'2',name:'KS Hairdos HDT'}]},
+    manualReview: { required: true, recommendedFileId: '300', options: [
       { fileId: '100', name: 'Vanilla', version: '1', current: true, branchKey: 'VANILLA' },
       { fileId: '300', name: 'KS Hairdos HDT', version: '2', current: false, branchKey: 'KS_HDT', tags: ['HDT_SMP'] },
-    ],
+    ] },
   },
-}] };
+  {
+    modId:'999', name:'Ambiguous Update', profileState:'ENABLED', localFileId:'10', latestFileId:'20', latestVersion:'2', latestName:'Candidate', action:'HOLD_UPDATE_ELIGIBILITY',
+    updateEligibility:{state:'UPDATE_UNCERTAIN',eligible:false,confidence:'low',reason:'GENERIC_MAIN_BRANCH_AMBIGUOUS',mo2Hint:{installedVersion:'1',newestVersion:'2',wouldShowUpdateArrow:true},installed:{fileId:'10',version:'1'},sameRoleCandidates:[{fileId:'20',version:'2',name:'Candidate'}]},
+    candidates:[{fileId:'20',name:'Candidate',version:'2'}],
+  },
+] };
 const discovery = { environment, items: [{
   modId: '160675', mainFileId: '300', mainVersion:'2', mainName: 'Sassy SnW', complete: false, coverageProblems: [],
   unresolved: [
@@ -36,28 +41,37 @@ const closure = { items: [] };
 
 const autoSummary = summarizeAutoReport({ mode: 'DOWNLOAD', requested: 42, verified: 40, failed: 2, humanReview: 7 });
 const payload = buildReviewPayload(plan, discovery, closure, { plan: 'plan.json', autoSummary, environment });
-assert.strictEqual(payload.items.length, 1);
+assert.strictEqual(payload.items.length, 2);
 assert.strictEqual(payload.counts.variant, 1);
+assert.strictEqual(payload.counts.updateEligibility, 1);
 assert.strictEqual(payload.counts.component, 1);
 assert.strictEqual(payload.counts.patch, 1);
 assert.strictEqual(payload.environment.profileName, 'Default');
 assert.strictEqual(payload.environment.uiWarningTrustedForUpdateDecision, false);
-assert.strictEqual(payload.items[0].profileState, 'ENABLED');
-assert.strictEqual(payload.items[0].targetMainFileId, '300');
-assert.strictEqual(payload.items[0].mainOptions.find(x => x.fileId === '300').recommended, true);
-assert.strictEqual(payload.items[0].componentFamilies.length, 2);
-assert.ok(payload.items[0].componentFamilies.some(x => x.kind === 'RESOURCE'));
-assert.ok(payload.items[0].componentFamilies.some(x => x.kind === 'HOTFIX'));
-assert.strictEqual(payload.items[0].patchFamilies[0].kind, 'HOTFIX');
-assert.strictEqual(payload.items[0].componentFamilies.find(x => x.kind==='HOTFIX').candidates[0].modId, '160675');
-const resourceCandidate = payload.items[0].componentFamilies.find(x => x.kind==='RESOURCE').candidates[0];
+const sassy = payload.items.find(x=>x.modId==='160675');
+assert.strictEqual(sassy.profileState, 'ENABLED');
+assert.strictEqual(sassy.targetMainFileId, '300');
+assert.strictEqual(sassy.mainOptions.find(x => x.fileId === '300').recommended, true);
+assert.strictEqual(sassy.updateEligibility.state,'UPDATE_CONFIRMED');
+assert.strictEqual(sassy.componentFamilies.length, 2);
+assert.ok(sassy.componentFamilies.some(x => x.kind === 'RESOURCE'));
+assert.ok(sassy.componentFamilies.some(x => x.kind === 'HOTFIX'));
+assert.strictEqual(sassy.patchFamilies[0].kind, 'HOTFIX');
+assert.strictEqual(sassy.componentFamilies.find(x => x.kind==='HOTFIX').candidates[0].modId, '160675');
+const resourceCandidate = sassy.componentFamilies.find(x => x.kind==='RESOURCE').candidates[0];
 assert.strictEqual(resourceCandidate.modId, '500');
 assert.strictEqual(resourceCandidate.environmentDecision.reason, 'REQUIRED_DEPENDENCY_DISABLED');
 assert.strictEqual(resourceCandidate.environmentDecision.resolved, false);
+const ambiguous = payload.items.find(x=>x.modId==='999');
+assert.strictEqual(ambiguous.updateEligibility.state,'UPDATE_UNCERTAIN');
+assert.ok(ambiguous.blockers.some(x=>/更新资格/.test(x)));
 assert.strictEqual(payload.autoSummary.verified, 40);
 
 const html = renderHtml(payload);
 assert.match(html, /window\.REVIEW_DATA=/);
+assert.match(html, /Update Eligibility/);
+assert.match(html, /UPDATE_UNCERTAIN/);
+assert.match(html, /MO2 黄色更新箭头/);
 assert.match(html, /KS Hairdos HDT/);
 assert.match(html, /Required Framework/);
 assert.match(html, /REQUIRED_DEPENDENCY_DISABLED/);
