@@ -8,6 +8,12 @@ const h = s => String(s ?? '').replace(/[&<>"']/g, c => ({ '&':'&amp;','<':'&lt;
 const decision = id => state.decisions[id] || (state.decisions[id] = { patches: {} });
 
 function summary() {
+  const auto = D.autoSummary;
+  document.getElementById('auto-summary').innerHTML = auto ?
+    '<span class="pill">自动请求 ' + auto.requested + '</span>' +
+    '<span class="pill good">VERIFIED ' + auto.verified + '</span>' +
+    '<span class="pill ' + (auto.failed ? 'danger' : 'good') + '">失败/未验证 ' + auto.failed + '</span>' +
+    '<span class="pill">延后人工复核 ' + auto.humanReview + '</span>' : '';
   document.getElementById('summary').innerHTML =
     '<span class="pill">待复核 ' + D.items.length + '</span>' +
     '<span class="pill">多分支 ' + D.counts.variant + '</span>' +
