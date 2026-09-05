@@ -23,7 +23,7 @@ const COMPONENT_KINDS = [
 ];
 
 const RESOLVED_STATUSES = new Set(['REQUIRED', 'NOT_APPLICABLE', 'ALREADY_INCLUDED', 'OBSOLETE']);
-const NON_BLOCKING_TEXT = /(optional only|purely optional|not required|no need|choose one|alternative only|cosmetic only)/i;
+const NON_BLOCKING_TEXT = /(\boptional\b|purely optional|not required|no need|choose one|alternative only|cosmetic only)/i;
 
 function classifyComponent(text, meta = {}) {
   const raw = String(text || '');
@@ -131,6 +131,7 @@ function mergeComponentCandidates(items) {
       sources: [...new Set([...(prev.sources || []), ...(c.sources || [])])],
       installed: prev.installed || c.installed,
       requiredHint: prev.requiredHint || c.requiredHint,
+      // Keep the optional badge only when every merged observation remains compatible with it.
       optionalHint: prev.optionalHint && c.optionalHint,
       applicabilityHints: [...new Set([...(prev.applicabilityHints || []), ...(c.applicabilityHints || [])])],
       evidence: [prev.evidence, c.evidence].filter(Boolean).join(' | ').slice(0, 2500),
