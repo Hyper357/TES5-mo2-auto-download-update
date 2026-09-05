@@ -15,20 +15,33 @@ function countTsvRows(file) {
   return fs.readFileSync(file, 'utf8').split(/\r?\n/).filter(x => x.trim() && !x.startsWith('#')).length;
 }
 
+function sourceHintsFor(code) {
+  const c = String(code || '');
+  if (/^(NXM_|DOM_|NEXUS_LOGIN|CDP_)/.test(c)) return ['search scripts/nexus-autodl.js for the errorCode/function', 'scripts/lib/browser-session.js'];
+  if (/^(META_|FILEID_|VERSION_|ARCHIVE_|VERIFY_|SEVENZIP_)/.test(c)) return ['scripts/execute-plan.js', 'search scripts/nexus-autodl.js verify'];
+  if (/^(MO2_DIALOG|MO2_UI)/.test(c)) return ['scripts/lib/mo2-ui-guard.js', 'scripts/mo2-ui.js', 'scripts/mo2-ui-state.ps1'];
+  if (/^(MO2_QUEUE|MO2_DOWNLOAD|CONCURRENT_|LEDGER_)/.test(c)) return ['scripts/lib/download-guard.js', 'scripts/execute-plan.js'];
+  if (/^(CLOSURE_|REGISTRY_|VARIANT_|AMBIGUOUS_MAIN)/.test(c)) return ['scripts/closure-gate.js', 'scripts/lib/file-selector.js', 'scripts/lib/variant-review.js'];
+  if (/PATCH/.test(c)) return ['scripts/discover-patches.js', 'scripts/lib/patch-discovery.js'];
+  return [];
+}
+
 function readRecentErrors(runDir, limit = 5) {
   const file = path.join(runDir, 'logs', 'errors.jsonl');
   if (!fs.existsSync(file)) return [];
   const lines = fs.readFileSync(file, 'utf8').split(/\r?\n/).filter(Boolean).slice(-limit);
   return lines.map(line => {
     let e;
-    try { e = JSON.parse(line); } catch { return { code: 'UNPARSEABLE_LOG_ENTRY' }; }
+    try { e = JSON.parse(line); } catch { return { code: 'UNPARSEABLE_LOG_ENTRY', sourceHints: [] }; }
+    const code = e.errorCode || e.code || e.error?.code || 'UNKNOWN';
     return {
-      code: e.errorCode || e.code || e.error?.code || 'UNKNOWN',
+      code,
       stage: e.stage || e.component || null,
       modId: e.modId || e.context?.modId || null,
       fileId: e.fileId || e.context?.fileId || null,
       status: e.status || null,
       action: e.action || e.error?.action || null,
+      sourceHints: sourceHintsFor(code),
     };
   });
 }
@@ -61,7 +74,7 @@ function pipelineState({ report, review, errors, patchTasks, latestJob }) {
 function nextActions(state, summary) {
   const actions = [];
   if (summary.browser.state !== 'MANAGED') actions.push('npm run browser:start');
-  if (state === 'ATTENTION') actions.push('Read only the listed error codes, then diagnostics/failed-items.json for matching targets.');
+  if (state === 'ATTENTION') actions.push('Use errors[].sourceHints; do not read large source files wholesale.');
   if (summary.patchTasks > 0) actions.push('Process patch-discovery-tasks.tsv before changing any HOLD.');
   if ((summary.review.total || 0) > 0) actions.push('Open Review Center with npm run review; do not guess complex variants.');
   if (state === 'READY_FOR_GO') actions.push('Await explicit user authorization before --go.');
@@ -127,4 +140,4 @@ if (require.main === module) {
   main().catch(err => { console.error(JSON.stringify({ state: 'STATUS_FAILED', error: err.message })); process.exit(1); });
 }
 
-module.exports = { buildStatus, pipelineState, readRecentErrors };
+module.exports = { buildStatus, pipelineState, readRecentErrors, sourceHintsFor };
