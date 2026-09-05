@@ -105,4 +105,17 @@ const review = {
   assert.match(x.rows[1].note,/closure:PATCH/);
 }
 
+// Update eligibility is upstream of Component Closure. A review click must never generate a direct Main download.
+{
+  const eligibilityHold = { items: [{
+    id:'mod:88',modId:'88',action:'HOLD_UPDATE_ELIGIBILITY',localFileId:'800',blockers:[],
+    updateEligibility:{status:'HOLD_UPDATE_ELIGIBILITY',reason:'SAME_VERSION_NEWER_FILE_REPLACEMENT'},
+    mainOptions:[{modId:'88',fileId:'801',name:'Replacement Main',version:'1.0',current:false,selectable:true,recommended:true}],
+    componentFamilies:[],patchFamilies:[],
+  }]};
+  const x=validateAndBuild(eligibilityHold,{'mod:88':{mainFileId:'801'}});
+  assert.strictEqual(x.rows.length,0);
+  assert.ok(x.errors.some(e=>e.code==='REVIEW_UPDATE_ELIGIBILITY_REAUDIT_REQUIRED'));
+}
+
 console.log('review download tests: OK');
