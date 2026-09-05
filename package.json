@@ -1,15 +1,16 @@
 {
   "name": "tes5-mo2-auto-download-update",
-  "version": "3.1.0-beta.1",
+  "version": "3.2.0-beta.1",
   "private": true,
-  "description": "Evidence-bound, file-ID-precise Nexus update planning and verified MO2 downloads for Skyrim SE/AE.",
+  "description": "Evidence-bound, file-ID-precise Nexus update planning with diagnostics and verified MO2 downloads for Skyrim SE/AE.",
   "type": "commonjs",
   "main": "index.js",
   "scripts": {
-    "check": "node --check index.js && node --check scripts/nexus-autodl.js && node --check scripts/check-outdated.js && node --check scripts/closure-gate.js && node --check scripts/audit-registry.js && node --check scripts/build-review-queue.js && node --check scripts/execute-plan.js && node --check scripts/lib/file-selector.js && node --check scripts/lib/aux-registry.js && node --check scripts/lib/profile.js",
-    "test": "node scripts/test-selector.js && node scripts/test-profile.js && node scripts/test-registry.js && node scripts/test-closure.js",
+    "check": "node --check index.js && node --check scripts/nexus-autodl.js && node --check scripts/check-outdated.js && node --check scripts/closure-gate.js && node --check scripts/audit-registry.js && node --check scripts/build-review-queue.js && node --check scripts/execute-plan.js && node --check scripts/diagnose.js && node --check scripts/lib/file-selector.js && node --check scripts/lib/aux-registry.js && node --check scripts/lib/profile.js && node --check scripts/lib/diagnostics.js",
+    "test": "node scripts/test-selector.js && node scripts/test-profile.js && node scripts/test-registry.js && node scripts/test-closure.js && node scripts/test-diagnostics.js",
     "verify": "node scripts/nexus-autodl.js verify",
     "audit-registry": "node scripts/audit-registry.js",
+    "diagnose": "node scripts/diagnose.js",
     "pipeline": "node index.js"
   },
   "dependencies": {
