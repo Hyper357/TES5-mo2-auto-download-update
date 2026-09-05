@@ -7,12 +7,14 @@ const os = require('os');
 const path = require('path');
 const { pipelineState, readRecentErrors, sourceHintsFor } = require('./agent-status');
 
-assert.strictEqual(pipelineState({ report: null, review: { items: [] }, errors: [], patchTasks: 0, latestJob: null }), 'IN_PROGRESS_OR_ABORTED');
-assert.strictEqual(pipelineState({ report: { mode: 'AUDIT', downloadReady: 2, failed: 0 }, review: { items: [] }, errors: [], patchTasks: 0, latestJob: null }), 'READY_FOR_GO');
-assert.strictEqual(pipelineState({ report: { mode: 'DOWNLOAD', failed: 0 }, review: { items: [{}] }, errors: [], patchTasks: 0, latestJob: null }), 'REVIEW_REQUIRED');
-assert.strictEqual(pipelineState({ report: { mode: 'DOWNLOAD', failed: 1 }, review: { items: [] }, errors: [], patchTasks: 0, latestJob: null }), 'ATTENTION');
+assert.strictEqual(pipelineState({ report: null, review: { items: [] }, errors: [], componentTasks: 0, latestJob: null }), 'IN_PROGRESS_OR_ABORTED');
+assert.strictEqual(pipelineState({ report: { mode: 'AUDIT', downloadReady: 2, failed: 0 }, review: { items: [] }, errors: [], componentTasks: 0, latestJob: null }), 'READY_FOR_GO');
+assert.strictEqual(pipelineState({ report: { mode: 'DOWNLOAD', failed: 0 }, review: { items: [{}] }, errors: [], componentTasks: 0, latestJob: null }), 'REVIEW_REQUIRED');
+assert.strictEqual(pipelineState({ report: { mode: 'DOWNLOAD', failed: 0 }, review: { items: [] }, errors: [], componentTasks: 2, latestJob: null }), 'COMPONENT_REVIEW_REQUIRED');
+assert.strictEqual(pipelineState({ report: { mode: 'DOWNLOAD', failed: 1 }, review: { items: [] }, errors: [], componentTasks: 0, latestJob: null }), 'ATTENTION');
 assert.ok(sourceHintsFor('NXM_EXPIRED')[0].includes('nexus-autodl.js'));
 assert.ok(sourceHintsFor('META_MISMATCH').includes('scripts/execute-plan.js'));
+assert.ok(sourceHintsFor('HOLD_COMPONENT_DISCOVERY').includes('scripts/lib/component-discovery.js'));
 
 const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'tes5-agent-status-'));
 try {
