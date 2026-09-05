@@ -12,6 +12,19 @@ const { defaultPolicyFile, rememberVariantPolicy } = require('./lib/variant-poli
 const rootDir = path.resolve(__dirname, '..');
 const RESOLVED = new Set(['NOT_APPLICABLE', 'ALREADY_INCLUDED', 'OBSOLETE']);
 
+function componentGroups(item) {
+  if (item.componentFamilies?.length) return item.componentFamilies;
+  return (item.patchFamilies || []).map(f => ({ kind: 'PATCH', key: `PATCH:${f.family}`, ...f }));
+}
+
+function componentDecision(decisionDoc, group) {
+  const key = group.key || `${group.kind || 'PATCH'}:${group.family || 'GENERAL'}`;
+  const fromComponents = decisionDoc?.components?.[key];
+  if (fromComponents) return fromComponents;
+  if ((group.kind || 'PATCH') === 'PATCH') return decisionDoc?.patches?.[group.family];
+  return null;
+}
+
 function validateAndBuild(review, decisions) {
   const rows = [];
   const accepted = [];
@@ -23,7 +36,8 @@ function validateAndBuild(review, decisions) {
     if (!d) continue;
     if (d.skip) { ignored.push({ itemId: item.id, reason: 'USER_SKIP' }); continue; }
 
-    const hasAny = !!d.mainFileId || Object.values(d.patches || {}).some(x => x && x.decision);
+    const groups = componentGroups(item);
+    const hasAny = !!d.mainFileId || groups.some(g => componentDecision(d, g)?.decision);
     if (!hasAny) continue;
 
     const hardCoverageBlocker = (item.blockers || []).find(x => /覆盖不完整|coverage/i.test(x));
@@ -45,56 +59,79 @@ function validateAndBuild(review, decisions) {
       }
     }
 
-    let patchError = false;
-    const patchRows = [];
-    for (const family of item.patchFamilies || []) {
-      const pd = d.patches?.[family.family];
-      if (!pd?.decision) {
-        errors.push({ itemId: item.id, code: 'REVIEW_PATCH_DECISION_REQUIRED', family: family.family, detail: '每个未闭合 Patch family 必须明确决定。' });
-        patchError = true;
+    const componentRows = [];
+    let componentError = false;
+    for (const group of groups) {
+      const kind = group.kind || 'PATCH';
+      const family = group.family || 'GENERAL';
+      const groupKey = group.key || `${kind}:${family}`;
+      const cd = componentDecision(d, group);
+      if (!cd?.decision) {
+        errors.push({ itemId: item.id, code: 'REVIEW_COMPONENT_DECISION_REQUIRED', kind, family, detail: `每个未闭合 ${kind} component family 必须明确决定。` });
+        componentError = true;
         continue;
       }
-      if (pd.decision === 'SKIP_FOR_NOW') {
-        ignored.push({ itemId: item.id, reason: `USER_SKIP_PATCH:${family.family}` });
-        patchError = true;
+      if (cd.decision === 'SKIP_FOR_NOW') {
+        ignored.push({ itemId: item.id, reason: `USER_SKIP_COMPONENT:${groupKey}` });
+        componentError = true;
         continue;
       }
-      if (RESOLVED.has(pd.decision)) continue;
-      if (pd.decision !== 'DOWNLOAD') {
-        errors.push({ itemId: item.id, code: 'REVIEW_SELECTION_INVALID', family: family.family, detail: `未知 Patch decision=${pd.decision}` });
-        patchError = true;
+      if (RESOLVED.has(cd.decision)) continue;
+      if (cd.decision !== 'DOWNLOAD') {
+        errors.push({ itemId: item.id, code: 'REVIEW_SELECTION_INVALID', kind, family, detail: `未知 component decision=${cd.decision}` });
+        componentError = true;
         continue;
       }
-      const candidate = (family.candidates || []).find(c => c.selectable && String(c.modId) === String(pd.modId) && String(c.fileId) === String(pd.fileId));
+      const candidate = (group.candidates || []).find(c => c.selectable && String(c.modId) === String(cd.modId) && String(c.fileId) === String(cd.fileId));
       if (!candidate) {
-        errors.push({ itemId: item.id, code: 'REVIEW_SELECTION_INVALID', family: family.family, detail: 'Patch exact modId:fileId 不在允许候选中，或仍缺 exact fileId。' });
-        patchError = true;
+        errors.push({ itemId: item.id, code: 'REVIEW_SELECTION_INVALID', kind, family, detail: `${kind} exact modId:fileId 不在允许候选中，或仍缺 exact fileId。` });
+        componentError = true;
         continue;
       }
-      patchRows.push({ ...candidate, family: family.family });
+      componentRows.push({ ...candidate, kind, family, groupKey });
     }
-    if (patchError) continue;
+    if (componentError) continue;
 
-    const txAnchor = selectedMain?.fileId || item.localFileId || item.modId;
+    const autoMain = !selectedMain && item.targetMainFileId ? {
+      modId: String(item.modId),
+      fileId: String(item.targetMainFileId),
+      name: item.targetMainName || item.mainName || item.localName || `Mod ${item.modId}`,
+      version: item.targetMainVersion || '',
+      current: String(item.targetMainFileId) === String(item.localFileId || ''),
+      branchKey: '',
+      tags: [],
+      automaticTarget: true,
+    } : null;
+    const mainTarget = selectedMain || autoMain;
+    const txAnchor = mainTarget?.fileId || item.localFileId || item.modId;
     const tx = `review:${item.modId}:${txAnchor}`;
-    if (selectedMain && !selectedMain.current) {
+
+    if (mainTarget && !mainTarget.current) {
       rows.push({
-        modId: String(item.modId), name: selectedMain.name, ver: selectedMain.version,
-        note: `tx=${tx}; user-review-confirmed; branch=${selectedMain.branchKey || ''}`,
-        fileId: String(selectedMain.fileId), action: 'DOWNLOAD',
+        modId: String(item.modId),
+        name: mainTarget.name,
+        ver: mainTarget.version,
+        note: `tx=${tx}; ${mainTarget.automaticTarget ? 'planner-main-released-after-component-review' : 'user-review-confirmed'}${mainTarget.branchKey ? `; branch=${mainTarget.branchKey}` : ''}`,
+        fileId: String(mainTarget.fileId),
+        action: 'DOWNLOAD',
       });
     }
-    for (const p of patchRows) {
+    for (const c of componentRows) {
       rows.push({
-        modId: String(p.modId), name: p.name, ver: p.version,
-        note: `tx=${tx}; closure:PATCH; family=${p.family}; user-review-confirmed`,
-        fileId: String(p.fileId), action: 'DOWNLOAD',
+        modId: String(c.modId),
+        name: c.name,
+        ver: c.version,
+        note: `tx=${tx}; closure:${c.kind}; family=${c.family}; user-review-confirmed`,
+        fileId: String(c.fileId),
+        action: 'DOWNLOAD',
       });
     }
+
     accepted.push({
       itemId: item.id,
       tx,
-      main: selectedMain ? selectedMain.fileId : null,
+      main: mainTarget ? mainTarget.fileId : null,
+      automaticMain: !!autoMain,
       rememberMain: !!(d.rememberMain && selectedMain),
       mainSelection: selectedMain ? {
         modId: String(item.modId),
@@ -104,7 +141,8 @@ function validateAndBuild(review, decisions) {
         branchKey: selectedMain.branchKey || '',
         tags: selectedMain.tags || [],
       } : null,
-      patches: patchRows.map(p => `${p.modId}:${p.fileId}`),
+      components: componentRows.map(c => ({ kind: c.kind, family: c.family, exact: `${c.modId}:${c.fileId}` })),
+      patches: componentRows.filter(c => c.kind === 'PATCH').map(c => `${c.modId}:${c.fileId}`),
     });
   }
 
@@ -148,7 +186,6 @@ function main() {
     process.exit(2);
   }
 
-  // Persist only explicit Main clicks from a fully valid review submission. This is preference state, not a download-success marker.
   policyUpdates = persistRememberedPolicies(built, policyFile);
 
   if (!built.rows.length) {
@@ -161,7 +198,6 @@ function main() {
     if (!config[k]) throw new Error(`review-center-config 缺少 ${k}`);
   }
 
-  // User review authorizes exact candidates, but never bypasses environment health checks.
   const diagArgs = [path.join(__dirname, 'diagnose.js'), '--mods-dir', config.modsDir, '--downloads', config.downloadsDir, '--api-key-file', config.apiKeyFile, '--run-dir', jobDir];
   if (config.sevenzip) diagArgs.push('--sevenzip', config.sevenzip);
   const dr = runNode(diagArgs, { capture: true, allowFailure: true });
@@ -190,4 +226,4 @@ if (require.main === module) {
   catch (err) { console.error(`review-download failed: ${err.message}`); process.exit(1); }
 }
 
-module.exports = { validateAndBuild, persistRememberedPolicies };
+module.exports = { componentGroups, componentDecision, validateAndBuild, persistRememberedPolicies };

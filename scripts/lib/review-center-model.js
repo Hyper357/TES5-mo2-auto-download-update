@@ -23,10 +23,11 @@ function compactMainOption(option, item) {
   };
 }
 
-function compactPatchCandidate(candidate, mainModId) {
+function compactComponentCandidate(candidate, mainModId) {
   const modId = String(candidate.auxModId || (candidate.source === 'SAME_PAGE_FILE' ? mainModId : '') || '');
   return {
     key: candidate.key || '',
+    kind: candidate.kind || 'PATCH',
     family: candidate.family || 'GENERAL',
     source: candidate.source || '',
     modId,
@@ -34,15 +35,26 @@ function compactPatchCandidate(candidate, mainModId) {
     version: candidate.version || '',
     name: candidate.name || '',
     evidence: candidate.evidence || '',
+    requiredHint: !!candidate.requiredHint,
+    optionalHint: !!candidate.optionalHint,
     installedContextMatch: !!candidate.installedContextMatch,
     localMatches: candidate.localMatches || [],
     selectable: !!(modId && candidate.fileId),
   };
 }
 
-function buildReviewPayload(plan, patch, closure, metadata = {}) {
-  const patchMap = new Map((patch.items || []).map(x => [keyOf(x.modId, x.mainFileId), x]));
+function compactPatchCandidate(candidate, mainModId) {
+  return compactComponentCandidate({ kind: 'PATCH', ...candidate }, mainModId);
+}
+
+function buildReviewPayload(plan, discoveryDoc, closure, metadata = {}) {
+  const discoveryMap = new Map((discoveryDoc.items || []).map(x => [keyOf(x.modId, x.mainFileId), x]));
   const closureMap = new Map((closure.items || []).map(x => [keyOf(x.modId, x.fileId), x]));
+  const planTargetMap = new Map();
+  for (const p of plan.items || []) {
+    const fid = p.latestFileId || p.fileId || '';
+    if (p.modId && fid) planTargetMap.set(keyOf(p.modId, fid), p);
+  }
   const map = new Map();
 
   function ensure(item) {
@@ -51,16 +63,23 @@ function buildReviewPayload(plan, patch, closure, metadata = {}) {
       id,
       modId: String(item.modId),
       localName: item.name || item.localName || '',
-      mainName: item.latestName || item.name || '',
+      mainName: item.latestName || item.mainName || item.name || '',
       localFileId: item.localFileId || item.fileId || '',
       action: item.action || '',
+      targetMainFileId: item.targetMainFileId || item.latestFileId || '',
+      targetMainVersion: item.targetMainVersion || item.latestVersion || '',
+      targetMainName: item.targetMainName || item.latestName || item.mainName || item.name || '',
       variantPolicy: item.variantPolicy || null,
       mainOptions: [],
+      componentFamilies: [],
       patchFamilies: [],
       blockers: [],
     });
     const row = map.get(id);
     if (!row.variantPolicy && item.variantPolicy) row.variantPolicy = item.variantPolicy;
+    if (!row.targetMainFileId && (item.targetMainFileId || item.latestFileId)) row.targetMainFileId = item.targetMainFileId || item.latestFileId;
+    if (!row.targetMainVersion && (item.targetMainVersion || item.latestVersion)) row.targetMainVersion = item.targetMainVersion || item.latestVersion;
+    if (!row.targetMainName && (item.targetMainName || item.latestName || item.mainName)) row.targetMainName = item.targetMainName || item.latestName || item.mainName;
     return row;
   }
 
@@ -88,64 +107,67 @@ function buildReviewPayload(plan, patch, closure, metadata = {}) {
         selectable: true,
       }));
     }
-    if (item.action === 'HOLD_VARIANT_REVIEW') {
-      row.blockers.push('检测到多个互斥 Main 分支：程序不会自动从当前分支迁移到另一分支。');
-    }
+    if (item.action === 'HOLD_VARIANT_REVIEW') row.blockers.push('检测到多个互斥 Main 分支：程序不会自动从当前分支迁移到另一分支。');
     if (item.action === 'HOLD_VARIANT_POLICY_CHANGED') {
       const oldBranch = item.variantPolicy?.branchKey || item.manualReview?.policy?.branchKey || '未知分支';
       row.blockers.push(`已记住的 Main 分支 ${oldBranch} 在当前文件结构中无法安全复用；必须重新确认，绝不会自动回退到其他分支。`);
     }
   }
 
-  for (const discovery of patch.items || []) {
+  for (const discovery of discoveryDoc.items || []) {
     if (discovery.complete) continue;
+    const planItem = planTargetMap.get(keyOf(discovery.modId, discovery.mainFileId)) || {};
     const row = ensure({
+      ...planItem,
       modId: discovery.modId,
-      name: discovery.mainName,
-      latestName: discovery.mainName,
-      localFileId: '',
-      action: 'HOLD_PATCH_DISCOVERY',
+      name: planItem.name || discovery.mainName,
+      latestName: planItem.latestName || discovery.mainName,
+      targetMainFileId: discovery.mainFileId,
+      targetMainVersion: discovery.mainVersion,
+      targetMainName: discovery.mainName,
+      action: 'HOLD_COMPONENT_DISCOVERY',
     });
-    row.action = row.action || 'HOLD_PATCH_DISCOVERY';
+    row.action = row.action || 'HOLD_COMPONENT_DISCOVERY';
     for (const problem of discovery.coverageProblems || []) {
-      row.blockers.push(`Patch discovery 覆盖不完整：${problem.source} / ${problem.status}${problem.detail ? ` — ${problem.detail}` : ''}`);
+      row.blockers.push(`Component discovery 覆盖不完整：${problem.source} / ${problem.status}${problem.detail ? ` — ${problem.detail}` : ''}`);
     }
+
     const families = new Map();
     for (const candidate of discovery.unresolved || []) {
+      const kind = candidate.kind || 'PATCH';
       const family = candidate.family || 'GENERAL';
-      if (!families.has(family)) families.set(family, { family, reason: '未解决 Patch family', candidates: [] });
-      families.get(family).candidates.push(compactPatchCandidate(candidate, discovery.modId));
+      const groupKey = `${kind}:${family}`;
+      if (!families.has(groupKey)) {
+        families.set(groupKey, { key: groupKey, kind, family, reason: `未解决 ${kind} component family`, candidates: [] });
+      }
+      families.get(groupKey).candidates.push(compactComponentCandidate(candidate, discovery.modId));
     }
-    row.patchFamilies.push(...families.values());
+    row.componentFamilies.push(...families.values());
   }
 
   for (const row of map.values()) {
-    const targetId = row.mainOptions.find(x => x.recommended)?.fileId || row.localFileId || '';
+    const targetId = row.mainOptions.find(x => x.recommended)?.fileId || row.targetMainFileId || row.localFileId || '';
     const closureItem = closureMap.get(keyOf(row.modId, targetId));
     if (closureItem?.closure === 'FAILED') {
       if (closureItem.missingKinds?.length) row.blockers.push(`Closure 未完成：${closureItem.missingKinds.join(', ')}`);
       if (closureItem.conflicts?.length) row.blockers.push(`Closure 证据冲突：${closureItem.conflicts.join(' | ')}`);
     }
     row.blockers = [...new Set(row.blockers)];
-    const discovery = patchMap.get(keyOf(row.modId, targetId));
-    if (discovery && !discovery.complete && !row.patchFamilies.length) {
-      row.blockers.push('Patch Discovery 尚未闭合；需要 Pi Agent 先补候选 exact fileId/证据。');
+    const discovery = discoveryMap.get(keyOf(row.modId, targetId));
+    if (discovery && !discovery.complete && !row.componentFamilies.length) {
+      row.blockers.push('Component Discovery 尚未闭合；需要 Pi Agent 先补候选 exact fileId/证据。');
     }
+    row.patchFamilies = row.componentFamilies.filter(x => x.kind === 'PATCH' || x.kind === 'HOTFIX');
   }
 
   const items = [...map.values()].sort((a, b) => Number(a.modId) - Number(b.modId));
   const counts = {
     variant: items.filter(x => x.mainOptions.length > 1).length,
-    patch: items.filter(x => x.patchFamilies.length || x.blockers.some(b => /Patch/i.test(b))).length,
-    other: items.filter(x => x.mainOptions.length <= 1 && !x.patchFamilies.length).length,
+    component: items.filter(x => x.componentFamilies.length || x.blockers.some(b => /Component|Closure/i.test(b))).length,
+    patch: items.filter(x => x.componentFamilies.some(f => ['PATCH', 'HOTFIX'].includes(f.kind))).length,
+    other: items.filter(x => x.mainOptions.length <= 1 && !x.componentFamilies.length).length,
   };
-  return {
-    generatedAt: new Date().toISOString(),
-    version: 3,
-    ...metadata,
-    counts,
-    items,
-  };
+  return { generatedAt: new Date().toISOString(), version: 4, ...metadata, counts, items };
 }
 
-module.exports = { keyOf, compactMainOption, compactPatchCandidate, buildReviewPayload };
+module.exports = { keyOf, compactMainOption, compactComponentCandidate, compactPatchCandidate, buildReviewPayload };
