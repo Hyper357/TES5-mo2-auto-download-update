@@ -187,7 +187,42 @@ node index.js "<mods>" "<api key>" --go
 
 已经 `VERIFIED` 的 `modId:fileId` 不得重复提交。
 
-## 11. Debug / Flight Recorder 是故障事实源
+## 11. Queue-aware idempotency：禁止重复提交同一 fileId
+
+从 v3.4 开始，是否允许把 NXM 再次交给 MO2，不只看当前 run 的 `execution-state.json`，还必须同时检查：
+
+```text
+MO2 Downloads 中精确 modID + fileID 的 .meta/.unfinished.meta/.unfinished
+.runtime/state/submission-ledger.json
+.runtime/state/download-executor.lock
+```
+
+规则：
+
+- 精确 `modId:fileId` 已有完整归档：不再提交，直接 verify；
+- 精确 `modId:fileId` 已有 `.meta` 但归档未完成：视为 `INFLIGHT`，只等待，不重提；
+- 精确 `modId:fileId` 已有 `.unfinished.meta` / `.unfinished`：视为 `INFLIGHT`，只等待，不重提；
+- ledger 为近期 `SUBMITTING/SUBMITTED/WAITING_EXISTING/POSSIBLY_SUBMITTED/VERIFY_TIMEOUT`：新 run 不得再次提交；
+- ledger 为 `VERIFIED` 但下载证据突然缺失：必须报 `LEDGER_VERIFIED_MISSING`，不得自行重下；
+- 已有另一个真实下载执行器持有锁：必须报 `CONCURRENT_EXECUTOR`，不得并行跑第二个 `--go`。
+
+查询全局状态：
+
+```powershell
+npm run queue:status
+```
+
+查询一个精确文件：
+
+```powershell
+node scripts/queue-status.js --mod-id <modId> --file-id <fileId>
+```
+
+Agent 看到 MO2 的“此文件已在下载队列中”或“重新下载?”弹窗时，第一动作不是再点一次，而是读取 `queue:status + submission-ledger + execution-state`。
+
+`--force-resubmit` 是人工恢复逃生口。Pi Agent **禁止自行使用**，除非用户明确授权，并且已有证据证明旧队列/在途下载已经不存在。
+
+## 12. Debug / Flight Recorder 是故障事实源
 
 普通模式记录 INFO/WARN/ERROR；需要更细信息时使用：
 
@@ -200,28 +235,33 @@ node index.js "<mods>" "<api key>" --go --debug
 1. `logs/errors.jsonl`：找到 `errorCode / layer / retryable / action`；
 2. `diagnostics/failed-items.json`：定位具体 `tx + modId + fileId`；
 3. `execution-state.json`：查看 attempt、submit、verify 状态；
-4. 若是 Browser/NXM 错误，再看 `diagnostics/*browser*.json` 与 `screenshots/*.png`；
-5. 只有证据表明代码/selector 真有问题时才修改代码。
+4. `npm run queue:status` 与 `.runtime/state/submission-ledger.json`：确认是否已经提交/在途；
+5. 若是 Browser/NXM 错误，再看 `diagnostics/*browser*.json` 与 `screenshots/*.png`；
+6. 只有证据表明代码/selector 真有问题时才修改代码。
 
 禁止把完整签名 NXM、Cookie、API key、Authorization 写进 Issue、日志或聊天。Flight Recorder 会主动脱敏，Agent 也必须继续遵守。
 
-## 12. 错误码决定是否允许自动重试
+## 13. 错误码决定是否允许自动重试
 
-程序只允许对已标记 `retry=true` 的瞬态错误进行有限次数重试，例如：
+程序只允许对已标记 `retry=true` 的瞬态错误进行有限次数恢复，但 **retryable 不等于“可以再次把 NXM 交给 MO2”**。
+
+明确发生在 NXM handoff 之前的错误，例如：
 
 - `NEXUS_API_429`
 - `NEXUS_API_TIMEOUT`
 - `CDP_UNAVAILABLE`
 - `NXM_EXTRACT_FAILED`
 - `NXM_EXPIRED`
-- `NXM_HANDLER_FAILED`
-- `MO2_QUEUE_NOT_FOUND`
-- `MO2_DOWNLOAD_STALLED`
-- `VERIFY_TIMEOUT`
+
+才允许执行器在重新检查 Downloads 后进行有限的精确再提交。
+
+靠近/经过 MO2 handler 边界的错误如果无法证明“尚未提交”，必须记为 `POSSIBLY_SUBMITTED` 并先等待 verify，不能用重试制造重复队列。
 
 以下错误属于安全熔断，**不得自动重试到成功**：
 
 - `BROWSER_PROFILE_MISMATCH`
+- `CONCURRENT_EXECUTOR`
+- `LEDGER_VERIFIED_MISSING`
 - `FILEID_MISMATCH`
 - `META_MISMATCH`
 - `VERSION_MISMATCH`
@@ -231,21 +271,22 @@ node index.js "<mods>" "<api key>" --go --debug
 - `CLOSURE_CONFLICT`
 - `AMBIGUOUS_MAIN_FILE`
 
-默认提交最多尝试 2 次，可用 `--max-submit-attempts` 调整，但 Agent 不得把次数无限增大来掩盖根因。
+默认提交最多尝试 2 次，但只有安全的 pre-submit 错误才能走第二次；Agent 不得把次数无限增大来掩盖根因。
 
-## 13. 不允许整批盲目重跑
+## 14. 不允许整批盲目重跑
 
 一个事务失败后：
 
 - 先确定具体 `modId:fileId`；
-- 确认错误码是否可重试；
-- 只恢复当前精确项；
+- 检查 submission ledger 与 Downloads 在途状态；
+- 确认错误发生在 NXM handoff 前还是后；
 - 已 VERIFIED 项保持不动；
-- 后续 Patch/汉化只有主项重新 VERIFIED 后才可继续。
+- 已 SUBMITTED/INFLIGHT 项只等待/核验；
+- 后续 Patch/汉化只有主项 VERIFIED 后才可继续。
 
 不要因为一个文件失败就重新提交整个批次。
 
-## 14. 成功的唯一定义
+## 15. 成功的唯一定义
 
 以下都不等于成功：页面点击成功、NXM 已取得、SUBMITTED、MO2 队列出现、LANDED。
 
@@ -257,19 +298,20 @@ VERIFIED
 
 才允许报告“下载完成”。至少要求 `.meta` 的 modID/fileID/版本匹配、归档完整、没有未完成状态，并通过 7-Zip 测试。
 
-## 15. 推荐 Pi Agent 工作循环
+## 16. 推荐 Pi Agent 工作循环
 
 1. `git pull`；
 2. `npm install`；
 3. `npm run check && npm test`；
 4. `npm run browser:start`，确认 `browser:status` 为 `MANAGED`；
 5. `--diagnose`；
-6. 运行 Audit pipeline；
-7. 处理 `review-queue.tsv/json`；
-8. 更新并审计 `aux-registry.tsv`；
-9. 再次 Audit；
-10. 用户授权后运行 `--go`；
-11. 若失败，读取 `errors.jsonl + failed-items.json`；
-12. 按错误码定点恢复，不整批重提；
-13. 只报告 VERIFIED；
-14. 不安装、不启用、不排序，除非用户另外明确授权。
+6. `npm run queue:status`，确认没有另一个活跃下载执行器；
+7. 运行 Audit pipeline；
+8. 处理 `review-queue.tsv/json`；
+9. 更新并审计 `aux-registry.tsv`；
+10. 再次 Audit；
+11. 用户授权后运行唯一一个 `--go`；
+12. 若失败，读取 `errors.jsonl + failed-items.json + submission-ledger.json`；
+13. 按精确 `modId:fileId` 定点恢复，不整批重提；
+14. 只报告 VERIFIED；
+15. 不安装、不启用、不排序，除非用户另外明确授权。
