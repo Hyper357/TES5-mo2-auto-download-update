@@ -40,6 +40,18 @@ function validateAndBuild(review, decisions) {
     const hasAny = !!d.mainFileId || groups.some(g => componentDecision(d, g)?.decision);
     if (!hasAny) continue;
 
+    // v4.1 safety invariant: update eligibility is an upstream gate. A human click here may
+    // acknowledge evidence, but it must never bypass Main -> Component Discovery -> Closure.
+    // Ambiguous eligibility therefore cannot produce a reviewed-download manifest directly.
+    if (item.action === 'HOLD_UPDATE_ELIGIBILITY') {
+      errors.push({
+        itemId: item.id,
+        code: 'REVIEW_UPDATE_ELIGIBILITY_REAUDIT_REQUIRED',
+        detail: '更新资格尚未由确定性证据确认。不得从 Review Center 直接下载 Main；先重新审计/补充更新证据，使其进入 UPDATE_CONFIRMED，再走 Main/Component Closure。',
+      });
+      continue;
+    }
+
     const hardCoverageBlocker = (item.blockers || []).find(x => /覆盖不完整|coverage/i.test(x));
     if (hardCoverageBlocker) {
       errors.push({ itemId: item.id, code: 'REVIEW_BLOCKED_BY_DISCOVERY_COVERAGE', detail: hardCoverageBlocker });
