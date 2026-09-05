@@ -1,72 +1,29 @@
 #!/usr/bin/env node
 'use strict';
 
-const fs = require('fs');
 const path = require('path');
-const https = require('https');
 const { parseRegistry } = require('./lib/aux-registry');
 const { normalizeVer } = require('./lib/semver');
-
-const agent = new https.Agent({ keepAlive: true, maxSockets: 8 });
-const cacheDir = path.join(__dirname, '.registry_cache');
-fs.mkdirSync(cacheDir, { recursive: true });
-
-function argValue(name, fallback = '') {
-  const i = process.argv.indexOf(name);
-  return i >= 0 ? process.argv[i + 1] : fallback;
-}
+const { argValue, hasFlag } = require('./lib/cli');
+const { saveJson } = require('./lib/fs-json');
+const { readApiKey, createFilesClient } = require('./lib/nexus-api');
 
 const registryFile = process.argv[2];
 const keyFile = process.argv[3];
-const outFile = argValue('--out');
-const forceRefresh = process.argv.includes('--force-refresh');
-
-function apiGet(modId, apiKey) {
-  const cacheFile = path.join(cacheDir, `${modId}.json`);
-  if (!forceRefresh && fs.existsSync(cacheFile)) {
-    try {
-      const st = fs.statSync(cacheFile);
-      if (Date.now() - st.mtimeMs < 6 * 3600 * 1000) {
-        return Promise.resolve(JSON.parse(fs.readFileSync(cacheFile, 'utf8')));
-      }
-    } catch (_) {}
-  }
-
-  return new Promise((resolve, reject) => {
-    const req = https.get({
-      hostname: 'api.nexusmods.com',
-      path: `/v1/games/skyrimspecialedition/mods/${modId}/files.json`,
-      headers: {
-        apikey: apiKey,
-        Accept: 'application/json',
-        'User-Agent': 'TES5-mo2-auto-download-update/3.1',
-      },
-      timeout: 15000,
-      agent,
-    }, res => {
-      let body = '';
-      res.on('data', c => body += c);
-      res.on('end', () => {
-        if (res.statusCode < 200 || res.statusCode >= 300) return reject(new Error(`HTTP ${res.statusCode}`));
-        try {
-          const parsed = JSON.parse(body);
-          fs.writeFileSync(cacheFile, body, 'utf8');
-          resolve(parsed);
-        } catch (e) { reject(e); }
-      });
-    });
-    req.on('error', reject);
-    req.on('timeout', () => { req.destroy(); reject(new Error('TIMEOUT')); });
-  });
-}
+const outFile = argValue(process.argv, '--out');
+const forceRefresh = hasFlag(process.argv, '--force-refresh');
+const api = createFilesClient({
+  cacheDir: path.join(__dirname, '.registry_cache'),
+  forceRefresh,
+  maxSockets: 8,
+});
 
 async function main() {
   if (!registryFile) {
     console.error('用法: node audit-registry.js <registry.tsv> [apiKeyFile] --out audit.json [--force-refresh]');
     process.exit(2);
   }
-  let apiKey = process.env.NEXUS_API_KEY || '';
-  if (keyFile && fs.existsSync(keyFile)) apiKey = fs.readFileSync(keyFile, 'utf8').trim();
+  const apiKey = readApiKey(keyFile);
   if (!apiKey) throw new Error('缺少 Nexus API key');
 
   const rules = parseRegistry(registryFile);
@@ -90,7 +47,7 @@ async function main() {
     while (cursor < entries.length) {
       const [modId, modRules] = entries[cursor++];
       let data;
-      try { data = await apiGet(modId, apiKey); }
+      try { data = await api.getFiles(modId, apiKey); }
       catch (e) {
         for (const r of modRules) audit[r.id] = { status: 'API_ERROR', error: e.message };
         continue;
@@ -134,7 +91,7 @@ async function main() {
   const counts = {};
   for (const value of Object.values(audit)) counts[value.status] = (counts[value.status] || 0) + 1;
   const payload = { generatedAt: new Date().toISOString(), registry: registryFile, counts, rules: audit };
-  if (outFile) fs.writeFileSync(outFile, JSON.stringify(payload, null, 2), 'utf8');
+  if (outFile) saveJson(outFile, payload, { atomic: false });
   console.log(JSON.stringify(payload, null, 2));
 }
 
