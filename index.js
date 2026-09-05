@@ -120,9 +120,9 @@ async function run() {
   runNode(checkArgs);
   logger.info('SCAN','planning scan completed',{ report:planJson });
 
-  console.log('\n[Step 2/9] Patch Discovery Graph：Requirements + Description + 同页 Files + 本地环境...');
+  console.log('\n[Step 2/9] Patch Discovery Graph：自动项 + 延期人工项全部扫描...');
   const discoveryRun = runNode([
-    path.join(rootDir,'scripts','discover-patches.js'), planJson, modsDir,
+    path.join(rootDir,'scripts','discover-all-patches.js'), planJson, modsDir,
     '--registry',auxRegistry,'--relations',patchRelations,
     '--max-age-days',String(cli.maxAgeDays),'--out',patchDiscoveryJson,'--tasks',patchTasksTsv,
   ], { capture:true });
