@@ -3,7 +3,7 @@
 
 const assert = require('assert');
 const { buildReviewPayload } = require('./lib/review-center-model');
-const { renderHtml } = require('./build-review-center');
+const { renderHtml, summarizeAutoReport } = require('./build-review-center');
 
 const plan = { items: [{
   modId: '160675', name: 'Sassy SnW', localFileId: '100', action: 'HOLD_VARIANT_REVIEW',
@@ -21,19 +21,23 @@ const patch = { items: [{
 }] };
 const closure = { items: [] };
 
-const payload = buildReviewPayload(plan, patch, closure, { plan: 'plan.json' });
+const autoSummary = summarizeAutoReport({ mode: 'DOWNLOAD', requested: 42, verified: 40, failed: 2, humanReview: 7 });
+const payload = buildReviewPayload(plan, patch, closure, { plan: 'plan.json', autoSummary });
 assert.strictEqual(payload.items.length, 1);
 assert.strictEqual(payload.counts.variant, 1);
 assert.strictEqual(payload.items[0].mainOptions.find(x => x.fileId === '300').recommended, true);
 assert.strictEqual(payload.items[0].patchFamilies[0].candidates[0].selectable, true);
 assert.strictEqual(payload.items[0].patchFamilies[0].candidates[0].modId, '160675');
+assert.strictEqual(payload.autoSummary.verified, 40);
 
 const html = renderHtml(payload);
 assert.match(html, /window\.REVIEW_DATA=/);
 assert.match(html, /KS Hairdos HDT/);
 assert.match(html, /下载所有已确认项/);
 assert.match(html, /Review Center|人工决策中心/);
+assert.match(html, /data-auto-summary="embedded"/);
 assert.ok(!html.includes('/*__STYLE__*/'));
 assert.ok(!html.includes('/*__APP__*/'));
+assert.ok(!html.includes('__AUTO_MARKER__'));
 
 console.log('review-center model tests: OK');
