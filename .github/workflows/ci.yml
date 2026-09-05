@@ -30,5 +30,21 @@ jobs:
       - name: Syntax checks
         run: npm run check
 
+      - name: PowerShell syntax checks
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          foreach ($file in @('scripts/mo2-ui-state.ps1', 'scripts/wake-mo2-download.ps1')) {
+            $tokens = $null
+            $errors = $null
+            [System.Management.Automation.Language.Parser]::ParseFile(
+              (Resolve-Path $file), [ref]$tokens, [ref]$errors
+            ) | Out-Null
+            if ($errors.Count -gt 0) {
+              $detail = ($errors | ForEach-Object { "$file:$($_.Extent.StartLineNumber): $($_.Message)" }) -join "`n"
+              throw "PowerShell parse errors:`n$detail"
+            }
+          }
+
       - name: Regression tests
         run: npm test
