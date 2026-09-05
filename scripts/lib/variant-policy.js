@@ -69,6 +69,19 @@ function rememberVariantPolicy(file, selection, extra = {}) {
   return { saved: true, policy: doc.policies[modId] };
 }
 
+function forgetVariantPolicy(file, modId) {
+  const key = String(modId || '').trim();
+  if (!key) return { removed: false, reason: 'MISSING_MOD_ID' };
+  const doc = loadVariantPolicies(file);
+  if (!doc.policies[key]) return { removed: false, reason: 'NOT_FOUND' };
+  const previous = doc.policies[key];
+  delete doc.policies[key];
+  doc.version = POLICY_VERSION;
+  doc.updatedAt = new Date().toISOString();
+  saveJson(file, doc);
+  return { removed: true, previous };
+}
+
 module.exports = {
   POLICY_VERSION,
   defaultPolicyFile,
@@ -76,4 +89,5 @@ module.exports = {
   getVariantPolicy,
   resolveVariantPolicy,
   rememberVariantPolicy,
+  forgetVariantPolicy,
 };
