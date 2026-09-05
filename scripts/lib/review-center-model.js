@@ -54,16 +54,18 @@ function buildReviewPayload(plan, patch, closure, metadata = {}) {
       mainName: item.latestName || item.name || '',
       localFileId: item.localFileId || item.fileId || '',
       action: item.action || '',
+      variantPolicy: item.variantPolicy || null,
       mainOptions: [],
       patchFamilies: [],
       blockers: [],
     });
-    return map.get(id);
+    const row = map.get(id);
+    if (!row.variantPolicy && item.variantPolicy) row.variantPolicy = item.variantPolicy;
+    return row;
   }
 
   for (const item of plan.items || []) {
-    const isReview = item.action === 'HOLD_VARIANT_REVIEW' ||
-      ['HOLD_REVIEW', 'HOLD_AMBIGUOUS', 'HOLD_LOW_CONFIDENCE', 'HOLD_SAME_VERSION_REPLACEMENT'].includes(item.action);
+    const isReview = ['HOLD_VARIANT_REVIEW', 'HOLD_VARIANT_POLICY_CHANGED', 'HOLD_REVIEW', 'HOLD_AMBIGUOUS', 'HOLD_LOW_CONFIDENCE', 'HOLD_SAME_VERSION_REPLACEMENT'].includes(item.action);
     if (!isReview && !item.manualReview?.required) continue;
     const row = ensure(item);
     if (item.manualReview?.options?.length) {
@@ -88,6 +90,10 @@ function buildReviewPayload(plan, patch, closure, metadata = {}) {
     }
     if (item.action === 'HOLD_VARIANT_REVIEW') {
       row.blockers.push('检测到多个互斥 Main 分支：程序不会自动从当前分支迁移到另一分支。');
+    }
+    if (item.action === 'HOLD_VARIANT_POLICY_CHANGED') {
+      const oldBranch = item.variantPolicy?.branchKey || item.manualReview?.policy?.branchKey || '未知分支';
+      row.blockers.push(`已记住的 Main 分支 ${oldBranch} 在当前文件结构中无法安全复用；必须重新确认，绝不会自动回退到其他分支。`);
     }
   }
 
@@ -135,7 +141,7 @@ function buildReviewPayload(plan, patch, closure, metadata = {}) {
   };
   return {
     generatedAt: new Date().toISOString(),
-    version: 2,
+    version: 3,
     ...metadata,
     counts,
     items,

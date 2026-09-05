@@ -7,7 +7,9 @@ const { argValue } = require('./lib/cli');
 const { loadJson, saveJson } = require('./lib/fs-json');
 const { formatManifest } = require('./lib/manifest');
 const { runNode } = require('./lib/process-runner');
+const { defaultPolicyFile, rememberVariantPolicy } = require('./lib/variant-policy');
 
+const rootDir = path.resolve(__dirname, '..');
 const RESOLVED = new Set(['NOT_APPLICABLE', 'ALREADY_INCLUDED', 'OBSOLETE']);
 
 function validateAndBuild(review, decisions) {
@@ -89,10 +91,34 @@ function validateAndBuild(review, decisions) {
         fileId: String(p.fileId), action: 'DOWNLOAD',
       });
     }
-    accepted.push({ itemId: item.id, tx, main: selectedMain ? selectedMain.fileId : null, patches: patchRows.map(p => `${p.modId}:${p.fileId}`) });
+    accepted.push({
+      itemId: item.id,
+      tx,
+      main: selectedMain ? selectedMain.fileId : null,
+      rememberMain: !!(d.rememberMain && selectedMain),
+      mainSelection: selectedMain ? {
+        modId: String(item.modId),
+        fileId: String(selectedMain.fileId),
+        name: selectedMain.name || '',
+        version: selectedMain.version || '',
+        branchKey: selectedMain.branchKey || '',
+        tags: selectedMain.tags || [],
+      } : null,
+      patches: patchRows.map(p => `${p.modId}:${p.fileId}`),
+    });
   }
 
   return { rows, accepted, ignored, errors };
+}
+
+function persistRememberedPolicies(built, policyFile) {
+  const results = [];
+  for (const accepted of built.accepted || []) {
+    if (!accepted.rememberMain || !accepted.mainSelection) continue;
+    const saved = rememberVariantPolicy(policyFile, accepted.mainSelection, { source: 'USER_REVIEW' });
+    results.push({ itemId: accepted.itemId, ...saved });
+  }
+  return results;
 }
 
 function main() {
@@ -112,16 +138,22 @@ function main() {
   const jobFile = path.join(jobDir, 'job.json');
   const manifest = path.join(jobDir, 'review-run.tsv');
   const state = path.join(jobDir, 'execution-state.json');
-  const writeJob = extra => saveJson(jobFile, { generatedAt: new Date().toISOString(), runDir, jobDir, ...built, ...extra });
+  const policyFile = config.variantPolicyFile || defaultPolicyFile(rootDir);
+  let policyUpdates = [];
+  const writeJob = extra => saveJson(jobFile, { generatedAt: new Date().toISOString(), runDir, jobDir, policyFile, policyUpdates, ...built, ...extra });
 
   if (built.errors.length) {
     writeJob({ status: 'BLOCKED', errors: built.errors });
     console.log(JSON.stringify({ ok: false, status: 'BLOCKED', jobDir, errors: built.errors }, null, 2));
     process.exit(2);
   }
+
+  // Persist only explicit Main clicks from a fully valid review submission. This is preference state, not a download-success marker.
+  policyUpdates = persistRememberedPolicies(built, policyFile);
+
   if (!built.rows.length) {
     writeJob({ status: 'NO_DOWNLOADS' });
-    console.log(JSON.stringify({ ok: true, status: 'NO_DOWNLOADS', jobDir, accepted: built.accepted }, null, 2));
+    console.log(JSON.stringify({ ok: true, status: 'NO_DOWNLOADS', jobDir, accepted: built.accepted, policyUpdates }, null, 2));
     return;
   }
 
@@ -135,7 +167,7 @@ function main() {
   const dr = runNode(diagArgs, { capture: true, allowFailure: true });
   if (!dr.ok) {
     writeJob({ status: 'PREFLIGHT_FAILED', stdout: dr.stdout || '', stderr: dr.stderr || '' });
-    console.log(JSON.stringify({ ok: false, status: 'PREFLIGHT_FAILED', jobDir }, null, 2));
+    console.log(JSON.stringify({ ok: false, status: 'PREFLIGHT_FAILED', jobDir, policyUpdates }, null, 2));
     process.exit(2);
   }
 
@@ -158,4 +190,4 @@ if (require.main === module) {
   catch (err) { console.error(`review-download failed: ${err.message}`); process.exit(1); }
 }
 
-module.exports = { validateAndBuild };
+module.exports = { validateAndBuild, persistRememberedPolicies };

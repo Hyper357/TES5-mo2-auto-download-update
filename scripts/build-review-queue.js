@@ -32,6 +32,7 @@ function main() {
 
     const next=[];
     if(['HOLD_REVIEW','HOLD_AMBIGUOUS','HOLD_LOW_CONFIDENCE','HOLD_SAME_VERSION_REPLACEMENT'].includes(item.action)) next.push('核对 Files 页面与当前安装来源，明确正确 Main File/变体；禁止按上传时间直接选');
+    if(item.action==='HOLD_VARIANT_POLICY_CHANGED') next.push(`已记住的 Main 分支 ${item.variantPolicy?.branchKey||'UNKNOWN'} 无法安全复用；打开 Review Center 重新确认，禁止自动回退到其他分支`);
     if(item.action==='HOLD_MULTI_SOURCE') next.push('核对该 MO2 条目实际由哪个 fileId/归档构成，拆分或明确来源');
     if(item.action==='HOLD_UNRESOLVED_LOCAL') next.push('从 meta.ini / downloads .meta / installationFile 恢复精确本地 fileId');
     if(pd?.coverageProblems?.length) next.push(`补齐 Patch discovery 覆盖: ${pd.coverageProblems.map(x=>`${x.source}:${x.status}`).join(', ')}`);
@@ -47,6 +48,7 @@ function main() {
       localFileId:item.localFileId||item.fileId||'', localVersion:item.localApiVersion||item.installedVersion||'',
       targetFileId, targetVersion:item.latestVersion||'', targetName:item.latestName||'',
       mainAction:item.action, confidence:item.confidence, margin:item.margin,
+      variantPolicy:item.variantPolicy||null,
       topCandidates:item.candidates||[], patchCandidates:item.aux?.patches||[], translationCandidates:item.aux?.translations||[],
       patchDiscovery:pd||null, closure:c||null, nextActions:next,
     });
@@ -55,10 +57,11 @@ function main() {
   const payload={generatedAt:new Date().toISOString(),plan:planFile,closure:closureFile,patchDiscovery:discoveryFile||null,count:queue.length,items:queue};
   if(outFile) fs.writeFileSync(outFile,JSON.stringify(payload,null,2),'utf8');
   if(tsvFile){
-    const header=['priority','modId','localName','localFileId','localVersion','targetFileId','targetVersion','targetName','mainAction','confidence','patchDiscovery','unresolvedPatchCandidates','samePagePatchCandidates','translationCandidates','nextActions'];
+    const header=['priority','modId','localName','localFileId','localVersion','targetFileId','targetVersion','targetName','mainAction','confidence','variantPolicy','patchDiscovery','unresolvedPatchCandidates','samePagePatchCandidates','translationCandidates','nextActions'];
     const lines=[header.join('\t')];
     for(const q of queue) lines.push([
       q.priority,q.modId,q.localName,q.localFileId,q.localVersion,q.targetFileId,q.targetVersion,q.targetName,q.mainAction,q.confidence,
+      q.variantPolicy?.branchKey||'',
       q.patchDiscovery ? (q.patchDiscovery.complete?'COMPLETE':`HOLD coverage=${q.patchDiscovery.coverageProblems?.length||0} unresolved=${q.patchDiscovery.unresolvedCount||0}`):'',
       compactCandidates(q.patchDiscovery?.unresolved),compactCandidates(q.patchCandidates),compactCandidates(q.translationCandidates),q.nextActions.join(' / '),
     ].map(x=>String(x||'').replace(/[\t\r\n]+/g,' ')).join('\t'));
