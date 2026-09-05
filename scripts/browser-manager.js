@@ -2,10 +2,11 @@
 'use strict';
 
 const fs = require('fs');
-const os = require('os');
 const path = require('path');
 const https = require('https');
 const cp = require('child_process');
+const { argValue, hasFlag } = require('./lib/cli');
+const { loadJson, saveJson } = require('./lib/fs-json');
 const {
   getCdpPort,
   getCdpUrl,
@@ -20,15 +21,6 @@ const rootDir = path.resolve(__dirname, '..');
 const browserRoot = process.env.MO2_BROWSER_ROOT || path.join(rootDir, '.runtime', 'browser');
 const installMeta = path.join(browserRoot, 'install.json');
 const CFT_INDEX = 'https://googlechromelabs.github.io/chrome-for-testing/last-known-good-versions-with-downloads.json';
-
-function arg(name, fallback = '') {
-  const i = process.argv.indexOf(name);
-  return i >= 0 ? process.argv[i + 1] : fallback;
-}
-
-function has(name) {
-  return process.argv.includes(name);
-}
 
 function existsFile(p) {
   try { return !!p && fs.statSync(p).isFile(); } catch { return false; }
@@ -59,12 +51,7 @@ function browserCandidates() {
   return [
     process.env.MO2_AUTOMATION_BROWSER,
     process.env.MO2_CHROME_FOR_TESTING,
-    (() => {
-      try {
-        const m = JSON.parse(fs.readFileSync(installMeta, 'utf8'));
-        return m.executable;
-      } catch { return ''; }
-    })(),
+    loadJson(installMeta, {})?.executable || '',
     findRecursive(browserRoot, 'chrome.exe', 6),
     'C:\\Program Files\\Google\\Chrome\\Application\\chrome.exe',
     'C:\\Program Files (x86)\\Google\\Chrome\\Application\\chrome.exe',
@@ -78,7 +65,7 @@ function findBrowser() {
 
 function httpsBuffer(url, redirects = 5) {
   return new Promise((resolve, reject) => {
-    const req = https.get(url, { headers: { 'User-Agent': 'TES5-MO2-AutoUpdate/3.3' } }, res => {
+    const req = https.get(url, { headers: { 'User-Agent': 'TES5-MO2-AutoUpdate/3.8' } }, res => {
       if ([301, 302, 303, 307, 308].includes(res.statusCode) && res.headers.location && redirects > 0) {
         res.resume();
         return resolve(httpsBuffer(new URL(res.headers.location, url).toString(), redirects - 1));
@@ -107,7 +94,7 @@ async function installChromeForTesting() {
   const targetDir = path.join(browserRoot, `chrome-${stable.version}`);
   const existing = findRecursive(targetDir, 'chrome.exe', 5);
   if (existing) {
-    fs.writeFileSync(installMeta, JSON.stringify({ version: stable.version, executable: existing, source: item.url, installedAt: new Date().toISOString() }, null, 2));
+    saveJson(installMeta, { version: stable.version, executable: existing, source: item.url, installedAt: new Date().toISOString() }, { atomic: false });
     return { installed: false, version: stable.version, executable: existing, reused: true };
   }
 
@@ -123,7 +110,7 @@ async function installChromeForTesting() {
   try { fs.unlinkSync(zip); } catch (_) {}
   const executable = findRecursive(targetDir, 'chrome.exe', 5);
   if (!executable) throw new Error('Chrome for Testing extracted but chrome.exe was not found');
-  fs.writeFileSync(installMeta, JSON.stringify({ version: stable.version, executable, source: item.url, installedAt: new Date().toISOString() }, null, 2));
+  saveJson(installMeta, { version: stable.version, executable, source: item.url, installedAt: new Date().toISOString() }, { atomic: false });
   return { installed: true, version: stable.version, executable };
 }
 
@@ -151,7 +138,7 @@ async function start() {
   let executable = findBrowser();
   let install = null;
   if (!executable) {
-    if (has('--no-install')) throw new Error('No automation Chrome found. Run npm run browser:install or set MO2_AUTOMATION_BROWSER.');
+    if (hasFlag(process.argv, '--no-install')) throw new Error('No automation Chrome found. Run npm run browser:install or set MO2_AUTOMATION_BROWSER.');
     install = await installChromeForTesting();
     executable = install.executable;
   }
@@ -159,10 +146,7 @@ async function start() {
   const profileDir = getProfileDir();
   const marker = ensureMarker(profileDir);
   const port = getCdpPort();
-  const urls = [
-    sentinelUrl(marker.token),
-    'https://www.nexusmods.com/users/sign-in',
-  ];
+  const urls = [sentinelUrl(marker.token), 'https://www.nexusmods.com/users/sign-in'];
   const browserArgs = [
     `--user-data-dir=${profileDir}`,
     `--remote-debugging-port=${port}`,
@@ -175,13 +159,9 @@ async function start() {
     ...urls,
   ];
 
-  const child = cp.spawn(executable, browserArgs, {
-    detached: true,
-    stdio: 'ignore',
-    windowsHide: false,
-  });
+  const child = cp.spawn(executable, browserArgs, { detached: true, stdio: 'ignore', windowsHide: false });
   child.unref();
-  const status = await waitManaged(Number(arg('--timeout-ms', '30000')) || 30000);
+  const status = await waitManaged(Number(argValue(process.argv, '--timeout-ms', '30000')) || 30000);
   return { action: 'start', changed: true, executable, profileDir, port, install, status };
 }
 
