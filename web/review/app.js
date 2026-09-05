@@ -24,14 +24,21 @@ function summary() {
 function renderMainOptions(it) {
   if (!it.mainOptions?.length) return '';
   let out = '<div class="section"><h3>Main 分支（单选）</h3>';
+  if (it.variantPolicy?.branchKey) {
+    out += '<div class="blocker">🧠 上次记住：' + h(it.variantPolicy.branchKey) +
+      (it.variantPolicy.lastConfirmedName ? ' · ' + h(it.variantPolicy.lastConfirmedName) : '') +
+      '。当前页面结构发生变化，所以这次必须重新确认。</div>';
+  }
+  out += '<div class="meta">点击任一 Main 分支会把它记为后续更新偏好；如果作者以后删除/改名该分支，系统仍会重新 HOLD，不会自动退回其他分支。</div>';
   for (const o of it.mainOptions) {
     out += '<label class="option ' + (o.recommended ? 'recommended ' : '') + (o.current ? 'current' : '') + '"><div class="row">' +
-      '<input type="radio" name="main-' + h(it.id) + '" value="' + h(o.fileId) + '" ' + (o.current ? 'checked' : '') + '><div><b>' + h(o.name) + '</b> ' +
+      '<input type="radio" data-main-choice="' + h(it.id) + '" name="main-' + h(it.id) + '" value="' + h(o.fileId) + '" ' + (o.current ? 'checked' : '') + '><div><b>' + h(o.name) + '</b> ' +
       (o.current ? '<span class="tag">当前</span>' : '') + (o.recommended ? '<span class="tag">AI 建议</span>' : '') +
       '<div class="meta">fileId ' + h(o.fileId) + ' · v' + h(o.version) + ' · ' + h(o.branchKey || o.category) + ' · 环境匹配 ' + Math.round((o.environmentScore || 0) * 100) + '%</div>' +
       (o.tags?.length ? '<div>' + o.tags.map(t => '<span class="tag">' + h(t) + '</span>').join('') + '</div>' : '') +
       (o.description ? '<div class="desc">' + h(o.description) + '</div>' : '') + '</div></div></label>';
   }
+  out += '<div class="meta" id="remember-' + h(it.id) + '"></div>';
   return out + '</div>';
 }
 
@@ -71,6 +78,17 @@ function render() {
       '<div class="section"><button class="btn secondary" data-skip="' + h(it.id) + '">本次跳过这个 MOD</button></div></div>';
     root.appendChild(card);
   }
+
+  document.querySelectorAll('[data-main-choice]').forEach(input => {
+    input.onclick = () => {
+      const d = decision(input.dataset.mainChoice);
+      d.mainFileId = input.value;
+      d.rememberMain = true;
+      const note = document.getElementById('remember-' + input.dataset.mainChoice);
+      if (note) note.textContent = '🧠 已标记：成功提交本次 Review 后，记住这个 Main 分支用于以后更新。';
+    };
+  });
+
   document.querySelectorAll('[data-skip]').forEach(b => b.onclick = () => {
     decision(b.dataset.skip).skip = true;
     b.textContent = '✓ 已标记本次跳过';
