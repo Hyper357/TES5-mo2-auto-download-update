@@ -32,6 +32,8 @@ function main() {
 
     const next=[];
     if(['HOLD_REVIEW','HOLD_AMBIGUOUS','HOLD_LOW_CONFIDENCE','HOLD_SAME_VERSION_REPLACEMENT'].includes(item.action)) next.push('核对 Files 页面与当前安装来源，明确正确 Main File/变体；禁止按上传时间直接选');
+    if(item.action==='HOLD_UPDATE_ELIGIBILITY') next.push(`先解决“是否真的需要更新”：${item.updateEligibility?.reason||item.reason||'证据不足'}；MO2 黄色箭头/版本字段只是提示，不能直接授权下载`);
+    if(item.action==='HOLD_UPDATE_TARGET_MISMATCH') next.push('exact update evidence 与下游目标选择不一致；核对当前 exact fileId、同分支后续文件及 Main selector，不得静默 SKIP');
     if(item.action==='HOLD_VARIANT_POLICY_CHANGED') next.push(`已记住的 Main 分支 ${item.variantPolicy?.branchKey||'UNKNOWN'} 无法安全复用；打开 Review Center 重新确认，禁止自动回退到其他分支`);
     if(item.action==='HOLD_MULTI_SOURCE') next.push('核对该 MO2 条目实际由哪个 fileId/归档构成，拆分或明确来源');
     if(item.action==='HOLD_UNRESOLVED_LOCAL') next.push('从 meta.ini / downloads .meta / installationFile 恢复精确本地 fileId');
@@ -43,11 +45,12 @@ function main() {
     if(c?.invalidRules?.length) next.push('修复 registry 记录，并确保 REQUIRED 附属 fileId 已通过 registry audit');
 
     queue.push({
-      priority: discoveryHold ? 'P0-COMPONENT-DISCOVERY' : (item.action==='DOWNLOAD' ? 'P1-CLOSURE':'P0-MAIN'),
+      priority: /^HOLD_UPDATE_/.test(item.action||'') ? 'P0-UPDATE-ELIGIBILITY' : (discoveryHold ? 'P0-COMPONENT-DISCOVERY' : (item.action==='DOWNLOAD' ? 'P1-CLOSURE':'P0-MAIN')),
       modId:item.modId, localName:item.name,
       localFileId:item.localFileId||item.fileId||'', localVersion:item.localApiVersion||item.installedVersion||'',
       targetFileId, targetVersion:item.latestVersion||'', targetName:item.latestName||'',
       mainAction:item.action, confidence:item.confidence, margin:item.margin,
+      updateEligibility:item.updateEligibility||null,
       variantPolicy:item.variantPolicy||null,
       topCandidates:item.candidates||[],
       componentCandidates:item.aux?.components||[], patchCandidates:item.aux?.patches||[], translationCandidates:item.aux?.translations||[],
@@ -58,11 +61,11 @@ function main() {
   const payload={generatedAt:new Date().toISOString(),plan:planFile,closure:closureFile,componentDiscovery:discoveryFile||null,patchDiscovery:discoveryFile||null,count:queue.length,items:queue};
   if(outFile) fs.writeFileSync(outFile,JSON.stringify(payload,null,2),'utf8');
   if(tsvFile){
-    const header=['priority','modId','localName','localFileId','localVersion','targetFileId','targetVersion','targetName','mainAction','confidence','variantPolicy','componentDiscovery','unresolvedComponents','samePageComponents','translationCandidates','nextActions'];
+    const header=['priority','modId','localName','localFileId','localVersion','targetFileId','targetVersion','targetName','mainAction','confidence','updateEligibility','mo2ArrowHint','variantPolicy','componentDiscovery','unresolvedComponents','samePageComponents','translationCandidates','nextActions'];
     const lines=[header.join('\t')];
     for(const q of queue) lines.push([
       q.priority,q.modId,q.localName,q.localFileId,q.localVersion,q.targetFileId,q.targetVersion,q.targetName,q.mainAction,q.confidence,
-      q.variantPolicy?.branchKey||'',
+      q.updateEligibility?.state||'',q.updateEligibility?.mo2Hint?.wouldShowUpdateArrow?'YES':'NO',q.variantPolicy?.branchKey||'',
       q.componentDiscovery ? (q.componentDiscovery.complete?'COMPLETE':`HOLD coverage=${q.componentDiscovery.coverageProblems?.length||0} unresolved=${q.componentDiscovery.unresolvedCount||0}`):'',
       compactCandidates(q.componentDiscovery?.unresolved),compactCandidates(q.componentCandidates),compactCandidates(q.translationCandidates),q.nextActions.join(' / '),
     ].map(x=>String(x||'').replace(/[\t\r\n]+/g,' ')).join('\t'));
