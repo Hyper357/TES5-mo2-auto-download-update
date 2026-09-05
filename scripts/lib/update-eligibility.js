@@ -96,15 +96,16 @@ function updateChainSuccessors(installedFileId, updates = []) {
   }
 
   const out = [];
-  const queue = [start];
+  const queue = [{ id: start, depth: 0 }];
   const visited = new Set([start]);
   while (queue.length) {
-    const oldId = queue.shift();
-    for (const e of byOld.get(oldId) || []) {
+    const current = queue.shift();
+    for (const e of byOld.get(current.id) || []) {
       if (visited.has(e.newFileId)) continue;
       visited.add(e.newFileId);
-      out.push({ ...e, depth: out.length + 1 });
-      queue.push(e.newFileId);
+      const depth = current.depth + 1;
+      out.push({ ...e, depth });
+      queue.push({ id: e.newFileId, depth });
     }
   }
   return out;
@@ -131,6 +132,13 @@ function compactFile(file) {
   };
 }
 
+function compatibilityProbe({ mine, candidate, localName = '', installationFile = '', profile = null }) {
+  // Author-entered candidate.version is intentionally neutralized for compatibility probing.
+  // Runtime/body/role/category/name-family evidence still applies.
+  const probe = { ...candidate, version: mine?.version || candidate?.version || '' };
+  return scoreCandidate({ mine, candidate: probe, localName, installationFile, profile });
+}
+
 function chainCandidate({ files, fileUpdates, mine, localName = '', installationFile = '', profile = null }) {
   const filesById = new Map((files || []).map(f => [String(f.file_id || ''), f]));
   const successors = updateChainSuccessors(mine?.file_id, fileUpdates);
@@ -138,7 +146,7 @@ function chainCandidate({ files, fileUpdates, mine, localName = '', installation
   for (const edge of successors) {
     const f = filesById.get(edge.newFileId);
     if (!f || !isActive(f)) continue;
-    const scored = scoreCandidate({ mine, candidate: f, localName, installationFile, profile });
+    const scored = compatibilityProbe({ mine, candidate: f, localName, installationFile, profile });
     reachable.push({ edge, file: f, scored });
   }
   if (!reachable.length) return { candidate: null, successors, conflicts: [] };
@@ -148,7 +156,7 @@ function chainCandidate({ files, fileUpdates, mine, localName = '', installation
     const conflicts = [...new Set(reachable.flatMap(x => x.scored.rejects || []))];
     return { candidate: null, successors, conflicts };
   }
-  accepted.sort((a, b) => uploadedMs(b.file) - uploadedMs(a.file) || Number(b.file.file_id || 0) - Number(a.file.file_id || 0));
+  accepted.sort((a, b) => b.edge.depth - a.edge.depth || uploadedMs(b.file) - uploadedMs(a.file) || Number(b.file.file_id || 0) - Number(a.file.file_id || 0));
   return { candidate: accepted[0].file, successors, conflicts: [] };
 }
 
@@ -157,10 +165,9 @@ function fallbackNewerCandidate({ files, mine, localName = '', installationFile 
   const candidates = [];
   for (const f of files || []) {
     if (!f || String(f.file_id || '') === String(mine?.file_id || '') || !isActive(f)) continue;
-    const scored = scoreCandidate({ mine, candidate: f, localName, installationFile, profile });
+    const scored = compatibilityProbe({ mine, candidate: f, localName, installationFile, profile });
     if (!scored.accepted || scored.score < 58) continue;
     const t = uploadedMs(f);
-    // Version strings are author metadata. They cannot by themselves prove an update.
     if (!(t > mineTime && t > 0)) continue;
     candidates.push({ file: f, ...scored, uploadedMs: t });
   }
@@ -176,7 +183,6 @@ function fallbackNewerCandidate({ files, mine, localName = '', installationFile 
 function ignoredTarget(meta, target) {
   if (!versionEqual(meta?.ignoredVersion, meta?.newestVersion)) return false;
   if (!validVersion(target?.version)) return true;
-  // Respect an ignored MO2 version, but allow a genuinely later version to surface again.
   return compareVersions(target.version, meta.ignoredVersion) <= 0;
 }
 
@@ -216,7 +222,7 @@ function assessUpdateEligibility({ files = [], fileUpdates = [], mine, meta = {}
       mo2,
       target: compactFile(target),
       evidence: ['NEXUS_EXACT_UPDATE_CHAIN', ...(mo2.signal ? ['MO2_UPDATE_SIGNAL'] : [])],
-      chainDepth: chain.successors.length,
+      chainDepth: Math.max(0, ...chain.successors.map(x => Number(x.depth || 0))),
     };
   }
 
@@ -247,12 +253,30 @@ function assessUpdateEligibility({ files = [], fileUpdates = [], mine, meta = {}
         evidence: ['NEWER_COMPATIBLE_FILE_UPLOAD', 'MO2_IGNORED_VERSION'],
       };
     }
-    const sameVersion = validVersion(target.version) && validVersion(mine.version) && compareVersions(target.version, mine.version) === 0;
+
+    const comparable = validVersion(target.version) && validVersion(mine.version);
+    const versionCmp = comparable ? compareVersions(target.version, mine.version) : null;
+    if (versionCmp === null || versionCmp <= 0) {
+      const reason = versionCmp === 0
+        ? 'SAME_VERSION_NEWER_FILE_REPLACEMENT'
+        : (versionCmp !== null ? 'NONMONOTONIC_VERSION_NEWER_FILE' : 'UNRELIABLE_VERSION_NEWER_FILE');
+      return {
+        status: 'HOLD_UPDATE_ELIGIBILITY',
+        reason,
+        updateNeeded: false,
+        priority: mo2.signal ? 80 : 55,
+        mo2,
+        target: compactFile(target),
+        evidence: ['NEWER_COMPATIBLE_FILE_UPLOAD', 'VERSION_METADATA_NOT_AUTHORITATIVE', ...(mo2.signal ? ['MO2_UPDATE_SIGNAL'] : [])],
+        margin: fallback.margin,
+      };
+    }
+
     return {
-      status: sameVersion ? 'HOLD_UPDATE_ELIGIBILITY' : 'UPDATE_CONFIRMED',
-      reason: sameVersion ? 'SAME_VERSION_NEWER_FILE_REPLACEMENT' : 'NEWER_COMPATIBLE_FILE_UPLOAD',
-      updateNeeded: !sameVersion,
-      priority: sameVersion ? (mo2.signal ? 80 : 55) : (mo2.signal ? 96 : 84),
+      status: 'UPDATE_CONFIRMED',
+      reason: 'NEWER_COMPATIBLE_FILE_UPLOAD',
+      updateNeeded: true,
+      priority: mo2.signal ? 96 : 84,
       mo2,
       target: compactFile(target),
       evidence: ['NEWER_COMPATIBLE_FILE_UPLOAD', ...(mo2.signal ? ['MO2_UPDATE_SIGNAL'] : [])],
