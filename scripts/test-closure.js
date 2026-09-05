@@ -23,7 +23,6 @@ function runCase({registry,plan,discovery,audit={rules:{}}}){
 }
 const plan={items:[{modId:'123',latestFileId:'456',action:'DOWNLOAD',aux:{patches:[],translations:[],components:[]}}]};
 
-// Requirements coverage cannot be proven -> MAIN must not download.
 {
   const registry=`123\t456\t2.0\tTRANSLATION\tNONE\t\t\t\t\t${today}\tchecked\tnone\n`;
   const discovery={items:[{modId:'123',mainFileId:'456',complete:false,candidateCount:0,unresolved:[],coverageProblems:[{source:'requirementsForward',status:'SECTION_NOT_PROVEN'}]}]};
@@ -31,7 +30,6 @@ const plan={items:[{modId:'123',latestFileId:'456',action:'DOWNLOAD',aux:{patche
   assert.match(x.out,/HOLD_COMPONENT_DISCOVERY/);
 }
 
-// A discovered family cannot be bypassed with blanket PATCH NONE.
 {
   const registry=[
     `123\t456\t2.0\tPATCH\tNONE\t\t\t\t\t${today}\tFiles checked\tclaimed none`,
@@ -42,7 +40,6 @@ const plan={items:[{modId:'123',latestFileId:'456',action:'DOWNLOAD',aux:{patche
   assert.match(x.out,/HOLD_COMPONENT_DISCOVERY/);
 }
 
-// Complete discovery with zero patch/component candidates proves component closure; translation conclusion is still explicit.
 {
   const registry=`123\t456\t2.0\tTRANSLATION\tNONE\t\t\t\t\t${today}\tTranslations checked\tnone\n`;
   const discovery={items:[{modId:'123',mainFileId:'456',complete:true,candidateCount:0,candidateCountsByKind:{},unresolved:[],coverageProblems:[]}]};
@@ -50,7 +47,6 @@ const plan={items:[{modId:'123',latestFileId:'456',action:'DOWNLOAD',aux:{patche
   assert.match(x.out,/\tDOWNLOAD$/m);
 }
 
-// Resolved REQUIRED patch family is appended exactly after audit pass.
 {
   const patchLine=`123\t456\t2.0\tPATCH\tUSSEP\tREQUIRED\t999\t1001\t1.2\tExample USSEP Patch\t${today}\tRequirements reverse + Files\trequired`;
   const transLine=`123\t456\t2.0\tTRANSLATION\tNONE\t\t\t\t\t${today}\tTranslations checked\tnone`;
@@ -65,7 +61,6 @@ const plan={items:[{modId:'123',latestFileId:'456',action:'DOWNLOAD',aux:{patche
   assert.match(lines[1],/\t1001\tDOWNLOAD$/);
 }
 
-// REQUIRED Resource and Physics component families are appended and remain exact-audited.
 {
   const resourceLine=`123\t456\t2.0\tRESOURCE\tCUSTOM:FRAMEWORK\tREQUIRED\t700\t701\t3.0\tRequired Framework\t${today}\tForward Nexus Requirements\trequired`;
   const physicsLine=`123\t456\t2.0\tPHYSICS\tCUSTOM:HDT_SMP\tREQUIRED\t123\t702\t2.0\tHDT-SMP Physics Files\t${today}\tSame-page component\trequired`;
@@ -87,7 +82,6 @@ const plan={items:[{modId:'123',latestFileId:'456',action:'DOWNLOAD',aux:{patche
   assert.strictEqual(x.report.appendedByKind.PHYSICS,1);
 }
 
-// A negative component decision must be family-bound and evidence-backed.
 {
   const bodyLine=`123\t456\t2.0\tBODYSLIDE\tCUSTOM:CBBE_3BA\tNOT_APPLICABLE\t\t\t\t\t${today}\tBHUNP profile active\tnot applicable`;
   const transLine=`123\t456\t2.0\tTRANSLATION\tNONE\t\t\t\t\t${today}\tTranslations checked\tnone`;
@@ -95,6 +89,34 @@ const plan={items:[{modId:'123',latestFileId:'456',action:'DOWNLOAD',aux:{patche
   const x=runCase({registry:`${bodyLine}\n${transLine}\n`,plan,discovery});
   assert.match(x.out,/\tDOWNLOAD$/m);
   assert.doesNotMatch(x.out,/BodySlide.*DOWNLOAD/);
+}
+
+// v4.0: a high-confidence active-profile NOT_APPLICABLE compatibility decision can close PATCH/HOTFIX without a persisted registry row.
+{
+  const transLine=`123\t456\t2.0\tTRANSLATION\tNONE\t\t\t\t\t${today}\tTranslations checked\tnone`;
+  const discovery={items:[{
+    modId:'123',mainFileId:'456',complete:true,candidateCount:1,candidateCountsByKind:{PATCH:1},unresolved:[],coverageProblems:[],
+    candidates:[{
+      kind:'PATCH',family:'LUX',key:'PATCH:mod:777:',
+      decision:{resolved:true,status:'NOT_APPLICABLE',source:'ENVIRONMENT_GRAPH',reason:'COUNTERPART_ABSENT_FROM_PROFILE',evidence:[]},
+    }],
+  }]};
+  const x=runCase({registry:`${transLine}\n`,plan,discovery});
+  assert.match(x.out,/\tDOWNLOAD$/m);
+  assert.strictEqual(x.report.environmentResolved,1);
+  assert.strictEqual(x.report.items[0].environmentResolved[0].family,'LUX');
+}
+
+// A required Resource missing from the profile is never auto-closed by Environment Graph.
+{
+  const transLine=`123\t456\t2.0\tTRANSLATION\tNONE\t\t\t\t\t${today}\tTranslations checked\tnone`;
+  const discovery={items:[{
+    modId:'123',mainFileId:'456',complete:false,candidateCount:1,candidateCountsByKind:{RESOURCE:1},coverageProblems:[],
+    unresolved:[{kind:'RESOURCE',family:'GENERAL',key:'RESOURCE:mod:700:',environmentDecision:{resolved:false,reason:'REQUIRED_DEPENDENCY_ABSENT'}}],
+    candidates:[],
+  }]};
+  const x=runCase({registry:`${transLine}\n`,plan,discovery});
+  assert.match(x.out,/HOLD_COMPONENT_DISCOVERY/);
 }
 
 console.log('closure tests: OK');

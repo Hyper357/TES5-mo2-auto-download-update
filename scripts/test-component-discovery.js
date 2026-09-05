@@ -25,7 +25,6 @@ const optional = mergeComponentCandidates([
 assert.strictEqual(optional[0].kind, 'TEXTURE');
 assert.strictEqual(optional[0].optionalHint, true, 'explicit Optional wording should be visible as a hint but not auto-resolved');
 
-// Same Nexus page is not enough when both sides have exact file IDs.
 assert.strictEqual(candidateRuleMatches(
   { kind:'PHYSICS', auxModId:'123', fileId:'200', family:'CUSTOM:HDT' },
   { kind:'PHYSICS', auxModId:'123', auxFileId:'201', family:'CUSTOM:HDT', status:'REQUIRED' },
@@ -69,6 +68,36 @@ const assessed = assessComponentDiscovery({
 });
 assert.strictEqual(assessed.complete, true);
 assert.strictEqual(assessed.unresolved.length, 0);
+
+// A resolved active-profile compatibility decision is allowed to close a PATCH/HOTFIX candidate without a persisted registry row.
+const envResolved = assessComponentDiscovery({
+  candidates: [{
+    kind: 'PATCH', family: 'LUX', source: 'DESCRIPTION_LINK', key: 'PATCH:mod:42:',
+    environmentDecision: {
+      source: 'ENVIRONMENT_GRAPH', resolved: true, status: 'NOT_APPLICABLE', confidence: 'high', reason: 'COUNTERPART_ABSENT_FROM_PROFILE', evidence: [],
+    },
+  }],
+  rules: [],
+  coverage: { environmentGraph: { required: false, complete: true }, description: { required: true, complete: true } },
+});
+assert.strictEqual(envResolved.complete, true);
+assert.strictEqual(envResolved.unresolved.length, 0);
+assert.strictEqual(envResolved.candidates[0].decision.source, 'ENVIRONMENT_GRAPH');
+assert.strictEqual(envResolved.candidates[0].decision.status, 'NOT_APPLICABLE');
+
+// Environment hints must not auto-resolve required resources.
+const envRequiredStillHeld = assessComponentDiscovery({
+  candidates: [{
+    kind: 'RESOURCE', family: 'GENERAL', source: 'REQUIREMENTS_FORWARD', key: 'RESOURCE:mod:99:', requiredHint: true,
+    environmentDecision: {
+      source: 'ENVIRONMENT_GRAPH', resolved: false, status: 'UNRESOLVED', confidence: 'high', reason: 'REQUIRED_DEPENDENCY_ABSENT', evidence: [],
+    },
+  }],
+  rules: [],
+  coverage: { requirementsForward: { required: true, complete: true } },
+});
+assert.strictEqual(envRequiredStillHeld.complete, false);
+assert.strictEqual(envRequiredStillHeld.unresolved.length, 1);
 
 const held = assessComponentDiscovery({
   candidates: merged,

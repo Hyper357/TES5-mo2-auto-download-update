@@ -15,6 +15,12 @@ const {
   assessComponentDiscovery,
   countsByKind,
 } = require('./lib/component-discovery');
+const {
+  enabledContextNames,
+  assessCandidateEnvironment,
+  compactEnvironmentSummary,
+  normalizeName,
+} = require('./lib/mo2-environment');
 
 function argValue(name, fallback = '') { const i = process.argv.indexOf(name); return i >= 0 ? process.argv[i + 1] : fallback; }
 function loadJson(file, fallback) { if (!file || !fs.existsSync(file)) return fallback; return JSON.parse(fs.readFileSync(file, 'utf8')); }
@@ -50,7 +56,7 @@ function installedComponentCandidates(mainName, localMods) {
       name: m.folderName || text,
       installed: true,
       mainName,
-      evidence: `installed MO2 entry; similarity=${sim.toFixed(2)}`,
+      evidence: `enabled/current MO2 profile entry; similarity=${sim.toFixed(2)}`,
     });
   }
   return out;
@@ -217,8 +223,17 @@ async function main() {
   }
 
   const plan = loadJson(planFile, { items: [] });
+  const environmentFile = argValue('--environment', plan.environmentGraphFile || path.join(path.dirname(planFile), 'mo2-environment.json'));
+  const environment = loadJson(environmentFile, null);
   const localMods = scanModsDirectory(modsDir);
-  const localNames = localMods.map(m => `${m.folderName || ''} ${m.installationFile || ''}`);
+  const envByName = new Map((environment?.mods || []).map(x => [normalizeName(x.name), x]));
+  const contextMods = environment?.profile?.usableForApplicability
+    ? localMods.filter(m => envByName.get(normalizeName(m.folderName))?.state === 'ENABLED')
+    : localMods;
+  const activeNames = enabledContextNames(environment);
+  const localNames = activeNames.length
+    ? activeNames
+    : contextMods.map(m => `${m.folderName || ''} ${m.installationFile || ''}`);
   const rules = parseRegistry(registryFile);
   const relations = loadRelations(relationsFile);
   const targets = (plan.items || []).filter(x => x.action === 'DOWNLOAD' && (x.latestFileId || x.fileId));
@@ -250,11 +265,10 @@ async function main() {
         evidence: `same Nexus page category=${c.category || ''}; ${c.description || ''}`.slice(0, 1800),
       });
     }
-    // Backward compatibility for plans generated before generalized component candidates.
     for (const p of item.aux?.patches || []) raw.push({ kind: 'PATCH', source: 'SAME_PAGE_FILE', fileId: p.fileId, version: p.version, name: p.name, mainName, evidence: `same Nexus page category=${p.category || ''}` });
     for (const t of item.aux?.translations || []) raw.push({ kind: 'TRANSLATION', source: 'SAME_PAGE_FILE', fileId: t.fileId, version: t.version, name: t.name, mainName, evidence: `same Nexus page category=${t.category || ''}` });
 
-    raw.push(...installedComponentCandidates(mainName, localMods), ...localFomodCandidates(item));
+    raw.push(...installedComponentCandidates(mainName, contextMods), ...localFomodCandidates(item));
     for (const rel of relations.get(String(item.modId)) || []) {
       raw.push({ kind: 'PATCH', source: 'RELATION_REGISTRY', auxModId: rel.auxModId, family: rel.family, name: rel.note || `Independent patch page ${rel.auxModId}`, mainName, evidence: `${rel.source}; ${rel.note || ''}` });
     }
@@ -268,7 +282,9 @@ async function main() {
     if (browser) browserResult = await browserDiscover(browser, item.modId, mainName);
     raw.push(...browserResult.candidates);
 
-    let candidates = mergeComponentCandidates(raw).map(c => withInstalledContext(c, localNames));
+    let candidates = mergeComponentCandidates(raw)
+      .map(c => withInstalledContext(c, localNames))
+      .map(c => ({ ...c, environmentDecision: assessCandidateEnvironment(c, environment) }));
     candidates = candidates.filter(c => {
       if (c.source !== 'DESCRIPTION_TEXT') return true;
       if (c.requiredHint || c.installedContextMatch) return true;
@@ -282,7 +298,13 @@ async function main() {
 
     const coverage = {
       samePageComponents: { required: true, complete: true, status: 'COMPLETE', detail: `scannerCandidates=${item.aux?.components?.length || 0}` },
-      installedContext: { required: true, complete: true, status: 'COMPLETE', detail: `localMods=${localMods.length}` },
+      installedContext: { required: true, complete: true, status: 'COMPLETE', detail: `activeContextMods=${contextMods.length}` },
+      environmentGraph: {
+        required: false,
+        complete: !!environment?.profile?.usableForApplicability,
+        status: environment?.profile?.usableForApplicability ? 'PROFILE_RESOLVED' : (environment ? 'PROFILE_UNRESOLVED' : 'MISSING'),
+        detail: environment?.profile?.name || environment?.profile?.source || 'No environment graph',
+      },
       relationRegistry: { required: true, complete: true, status: 'COMPLETE', detail: `patchRelations=${relations.get(String(item.modId))?.length || 0}` },
       requirementsForward: browserResult.requirementsForward,
       requirementsReverse: browserResult.requirementsReverse,
@@ -297,23 +319,26 @@ async function main() {
     }
     const byKind = countsByKind(assessed.candidates);
     const unresolvedByKind = countsByKind(assessed.unresolved);
+    const environmentResolved = assessed.candidates.filter(c => c.decision?.source === 'ENVIRONMENT_GRAPH' && c.decision?.resolved);
     items.push({
       modId: String(item.modId),
       mainFileId,
       mainVersion,
       mainName,
+      environment: compactEnvironmentSummary(environment),
       coverage,
       coverageComplete: assessed.coverageComplete,
       complete: assessed.complete,
       candidateCount: assessed.candidates.length,
       unresolvedCount: assessed.unresolved.length,
+      environmentResolvedCount: environmentResolved.length,
       candidateCountsByKind: byKind,
       unresolvedCountsByKind: unresolvedByKind,
       candidates: assessed.candidates,
       unresolved: assessed.unresolved,
+      environmentResolved,
       coverageProblems: assessed.coverageProblems,
       staleComponentRules: staleRules,
-      // Backward-compatible field name used by older diagnostics.
       stalePatchRules: staleRules.filter(id => id.includes(':PATCH:')),
     });
   }
@@ -325,6 +350,8 @@ async function main() {
     componentKinds: COMPONENT_KINDS,
     plan: planFile,
     modsDir,
+    environmentFile: environmentFile || null,
+    environment: compactEnvironmentSummary(environment),
     registry: registryFile,
     relations: relationsFile,
     strict: true,
@@ -332,6 +359,7 @@ async function main() {
     complete: items.filter(x => x.complete).length,
     held: items.filter(x => !x.complete).length,
     unresolvedCandidates: items.reduce((n, x) => n + x.unresolvedCount, 0),
+    environmentResolvedCandidates: items.reduce((n, x) => n + x.environmentResolvedCount, 0),
     candidateCountsByKind: countsByKind(items.flatMap(x => x.candidates || [])),
     unresolvedCountsByKind: countsByKind(items.flatMap(x => x.unresolved || [])),
     items,
@@ -340,17 +368,20 @@ async function main() {
   fs.writeFileSync(outFile, JSON.stringify(payload, null, 2), 'utf8');
 
   if (tasksFile) {
-    const header = ['modId','mainFileId','mainVersion','mainName','problem','kind','candidateKey','family','source','auxModId','fileId','candidateName','requiredHint','optionalHint','installedContext','localMatches','recommendedAction'];
+    const header = ['modId','mainFileId','mainVersion','mainName','problem','kind','candidateKey','family','source','auxModId','fileId','candidateName','requiredHint','optionalHint','installedContext','environmentReason','environmentEvidence','localMatches','recommendedAction'];
     const lines = [header.join('\t')];
     for (const x of items) {
       for (const p of x.coverageProblems) {
-        lines.push([x.modId,x.mainFileId,x.mainVersion,x.mainName,`COVERAGE:${p.source}:${p.status}`,'','','','','','','','','','','','Inspect Nexus source; do not release MAIN until coverage is proven'].map(safeCell).join('\t'));
+        lines.push([x.modId,x.mainFileId,x.mainVersion,x.mainName,`COVERAGE:${p.source}:${p.status}`,'','','','','','','','','','','','','','Inspect Nexus source; do not release MAIN until coverage is proven'].map(safeCell).join('\t'));
       }
       for (const c of x.unresolved) {
+        const envReason = c.environmentDecision?.reason || '';
+        const envEvidence = (c.environmentDecision?.evidence || []).join(' | ');
+        let recommendation = 'Resolve as REQUIRED / NOT_APPLICABLE / ALREADY_INCLUDED / OBSOLETE in aux-registry v3';
+        if (/REQUIRED_DEPENDENCY_(?:DISABLED|ABSENT)/.test(envReason)) recommendation = 'Required dependency is not enabled/present in the active MO2 profile; investigate before releasing MAIN';
         lines.push([
           x.modId,x.mainFileId,x.mainVersion,x.mainName,'UNRESOLVED_COMPONENT',c.kind,c.key,c.family,c.source,c.auxModId,c.fileId,c.name,
-          c.requiredHint?'YES':'NO',c.optionalHint?'YES':'NO',c.installedContextMatch?'YES':'NO',(c.localMatches||[]).join(' | '),
-          'Resolve as REQUIRED / NOT_APPLICABLE / ALREADY_INCLUDED / OBSOLETE in aux-registry v3',
+          c.requiredHint?'YES':'NO',c.optionalHint?'YES':'NO',c.installedContextMatch?'YES':'NO',envReason,envEvidence,(c.localMatches||[]).join(' | '),recommendation,
         ].map(safeCell).join('\t'));
       }
     }
@@ -362,8 +393,10 @@ async function main() {
     complete: payload.complete,
     held: payload.held,
     unresolvedCandidates: payload.unresolvedCandidates,
+    environmentResolvedCandidates: payload.environmentResolvedCandidates,
     candidateCountsByKind: payload.candidateCountsByKind,
     unresolvedCountsByKind: payload.unresolvedCountsByKind,
+    environment: payload.environment,
     outFile,
     tasksFile,
   }, null, 2));

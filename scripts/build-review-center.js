@@ -42,25 +42,30 @@ function main() {
   const outHtml = argValue(process.argv, '--html');
   const autoReport = argValue(process.argv, '--auto-report', '');
   if (!planFile || !outJson || !outHtml) {
-    console.error('Usage: node build-review-center.js <plan.json> [patch-discovery.json] [closure.json] --out review-center.json --html review-center.html');
+    console.error('Usage: node build-review-center.js <plan.json> [component-discovery.json] [closure.json] --out review-center.json --html review-center.html');
     process.exit(2);
   }
 
+  const plan = loadJson(planFile, { items: [] });
+  const discovery = loadJson(patchFile, { items: [] });
   const payload = buildReviewPayload(
-    loadJson(planFile, { items: [] }),
-    loadJson(patchFile, { items: [] }),
+    plan,
+    discovery,
     loadJson(closureFile, { items: [] }),
     {
       plan: planFile,
+      componentDiscovery: patchFile || null,
       patchDiscovery: patchFile || null,
       closure: closureFile || null,
+      environment: plan.environment || discovery.environment || null,
+      environmentGraphFile: plan.environmentGraphFile || discovery.environmentFile || null,
       autoReport: autoReport || null,
       autoSummary: summarizeAutoReport(loadJson(autoReport, null)),
     });
 
   saveJson(outJson, payload, { atomic: false });
   writeText(outHtml, renderHtml(payload));
-  console.log(JSON.stringify({ items: payload.items.length, counts: payload.counts, outJson, outHtml }, null, 2));
+  console.log(JSON.stringify({ items: payload.items.length, counts: payload.counts, environment: payload.environment, outJson, outHtml }, null, 2));
 }
 
 if (require.main === module) main();

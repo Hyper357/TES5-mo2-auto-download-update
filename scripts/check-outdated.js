@@ -1,5 +1,5 @@
 #!/usr/bin/env node
-// High-precision update scan. v3.9 adds persistent variant policy + generalized component candidates.
+// High-precision update scan. v4.0 adds profile-aware MO2 Environment Graph evidence.
 
 const fs = require('fs');
 const path = require('path');
@@ -13,6 +13,7 @@ const { saveJson } = require('./lib/fs-json');
 const { readApiKey, createFilesClient } = require('./lib/nexus-api');
 const { defaultPolicyFile, loadVariantPolicies, getVariantPolicy, resolveVariantPolicy } = require('./lib/variant-policy');
 const { classifyComponent, componentFamily } = require('./lib/component-discovery');
+const { buildEnvironmentGraph, enabledContextNames, compactEnvironmentSummary, normalizeName } = require('./lib/mo2-environment');
 
 const rootDir = path.resolve(__dirname, '..');
 const modsDir = process.argv[2];
@@ -21,6 +22,7 @@ const asJson = hasFlag(process.argv, '--json');
 const forceRefresh = hasFlag(process.argv, '--force-refresh') || hasFlag(process.argv, '--no-cache');
 const outFile = argValue(process.argv, '--out', null);
 const reportFile = argValue(process.argv, '--report', null);
+const environmentOut = argValue(process.argv, '--environment-out', reportFile ? path.join(path.dirname(reportFile), 'mo2-environment.json') : '');
 const policyFile = defaultPolicyFile(rootDir);
 const api = createFilesClient({
   cacheDir: path.join(__dirname, '.api_cache'),
@@ -116,7 +118,7 @@ function samePageComponents(files, target, installedFileIds, mainName) {
 
 async function main() {
   if (!modsDir) {
-    console.error('用法: node check-outdated.js <modsDir> [apiKeyFile] [--json] [--out manifest.tsv] [--report plan.json]');
+    console.error('用法: node check-outdated.js <modsDir> [apiKeyFile] [--json] [--out manifest.tsv] [--report plan.json] [--environment-out mo2-environment.json]');
     process.exit(1);
   }
   const apiKey = readApiKey(keyArg);
@@ -127,20 +129,35 @@ async function main() {
 
   const policies = loadVariantPolicies(policyFile);
   const rawMods = scanModsDirectory(modsDir);
+  const environment = buildEnvironmentGraph({ modsDir });
+  if (environmentOut) saveJson(environmentOut, environment, { atomic: false });
+  const envByName = new Map((environment.mods || []).map(x => [normalizeName(x.name), x]));
+  const enabledRawMods = environment.profile?.usableForApplicability
+    ? rawMods.filter(m => envByName.get(normalizeName(m.folderName))?.state === 'ENABLED')
+    : rawMods;
+
   console.error(`rows=${rawMods.length}`);
-  const profile = ModProfile.analyzeFromMods(rawMods);
+  console.error(`[MO2 Environment] profile=${environment.profile?.name || 'UNRESOLVED'} source=${environment.profile?.source || 'UNKNOWN'} enabled=${environment.summary?.enabledMods || 0} disabled=${environment.summary?.disabledMods || 0}`);
+  const profile = ModProfile.analyzeFromMods(enabledRawMods);
   console.error(`[Profile] 平台=${profile.platform}(${profile.confidence.platform}), 身形=${profile.bodyType}(${profile.confidence.bodyType}), 纹理=${profile.textureTier}(${profile.confidence.textureTier})`);
 
-  const allLocalNames = rawMods.map(m => `${m.folderName} ${m.installationFile || ''}`);
-  const rows = rawMods.map(m => ({
-    modId: String(m.modId),
-    name: m.folderName,
-    installedVersion: m.version,
-    instFile: m.installationFile,
-    fileId: m.installedFiles[0] ? String(m.installedFiles[0]) : null,
-    installedFiles: m.installedFiles.map(String),
-    fomodPlugins: m.fomodPlugins,
-  }));
+  const activeContext = enabledContextNames(environment);
+  const allLocalNames = activeContext.length
+    ? activeContext
+    : rawMods.map(m => `${m.folderName} ${m.installationFile || ''}`);
+  const rows = rawMods.map(m => {
+    const envMod = envByName.get(normalizeName(m.folderName));
+    return {
+      modId: String(m.modId),
+      name: m.folderName,
+      installedVersion: m.version,
+      instFile: m.installationFile,
+      fileId: m.installedFiles[0] ? String(m.installedFiles[0]) : null,
+      installedFiles: m.installedFiles.map(String),
+      fomodPlugins: m.fomodPlugins,
+      profileState: envMod?.state || (environment.profile?.usableForApplicability ? 'UNLISTED' : 'UNKNOWN'),
+    };
+  });
 
   const results = [];
   let cursor = 0;
@@ -235,6 +252,7 @@ async function main() {
         const noteParts = [
           `decision=${choice.decision}`,
           `confidence=${choice.confidence}`,
+          `profileState=${r.profileState}`,
           `local=${mine.file_id}:${mine.version || ''}`,
           `target=${target?.file_id || ''}:${target?.version || ''}`,
         ];
@@ -314,6 +332,8 @@ async function main() {
     variantPolicyFile: policyFile,
     variantPolicyCount: Object.keys(policies.policies || {}).length,
     componentClosure: true,
+    environmentGraphFile: environmentOut || null,
+    environment: compactEnvironmentSummary(environment),
     profile: {
       platform: profile.platform,
       bodyType: profile.bodyType,

@@ -15,6 +15,8 @@ assert.strictEqual(pipelineState({ report: { mode: 'DOWNLOAD', failed: 1 }, revi
 assert.ok(sourceHintsFor('NXM_EXPIRED')[0].includes('nexus-autodl.js'));
 assert.ok(sourceHintsFor('META_MISMATCH').includes('scripts/execute-plan.js'));
 assert.ok(sourceHintsFor('HOLD_COMPONENT_DISCOVERY').includes('scripts/lib/component-discovery.js'));
+assert.ok(sourceHintsFor('PROFILE_UNRESOLVED').includes('scripts/lib/mo2-environment.js'));
+assert.ok(sourceHintsFor('MO2_ENVIRONMENT_MISMATCH').includes('npm run environment:status'));
 
 const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'tes5-agent-status-'));
 try {

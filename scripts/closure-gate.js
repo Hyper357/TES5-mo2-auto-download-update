@@ -2,7 +2,7 @@
 'use strict';
 
 // Main -> required component families -> Translation closure gate.
-// v3.9 phase 2 generalizes the old Patch-only discovery invariant to all explicit component candidates.
+// v4.0 may accept a narrow, high-confidence NOT_APPLICABLE decision from a resolved MO2 profile graph.
 
 const fs = require('fs');
 const path = require('path');
@@ -57,6 +57,13 @@ function rulesByFamily(kindRules) {
   }
   return map;
 }
+function discoveryCandidatesOfKind(pd, kind) {
+  return (pd?.candidates || []).filter(c => String(c.kind || 'PATCH').toUpperCase() === kind);
+}
+function isTrustedEnvironmentResolution(candidate) {
+  const d = candidate?.decision;
+  return d?.resolved === true && d?.source === 'ENVIRONMENT_GRAPH' && d?.status === 'NOT_APPLICABLE';
+}
 
 function main() {
   const manifest = process.argv[2];
@@ -65,7 +72,6 @@ function main() {
   const reportFile = argValue('--report');
   const planFile = argValue('--plan');
   const auditFile = argValue('--registry-audit');
-  // Keep the old flag name for CLI compatibility; content may now be generalized component discovery.
   const discoveryFile = argValue('--component-discovery', argValue('--patch-discovery'));
   const maxAgeDays = Number(argValue('--max-age-days', '14')) || 14;
   const allowLegacy = process.argv.includes('--allow-legacy-registry');
@@ -146,19 +152,26 @@ function main() {
     const conflicts = [];
     const staleRules = [];
     const required = [];
+    const environmentResolved = [];
     const counts = candidateCountsByKind(pd);
 
-    // Translation remains an explicit baseline decision because independent translation pages cannot always be proven by the Files API alone.
     const kindsToCheck = new Set(['TRANSLATION']);
     for (const kind of COMPONENT_KINDS) if ((counts[kind] || 0) > 0) kindsToCheck.add(kind);
     for (const r of relevant) if (COMPONENT_KINDS.includes(r.kind)) kindsToCheck.add(r.kind);
 
     for (const kind of kindsToCheck) {
       const kindRules = relevant.filter(r => r.kind === kind);
+      const discovered = discoveryCandidatesOfKind(pd, kind);
+      const autoResolved = discovered.filter(isTrustedEnvironmentResolution);
+      environmentResolved.push(...autoResolved.map(c => ({ kind, family: c.family || '', key: c.key || '', status: c.decision.status, reason: c.decision.reason || '', evidence: c.decision.evidence || [] })));
+      const registryNeeded = discovered.filter(c => !isTrustedEnvironmentResolution(c));
       const candidateCount = Number(counts[kind] || 0);
       const discoveryProvesEmpty = requireDiscovery && pd?.complete && candidateCount === 0;
+
       if (!kindRules.length) {
-        if (kind === 'TRANSLATION' || !discoveryProvesEmpty) missingKinds.push(kind);
+        // Translation remains an explicit baseline decision. Other kinds need registry evidence only for candidates
+        // that were not already resolved NOT_APPLICABLE by a high-confidence active-profile compatibility check.
+        if (kind === 'TRANSLATION' || registryNeeded.length > 0 || (!discoveryProvesEmpty && candidateCount === 0)) missingKinds.push(kind);
         continue;
       }
 
@@ -225,6 +238,7 @@ function main() {
         invalidRules,
         conflicts,
         staleRules,
+        environmentResolved,
         scannerEvidence: p?.aux || null,
         componentDiscovery: pd || null,
         patchDiscovery: pd || null,
@@ -235,7 +249,7 @@ function main() {
     const released = {
       ...row,
       action: 'DOWNLOAD',
-      note: `${row.note || ''}; tx=${tx}; closure=PASS; componentDiscovery=${requireDiscovery ? 'PASS' : 'LEGACY'}`.replace(/^;\s*/, ''),
+      note: `${row.note || ''}; tx=${tx}; closure=PASS; componentDiscovery=${requireDiscovery ? 'PASS' : 'LEGACY'}; environmentResolved=${environmentResolved.length}`.replace(/^;\s*/, ''),
     };
     finalRows.push(released);
     for (const rule of required) {
@@ -260,6 +274,7 @@ function main() {
       action: 'DOWNLOAD',
       tx,
       closure: 'PASS',
+      environmentResolved,
       componentDiscovery: pd || null,
       patchDiscovery: pd || null,
       requiredAux: required.map(r => ({ id: r.id, kind: r.kind, family: r.family || '', modId: r.auxModId, fileId: r.auxFileId, version: r.auxVersion, name: r.auxName })),
@@ -287,6 +302,7 @@ function main() {
       acc[k] = (acc[k] || 0) + 1;
       return acc;
     }, {}),
+    environmentResolved: report.reduce((n, x) => n + (x.environmentResolved?.length || 0), 0),
     holdClosure: finalRows.filter(r => /^HOLD_(?:COMPONENT|CLOSURE|PATCH_DISCOVERY)/.test(r.action)).length,
     items: report,
   };
