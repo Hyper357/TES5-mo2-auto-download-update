@@ -1,5 +1,5 @@
 #!/usr/bin/env node
-// High-precision update scan. v4.0 adds profile-aware MO2 Environment Graph evidence.
+// High-precision update scan. v4.1 separates "needs update" from "which file should be downloaded".
 
 const fs = require('fs');
 const path = require('path');
@@ -14,6 +14,7 @@ const { readApiKey, createFilesClient } = require('./lib/nexus-api');
 const { defaultPolicyFile, loadVariantPolicies, getVariantPolicy, resolveVariantPolicy } = require('./lib/variant-policy');
 const { classifyComponent, componentFamily } = require('./lib/component-discovery');
 const { buildEnvironmentGraph, enabledContextNames, compactEnvironmentSummary, normalizeName } = require('./lib/mo2-environment');
+const { assessUpdateEligibility, UPDATE_STATES } = require('./lib/update-eligibility');
 
 const rootDir = path.resolve(__dirname, '..');
 const modsDir = process.argv[2];
@@ -24,22 +25,14 @@ const outFile = argValue(process.argv, '--out', null);
 const reportFile = argValue(process.argv, '--report', null);
 const environmentOut = argValue(process.argv, '--environment-out', reportFile ? path.join(path.dirname(reportFile), 'mo2-environment.json') : '');
 const policyFile = defaultPolicyFile(rootDir);
-const api = createFilesClient({
-  cacheDir: path.join(__dirname, '.api_cache'),
-  forceRefresh,
-  maxSockets: 20,
-});
+const api = createFilesClient({ cacheDir: path.join(__dirname, '.api_cache'), forceRefresh, maxSockets: 20 });
 
 function resolveInstalledFile(files, row) {
   const byArchive = row.instFile ? files.find(f => f.file_name === row.instFile) : null;
   if (byArchive) return { mine: byArchive, reason: 'installationFile' };
-
-  const matches = (row.installedFiles || [])
-    .map(fid => files.find(f => String(f.file_id) === String(fid)))
-    .filter(Boolean);
+  const matches = (row.installedFiles || []).map(fid => files.find(f => String(f.file_id) === String(fid))).filter(Boolean);
   if (matches.length === 1) return { mine: matches[0], reason: 'single-fileId' };
   if (matches.length > 1) return { mine: null, reason: 'MULTI_SOURCE', candidates: matches };
-
   if (row.fileId) {
     const exact = files.find(f => String(f.file_id) === String(row.fileId));
     if (exact) return { mine: exact, reason: 'primary-fileId' };
@@ -55,37 +48,28 @@ function likelyRelevantPatch(patch, allLocalNames) {
     const score = tokenSimilarity(text, local);
     if (score > best.score) best = { score, name: local };
   }
-  return best.score >= 0.34
-    ? { relevant: true, why: `matches:${best.name}:${best.score.toFixed(2)}` }
-    : { relevant: false, why: best.score ? `weak:${best.score.toFixed(2)}` : 'no-match' };
+  return best.score >= 0.34 ? { relevant: true, why: `matches:${best.name}:${best.score.toFixed(2)}` } : { relevant: false, why: best.score ? `weak:${best.score.toFixed(2)}` : 'no-match' };
 }
 
 function newestInPolicyBranch(files, wantedBranch) {
-  const list = (files || [])
-    .filter(f => isActive(f) && categoryRole(f) === 'MAIN' && branchKey(f) === wantedBranch)
-    .sort((a, b) => {
-      const v = compareVersions(b.version || '', a.version || '');
-      if (v !== 0) return v;
-      const bt = Date.parse(b.uploaded_time || '') || 0;
-      const at = Date.parse(a.uploaded_time || '') || 0;
-      if (bt !== at) return bt - at;
-      return Number(b.file_id || 0) - Number(a.file_id || 0);
-    });
+  const list = (files || []).filter(f => isActive(f) && categoryRole(f) === 'MAIN' && branchKey(f) === wantedBranch).sort((a, b) => {
+    const v = compareVersions(b.version || '', a.version || '');
+    if (v !== 0) return v;
+    const bt = Date.parse(b.uploaded_time || '') || 0;
+    const at = Date.parse(a.uploaded_time || '') || 0;
+    if (bt !== at) return bt - at;
+    return Number(b.file_id || 0) - Number(a.file_id || 0);
+  });
   return list[0] || null;
 }
 
 function choiceFromPolicy(mine, target, policy) {
   if (!target) return { decision: 'HOLD_VARIANT_POLICY_CHANGED', confidence: 'low', target: null, margin: null, ranked: [] };
-  if (String(target.file_id) === String(mine.file_id)) {
-    return { decision: 'SKIP_CURRENT', confidence: 'high', target: mine, margin: 999, ranked: [] };
-  }
+  if (String(target.file_id) === String(mine.file_id)) return { decision: 'SKIP_CURRENT', confidence: 'high', target: mine, margin: 999, ranked: [] };
   const cmp = compareVersions(target.version || '', mine.version || '');
   if (cmp < 0) return { decision: 'SKIP_DOWNGRADE', confidence: 'high', target: mine, margin: 999, ranked: [] };
-
   const localBranch = branchKey(mine);
-  if (cmp === 0 && localBranch === policy.branchKey) {
-    return { decision: 'HOLD_SAME_VERSION_REPLACEMENT', confidence: 'medium', target, margin: 999, ranked: [] };
-  }
+  if (cmp === 0 && localBranch === policy.branchKey) return { decision: 'HOLD_SAME_VERSION_REPLACEMENT', confidence: 'medium', target, margin: 999, ranked: [] };
   return { decision: 'DOWNLOAD', confidence: 'high', target, margin: 999, ranked: [] };
 }
 
@@ -96,24 +80,42 @@ function samePageComponents(files, target, installedFileIds, mainName) {
   for (const f of files || []) {
     if (!isActive(f)) continue;
     const fileId = String(f.file_id || '');
-    if (!fileId || fileId === targetId || installed.has(fileId)) continue;
-    if (categoryRole(f) === 'MAIN') continue;
+    if (!fileId || fileId === targetId || installed.has(fileId) || categoryRole(f) === 'MAIN') continue;
     const text = `${f.name || ''} ${f.file_name || ''} ${f.description || ''} ${f.category_name || ''}`;
     const kind = classifyComponent(text, { source: 'SAME_PAGE_FILE' });
     if (!kind) continue;
-    out.push({
-      kind,
-      family: componentFamily(kind, text, mainName),
-      fileId,
-      version: f.version || '',
-      name: f.name || f.file_name || '',
-      fileName: f.file_name || '',
-      category: f.category_name || '',
-      description: String(f.description || '').replace(/\s+/g, ' ').trim().slice(0, 1200),
-      uploadedTime: f.uploaded_time || '',
-    });
+    out.push({ kind, family: componentFamily(kind, text, mainName), fileId, version: f.version || '', name: f.name || f.file_name || '', fileName: f.file_name || '', category: f.category_name || '', description: String(f.description || '').replace(/\s+/g, ' ').trim().slice(0, 1200), uploadedTime: f.uploaded_time || '' });
   }
   return out;
+}
+
+function earlyEligibilityResult(r, mine, resolved, eligibility, action, reason) {
+  const newest = eligibility.newerCandidates?.[0] || null;
+  return {
+    ...r,
+    localFileId: String(mine.file_id),
+    localApiVersion: mine.version || '',
+    localRole: categoryRole(mine),
+    latestFileId: newest?.fileId || String(mine.file_id),
+    latestVersion: newest?.version || mine.version || '',
+    latestName: newest?.name || mine.name || r.name,
+    latestRole: newest?.role || categoryRole(mine),
+    action,
+    reason,
+    confidence: eligibility.confidence,
+    sourceResolution: resolved.reason,
+    updateEligibility: eligibility,
+    note: [
+      `eligibility=${eligibility.state}`,
+      `eligibilityReason=${eligibility.reason}`,
+      `mo2ArrowHint=${eligibility.mo2Hint?.wouldShowUpdateArrow ? 'YES' : 'NO'}`,
+      `profileState=${r.profileState}`,
+      `local=${mine.file_id}:${mine.version || ''}`,
+      newest ? `newer=${newest.fileId}:${newest.version || ''}` : '',
+    ].filter(Boolean).join('; '),
+    candidates: (eligibility.sameRoleCandidates || eligibility.newerCandidates || []).slice(0, 12).map(x => ({ fileId: x.fileId, name: x.name, fileName: x.fileName, version: x.version, category: x.role, description: '', score: 0, similarity: 0, reasons: [eligibility.reason] })),
+    aux: { translations: [], patches: [], components: [] },
+  };
 }
 
 async function main() {
@@ -122,19 +124,14 @@ async function main() {
     process.exit(1);
   }
   const apiKey = readApiKey(keyArg);
-  if (!apiKey) {
-    console.error('错误: 未找到 Nexus API key (请提供文件或设置 NEXUS_API_KEY 环境变量)');
-    process.exit(1);
-  }
+  if (!apiKey) { console.error('错误: 未找到 Nexus API key (请提供文件或设置 NEXUS_API_KEY 环境变量)'); process.exit(1); }
 
   const policies = loadVariantPolicies(policyFile);
   const rawMods = scanModsDirectory(modsDir);
   const environment = buildEnvironmentGraph({ modsDir });
   if (environmentOut) saveJson(environmentOut, environment, { atomic: false });
   const envByName = new Map((environment.mods || []).map(x => [normalizeName(x.name), x]));
-  const enabledRawMods = environment.profile?.usableForApplicability
-    ? rawMods.filter(m => envByName.get(normalizeName(m.folderName))?.state === 'ENABLED')
-    : rawMods;
+  const enabledRawMods = environment.profile?.usableForApplicability ? rawMods.filter(m => envByName.get(normalizeName(m.folderName))?.state === 'ENABLED') : rawMods;
 
   console.error(`rows=${rawMods.length}`);
   console.error(`[MO2 Environment] profile=${environment.profile?.name || 'UNRESOLVED'} source=${environment.profile?.source || 'UNKNOWN'} enabled=${environment.summary?.enabledMods || 0} disabled=${environment.summary?.disabledMods || 0}`);
@@ -142,19 +139,15 @@ async function main() {
   console.error(`[Profile] 平台=${profile.platform}(${profile.confidence.platform}), 身形=${profile.bodyType}(${profile.confidence.bodyType}), 纹理=${profile.textureTier}(${profile.confidence.textureTier})`);
 
   const activeContext = enabledContextNames(environment);
-  const allLocalNames = activeContext.length
-    ? activeContext
-    : rawMods.map(m => `${m.folderName} ${m.installationFile || ''}`);
+  const allLocalNames = activeContext.length ? activeContext : rawMods.map(m => `${m.folderName} ${m.installationFile || ''}`);
   const rows = rawMods.map(m => {
     const envMod = envByName.get(normalizeName(m.folderName));
     return {
-      modId: String(m.modId),
-      name: m.folderName,
-      installedVersion: m.version,
-      instFile: m.installationFile,
-      fileId: m.installedFiles[0] ? String(m.installedFiles[0]) : null,
-      installedFiles: m.installedFiles.map(String),
-      fomodPlugins: m.fomodPlugins,
+      modId: String(m.modId), name: m.folderName, installedVersion: m.version,
+      newestVersion: m.newestVersion || '', ignoredVersion: m.ignoredVersion || '', nexusFileStatus: m.nexusFileStatus || 0,
+      lastNexusQuery: m.lastNexusQuery || '', lastNexusUpdate: m.lastNexusUpdate || '', nexusLastModified: m.nexusLastModified || '',
+      instFile: m.installationFile, fileId: m.installedFiles[0] ? String(m.installedFiles[0]) : null,
+      installedFiles: m.installedFiles.map(String), fomodPlugins: m.fomodPlugins,
       profileState: envMod?.state || (environment.profile?.usableForApplicability ? 'UNLISTED' : 'UNKNOWN'),
     };
   });
@@ -172,29 +165,38 @@ async function main() {
       try {
         const data = await api.getFiles(r.modId, apiKey);
         const files = Array.isArray(data.files) ? data.files : [];
-        if (!files.length) {
-          results.push({ ...r, action: 'HOLD_NO_FILES', reason: 'NO_FILES', confidence: 'low' });
-          continue;
-        }
+        if (!files.length) { results.push({ ...r, action: 'HOLD_NO_FILES', reason: 'NO_FILES', confidence: 'low' }); continue; }
 
         const resolved = resolveInstalledFile(files, r);
         if (!resolved.mine) {
-          results.push({
-            ...r,
-            action: resolved.reason === 'MULTI_SOURCE' ? 'HOLD_MULTI_SOURCE' : 'HOLD_UNRESOLVED_LOCAL',
-            reason: resolved.reason,
-            confidence: 'low',
-            localCandidates: (resolved.candidates || []).map(f => ({ fileId: f.file_id, name: f.name, version: f.version })),
-          });
+          results.push({ ...r, action: resolved.reason === 'MULTI_SOURCE' ? 'HOLD_MULTI_SOURCE' : 'HOLD_UNRESOLVED_LOCAL', reason: resolved.reason, confidence: 'low', localCandidates: (resolved.candidates || []).map(f => ({ fileId: f.file_id, name: f.name, version: f.version })) });
           continue;
         }
 
         const mine = resolved.mine;
+        const rememberedPolicy = getVariantPolicy(policies, r.modId);
+        const eligibility = assessUpdateEligibility({ files, mine, localName: r.name, meta: r });
+
+        if (eligibility.state === UPDATE_STATES.CURRENT) {
+          results.push(earlyEligibilityResult(r, mine, resolved, eligibility, 'SKIP_CURRENT', 'CURRENT_CONFIRMED'));
+          continue;
+        }
+        if (eligibility.state === UPDATE_STATES.FALSE_POSITIVE) {
+          results.push(earlyEligibilityResult(r, mine, resolved, eligibility, 'SKIP_MO2_FALSE_POSITIVE', 'MO2_HINT_FALSE_POSITIVE'));
+          continue;
+        }
+        if (eligibility.state === UPDATE_STATES.IGNORED) {
+          results.push(earlyEligibilityResult(r, mine, resolved, eligibility, 'SKIP_IGNORED_UPDATE', 'USER_IGNORED_UPDATE'));
+          continue;
+        }
+        if (eligibility.state === UPDATE_STATES.UNCERTAIN) {
+          results.push(earlyEligibilityResult(r, mine, resolved, eligibility, 'HOLD_UPDATE_ELIGIBILITY', eligibility.reason));
+          continue;
+        }
+
         const baseChoice = selectUpdateTarget({ files, mine, localName: r.name, installationFile: r.instFile, profile });
         const variantReview = detectVariantReview({ files, mine, localNames: allLocalNames });
-        const rememberedPolicy = getVariantPolicy(policies, r.modId);
         const policyResolution = resolveVariantPolicy(variantReview, rememberedPolicy);
-
         let choice = baseChoice;
         let action = choice.decision;
         let policyTarget = null;
@@ -204,23 +206,14 @@ async function main() {
         if (rememberedPolicy) {
           policyTarget = newestInPolicyBranch(files, rememberedPolicy.branchKey);
           const stable = rememberedPolicy.branchKey && rememberedPolicy.branchKey !== 'GENERIC';
-          if (!stable) {
-            action = 'HOLD_VARIANT_POLICY_CHANGED';
-            policyIssueCode = 'VARIANT_POLICY_UNSTABLE';
-          } else if (!policyTarget || ['CHANGED', 'AMBIGUOUS', 'UNUSABLE'].includes(policyResolution.status)) {
-            action = 'HOLD_VARIANT_POLICY_CHANGED';
-            policyIssueCode = policyResolution.code || 'VARIANT_POLICY_CHANGED';
-          } else {
+          if (!stable) { action = 'HOLD_VARIANT_POLICY_CHANGED'; policyIssueCode = 'VARIANT_POLICY_UNSTABLE'; }
+          else if (!policyTarget || ['CHANGED', 'AMBIGUOUS', 'UNUSABLE'].includes(policyResolution.status)) { action = 'HOLD_VARIANT_POLICY_CHANGED'; policyIssueCode = policyResolution.code || 'VARIANT_POLICY_CHANGED'; }
+          else {
             const localText = `${r.name} ${r.instFile || ''} ${mine.name || ''} ${mine.file_name || ''}`;
             const candidateText = `${policyTarget.name || ''} ${policyTarget.file_name || ''}`;
             policyConflicts = hardVariantConflicts(localText, candidateText, profile);
-            if (policyConflicts.length) {
-              action = 'HOLD_VARIANT_POLICY_CHANGED';
-              policyIssueCode = 'VARIANT_POLICY_ENVIRONMENT_CONFLICT';
-            } else {
-              choice = choiceFromPolicy(mine, policyTarget, rememberedPolicy);
-              action = choice.decision;
-            }
+            if (policyConflicts.length) { action = 'HOLD_VARIANT_POLICY_CHANGED'; policyIssueCode = 'VARIANT_POLICY_ENVIRONMENT_CONFLICT'; }
+            else { choice = choiceFromPolicy(mine, policyTarget, rememberedPolicy); action = choice.decision; }
           }
         } else {
           if (action === 'DOWNLOAD' && choice.confidence !== 'high') action = 'HOLD_REVIEW';
@@ -228,33 +221,21 @@ async function main() {
           if (variantReview.required && (decisionNeedsMainChoice || variantReview.recommendedDifferentFromCurrent)) action = 'HOLD_VARIANT_REVIEW';
         }
 
+        // Eligibility has already proven that this installed exact lane has a newer file. If the downstream
+        // selector tries to classify it as current, do not silently erase the update evidence.
+        if (['SKIP_CURRENT', 'SKIP_DOWNGRADE'].includes(action)) action = 'HOLD_UPDATE_TARGET_MISMATCH';
+
         const aux = groupLatestAuxFiles(files);
         const missingTranslations = aux.filter(f => categoryRole(f) === 'TRANSLATION' && !r.installedFiles.includes(String(f.file_id)));
-        const relevantPatches = aux
-          .filter(f => categoryRole(f) === 'PATCH' && !r.installedFiles.includes(String(f.file_id)))
-          .map(f => ({ file: f, match: likelyRelevantPatch(f, allLocalNames) }))
-          .filter(x => x.match.relevant);
-
+        const relevantPatches = aux.filter(f => categoryRole(f) === 'PATCH' && !r.installedFiles.includes(String(f.file_id))).map(f => ({ file: f, match: likelyRelevantPatch(f, allLocalNames) })).filter(x => x.match.relevant);
         const target = choice.target || mine;
         const components = samePageComponents(files, target, r.installedFiles, target?.name || r.name);
-        const topCandidates = (baseChoice.ranked || []).slice(0, 12).map(x => ({
-          fileId: x.file.file_id,
-          name: x.file.name,
-          fileName: x.file.file_name || '',
-          version: x.file.version,
-          category: x.file.category_name,
-          description: String(x.file.description || '').replace(/\s+/g, ' ').trim().slice(0, 800),
-          score: x.score,
-          similarity: x.similarity,
-          reasons: x.reasons,
-        }));
+        const topCandidates = (baseChoice.ranked || []).slice(0, 12).map(x => ({ fileId: x.file.file_id, name: x.file.name, fileName: x.file.file_name || '', version: x.file.version, category: x.file.category_name, description: String(x.file.description || '').replace(/\s+/g, ' ').trim().slice(0, 800), score: x.score, similarity: x.similarity, reasons: x.reasons }));
 
         const noteParts = [
-          `decision=${choice.decision}`,
-          `confidence=${choice.confidence}`,
-          `profileState=${r.profileState}`,
-          `local=${mine.file_id}:${mine.version || ''}`,
-          `target=${target?.file_id || ''}:${target?.version || ''}`,
+          `eligibility=${eligibility.state}`, `eligibilityReason=${eligibility.reason}`, `mo2ArrowHint=${eligibility.mo2Hint?.wouldShowUpdateArrow ? 'YES' : 'NO'}`,
+          `decision=${choice.decision}`, `confidence=${choice.confidence}`, `profileState=${r.profileState}`,
+          `local=${mine.file_id}:${mine.version || ''}`, `target=${target?.file_id || ''}:${target?.version || ''}`,
         ];
         if (choice.margin !== undefined && choice.margin !== null) noteParts.push(`margin=${choice.margin}`);
         if (variantReview.required) noteParts.push(`variantReview=${variantReview.reason}`);
@@ -265,45 +246,17 @@ async function main() {
         if (relevantPatches.length) noteParts.push(`patchCandidates=${relevantPatches.map(x => x.file.file_id).join(',')}`);
         if (components.length) noteParts.push(`componentCandidates=${components.map(x => `${x.kind}:${x.fileId}`).join(',')}`);
 
-        const manualReviewRequired = action === 'HOLD_VARIANT_REVIEW' || action === 'HOLD_VARIANT_POLICY_CHANGED';
+        const manualReviewRequired = ['HOLD_VARIANT_REVIEW', 'HOLD_VARIANT_POLICY_CHANGED', 'HOLD_UPDATE_TARGET_MISMATCH'].includes(action);
         results.push({
           ...r,
-          localFileId: String(mine.file_id),
-          localApiVersion: mine.version || '',
-          localRole: categoryRole(mine),
-          latestFileId: target ? String(target.file_id) : '',
-          latestVersion: target?.version || '',
-          latestName: target?.name || '',
-          latestRole: target ? categoryRole(target) : '',
+          localFileId: String(mine.file_id), localApiVersion: mine.version || '', localRole: categoryRole(mine),
+          latestFileId: target ? String(target.file_id) : '', latestVersion: target?.version || '', latestName: target?.name || '', latestRole: target ? categoryRole(target) : '',
           action,
-          reason: action === 'HOLD_VARIANT_REVIEW' ? 'MULTI_VARIANT_REVIEW' : (action === 'HOLD_VARIANT_POLICY_CHANGED' ? (policyIssueCode || policyResolution.code || 'VARIANT_POLICY_CHANGED') : choice.decision),
-          confidence: choice.confidence,
-          margin: choice.margin,
-          sourceResolution: resolved.reason,
-          note: noteParts.join('; '),
-          variantPolicy: rememberedPolicy ? {
-            branchKey: rememberedPolicy.branchKey,
-            lastConfirmedFileId: rememberedPolicy.lastConfirmedFileId || '',
-            lastConfirmedVersion: rememberedPolicy.lastConfirmedVersion || '',
-            lastConfirmedName: rememberedPolicy.lastConfirmedName || '',
-            resolution: policyResolution.status,
-            targetFileId: policyTarget ? String(policyTarget.file_id) : '',
-            conflicts: policyConflicts,
-          } : null,
-          manualReview: manualReviewRequired ? {
-            ...variantReview,
-            type: 'MULTI_VARIANT',
-            required: true,
-            policy: rememberedPolicy || null,
-            policyResolution: policyResolution.status,
-            policyIssueCode,
-            policyConflicts,
-          } : (variantReview.required ? { type: 'MULTI_VARIANT', ...variantReview } : null),
-          aux: {
-            translations: missingTranslations.map(f => ({ fileId: f.file_id, name: f.name, version: f.version, category: f.category_name || '' })),
-            patches: relevantPatches.map(x => ({ fileId: x.file.file_id, name: x.file.name, version: x.file.version, category: x.file.category_name || '', why: x.match.why })),
-            components,
-          },
+          reason: action === 'HOLD_VARIANT_REVIEW' ? 'MULTI_VARIANT_REVIEW' : (action === 'HOLD_VARIANT_POLICY_CHANGED' ? (policyIssueCode || policyResolution.code || 'VARIANT_POLICY_CHANGED') : (action === 'HOLD_UPDATE_TARGET_MISMATCH' ? 'ELIGIBILITY_SELECTOR_DISAGREEMENT' : choice.decision)),
+          confidence: choice.confidence, margin: choice.margin, sourceResolution: resolved.reason, note: noteParts.join('; '), updateEligibility: eligibility,
+          variantPolicy: rememberedPolicy ? { branchKey: rememberedPolicy.branchKey, lastConfirmedFileId: rememberedPolicy.lastConfirmedFileId || '', lastConfirmedVersion: rememberedPolicy.lastConfirmedVersion || '', lastConfirmedName: rememberedPolicy.lastConfirmedName || '', resolution: policyResolution.status, targetFileId: policyTarget ? String(policyTarget.file_id) : '', conflicts: policyConflicts } : null,
+          manualReview: manualReviewRequired ? { ...variantReview, type: action.startsWith('HOLD_UPDATE_') ? 'UPDATE_ELIGIBILITY' : 'MULTI_VARIANT', required: true, policy: rememberedPolicy || null, policyResolution: policyResolution.status, policyIssueCode, policyConflicts } : (variantReview.required ? { type: 'MULTI_VARIANT', ...variantReview } : null),
+          aux: { translations: missingTranslations.map(f => ({ fileId: f.file_id, name: f.name, version: f.version, category: f.category_name || '' })), patches: relevantPatches.map(x => ({ fileId: x.file.file_id, name: x.file.name, version: x.file.version, category: x.file.category_name || '', why: x.match.why })), components },
           candidates: topCandidates,
         });
       } catch (err) {
@@ -317,34 +270,33 @@ async function main() {
   results.sort((a, b) => Number(a.modId) - Number(b.modId) || a.name.localeCompare(b.name));
 
   const counts = {};
-  for (const r of results) counts[r.action] = (counts[r.action] || 0) + 1;
+  const eligibilityCounts = {};
+  let mo2ArrowHints = 0;
+  let mo2FalsePositives = 0;
+  let mo2MissedUpdates = 0;
+  for (const r of results) {
+    counts[r.action] = (counts[r.action] || 0) + 1;
+    const s = r.updateEligibility?.state;
+    if (s) eligibilityCounts[s] = (eligibilityCounts[s] || 0) + 1;
+    if (r.updateEligibility?.mo2Hint?.wouldShowUpdateArrow) mo2ArrowHints++;
+    if (s === UPDATE_STATES.FALSE_POSITIVE) mo2FalsePositives++;
+    if (s === UPDATE_STATES.UPDATE && r.updateEligibility?.mo2Agreement === 'MO2_MISSED_EXACT_UPDATE') mo2MissedUpdates++;
+  }
   console.error(`done rows=${rows.length} apiFail=${apiFail} ${Object.entries(counts).map(([k, v]) => `${k}=${v}`).join(' ')}`);
+  console.error(`[Update Eligibility] ${Object.entries(eligibilityCounts).map(([k, v]) => `${k}=${v}`).join(' ')} | mo2ArrowHints=${mo2ArrowHints} falsePositives=${mo2FalsePositives} missedExactUpdates=${mo2MissedUpdates}`);
 
   if (outFile) {
-    const lines = results.map(o => [
-      o.modId, o.latestName || o.name, o.latestVersion || '', o.note || o.reason || '', o.latestFileId || '', o.action || 'HOLD_REVIEW',
-    ].join('\t'));
+    const lines = results.map(o => [o.modId, o.latestName || o.name, o.latestVersion || '', o.note || o.reason || '', o.latestFileId || '', o.action || 'HOLD_REVIEW'].join('\t'));
     fs.writeFileSync(outFile, lines.join('\n') + '\n', 'utf8');
   }
 
   const payload = {
     generatedAt: new Date().toISOString(),
-    variantPolicyFile: policyFile,
-    variantPolicyCount: Object.keys(policies.policies || {}).length,
-    componentClosure: true,
-    environmentGraphFile: environmentOut || null,
-    environment: compactEnvironmentSummary(environment),
-    profile: {
-      platform: profile.platform,
-      bodyType: profile.bodyType,
-      textureTier: profile.textureTier,
-      confidence: profile.confidence,
-      evidence: profile.evidence,
-    },
-    total: rows.length,
-    apiFail,
-    counts,
-    items: results,
+    updateEligibility: { enabled: true, eligibilityCounts, mo2ArrowHints, mo2FalsePositives, mo2MissedUpdates },
+    variantPolicyFile: policyFile, variantPolicyCount: Object.keys(policies.policies || {}).length,
+    componentClosure: true, environmentGraphFile: environmentOut || null, environment: compactEnvironmentSummary(environment),
+    profile: { platform: profile.platform, bodyType: profile.bodyType, textureTier: profile.textureTier, confidence: profile.confidence, evidence: profile.evidence },
+    total: rows.length, apiFail, counts, items: results,
   };
   if (reportFile) saveJson(reportFile, payload, { atomic: false });
   if (asJson) console.log(JSON.stringify(payload, null, 2));
