@@ -6,13 +6,13 @@ const path = require('path');
 const { sanitizeString } = require('./diagnostics');
 
 function runNode(args, options = {}) {
-  const capture = options.capture !== false && !options.inherit;
+  const capture = !!options.capture;
   const r = cp.spawnSync(process.execPath, args, {
     cwd: options.cwd,
     env: options.env || process.env,
     encoding: capture ? 'utf8' : undefined,
     windowsHide: true,
-    stdio: options.inherit ? 'inherit' : ['ignore', 'pipe', 'pipe'],
+    stdio: capture ? ['ignore', 'pipe', 'pipe'] : 'inherit',
   });
   const result = {
     ok: r.status === 0,
