@@ -41,7 +41,6 @@ function classifyComponent(text, meta = {}) {
   if (/\b(requirement|requirements|required resource|required files?|resource pack|resources|framework|library|dependency|dependencies|core files?|shared assets?|base assets?)\b/i.test(raw)) return 'RESOURCE';
   if (/\b(optional|addon|add-on|module|extra files?|alternative|variant|supplement)\b/i.test(raw)) return 'OPTIONAL_COMPONENT';
 
-  // Nexus forward requirement links are requirements even when their display name contains no generic keyword.
   if (meta.source === 'REQUIREMENTS_FORWARD') return 'RESOURCE';
   return '';
 }
@@ -68,7 +67,7 @@ function componentFamily(kind, text, mainName = '') {
 }
 
 function candidateKey(c) {
-  if (c.auxModId) return `${c.kind}:mod:${c.auxModId}`;
+  if (c.auxModId) return `${c.kind}:mod:${c.auxModId}:${c.fileId || ''}`;
   if (c.fileId) return `${c.kind}:file:${c.fileId}`;
   const digest = crypto.createHash('sha1').update(`${c.kind || ''}\n${c.family || ''}\n${normalizeText(c.name || '')}`).digest('hex').slice(0, 12);
   return `${c.kind}:text:${digest}`;
@@ -131,7 +130,6 @@ function mergeComponentCandidates(items) {
       sources: [...new Set([...(prev.sources || []), ...(c.sources || [])])],
       installed: prev.installed || c.installed,
       requiredHint: prev.requiredHint || c.requiredHint,
-      // Keep the optional badge only when every merged observation remains compatible with it.
       optionalHint: prev.optionalHint && c.optionalHint,
       applicabilityHints: [...new Set([...(prev.applicabilityHints || []), ...(c.applicabilityHints || [])])],
       evidence: [prev.evidence, c.evidence].filter(Boolean).join(' | ').slice(0, 2500),
@@ -144,7 +142,6 @@ function withInstalledContext(candidate, localNames) {
   const base = installedContext(candidate, localNames);
   if (base.installedContextMatch) return { ...candidate, ...base };
 
-  // For non-patch component families, use token overlap on the candidate name as a conservative fallback.
   const ct = new Set(tokens(candidate.name || candidate.evidence || ''));
   const hits = [];
   if (ct.size >= 2) {
@@ -161,8 +158,22 @@ function withInstalledContext(candidate, localNames) {
 function candidateRuleMatches(candidate, rule) {
   if (!candidate || !rule) return false;
   if (String(rule.kind || '').toUpperCase() !== String(candidate.kind || '').toUpperCase()) return false;
-  if (rule.auxModId && candidate.auxModId && String(rule.auxModId) === String(candidate.auxModId)) return true;
-  if (rule.auxFileId && candidate.fileId && String(rule.auxFileId) === String(candidate.fileId)) return true;
+
+  const candidateFileId = String(candidate.fileId || '');
+  const ruleFileId = String(rule.auxFileId || '');
+  const candidateModId = String(candidate.auxModId || '');
+  const ruleModId = String(rule.auxModId || '');
+
+  // Exact file evidence is authoritative. Never let a rule for another file on the same Nexus page resolve this candidate.
+  if (candidateFileId && ruleFileId) {
+    if (candidateFileId !== ruleFileId) return false;
+    if (candidateModId && ruleModId && candidateModId !== ruleModId) return false;
+    return true;
+  }
+
+  // A page relationship without exact file identity may match the same aux page, but still remains subject to the rule's decision/evidence.
+  if (!candidateFileId && candidateModId && ruleModId && candidateModId === ruleModId) return true;
+
   const rf = normalizeFamilyKey(rule.family || '');
   const cf = normalizeFamilyKey(candidate.family || '');
   return !!rf && rf !== '*' && rf === cf;
