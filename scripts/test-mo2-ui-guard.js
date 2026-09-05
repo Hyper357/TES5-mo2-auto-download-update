@@ -79,8 +79,15 @@ const queue = evaluateSnapshot({
 assert.strictEqual(queue.queue.state, 'DOWNLOADING');
 assert.strictEqual(queue.queue.inflight, true);
 
-assert(/确定/.test(buttonRegexForRole('OK')));
-assert(/否/.test(buttonRegexForRole('NO')));
+const okRe = new RegExp(buttonRegexForRole('OK'));
+const noRe = new RegExp(buttonRegexForRole('NO'));
+assert(okRe.test('确定'));
+assert(okRe.test('OK(O)'));
+assert(noRe.test('否'));
+assert(noRe.test('否(N)'));
+assert(noRe.test('No(&N)'));
+assert(!noRe.test('是(Y)'));
+assert(!noRe.test('Yes'));
 assert.throws(() => buttonRegexForRole('YES'));
 
 console.log('mo2 ui guard tests: OK');
