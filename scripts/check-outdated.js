@@ -1,5 +1,5 @@
 #!/usr/bin/env node
-// High-precision update scan. v3.9 phase 1 adds persistent user-confirmed variant branch policies.
+// High-precision update scan. v3.9 adds persistent variant policy + generalized component candidates.
 
 const fs = require('fs');
 const path = require('path');
@@ -12,6 +12,7 @@ const { argValue, hasFlag } = require('./lib/cli');
 const { saveJson } = require('./lib/fs-json');
 const { readApiKey, createFilesClient } = require('./lib/nexus-api');
 const { defaultPolicyFile, loadVariantPolicies, getVariantPolicy, resolveVariantPolicy } = require('./lib/variant-policy');
+const { classifyComponent, componentFamily } = require('./lib/component-discovery');
 
 const rootDir = path.resolve(__dirname, '..');
 const modsDir = process.argv[2];
@@ -83,9 +84,34 @@ function choiceFromPolicy(mine, target, policy) {
   if (cmp === 0 && localBranch === policy.branchKey) {
     return { decision: 'HOLD_SAME_VERSION_REPLACEMENT', confidence: 'medium', target, margin: 999, ranked: [] };
   }
-
-  // Cross-branch migration is allowed only because the user explicitly confirmed this semantic branch.
   return { decision: 'DOWNLOAD', confidence: 'high', target, margin: 999, ranked: [] };
+}
+
+function samePageComponents(files, target, installedFileIds, mainName) {
+  const installed = new Set((installedFileIds || []).map(String));
+  const targetId = String(target?.file_id || '');
+  const out = [];
+  for (const f of files || []) {
+    if (!isActive(f)) continue;
+    const fileId = String(f.file_id || '');
+    if (!fileId || fileId === targetId || installed.has(fileId)) continue;
+    if (categoryRole(f) === 'MAIN') continue;
+    const text = `${f.name || ''} ${f.file_name || ''} ${f.description || ''} ${f.category_name || ''}`;
+    const kind = classifyComponent(text, { source: 'SAME_PAGE_FILE' });
+    if (!kind) continue;
+    out.push({
+      kind,
+      family: componentFamily(kind, text, mainName),
+      fileId,
+      version: f.version || '',
+      name: f.name || f.file_name || '',
+      fileName: f.file_name || '',
+      category: f.category_name || '',
+      description: String(f.description || '').replace(/\s+/g, ' ').trim().slice(0, 1200),
+      uploadedTime: f.uploaded_time || '',
+    });
+  }
+  return out;
 }
 
 async function main() {
@@ -193,6 +219,7 @@ async function main() {
           .filter(x => x.match.relevant);
 
         const target = choice.target || mine;
+        const components = samePageComponents(files, target, r.installedFiles, target?.name || r.name);
         const topCandidates = (baseChoice.ranked || []).slice(0, 12).map(x => ({
           fileId: x.file.file_id,
           name: x.file.name,
@@ -218,6 +245,7 @@ async function main() {
         if (policyConflicts.length) noteParts.push(`variantPolicyConflicts=${policyConflicts.join(',')}`);
         if (missingTranslations.length) noteParts.push(`translationCandidates=${missingTranslations.map(f => f.file_id).join(',')}`);
         if (relevantPatches.length) noteParts.push(`patchCandidates=${relevantPatches.map(x => x.file.file_id).join(',')}`);
+        if (components.length) noteParts.push(`componentCandidates=${components.map(x => `${x.kind}:${x.fileId}`).join(',')}`);
 
         const manualReviewRequired = action === 'HOLD_VARIANT_REVIEW' || action === 'HOLD_VARIANT_POLICY_CHANGED';
         results.push({
@@ -256,6 +284,7 @@ async function main() {
           aux: {
             translations: missingTranslations.map(f => ({ fileId: f.file_id, name: f.name, version: f.version, category: f.category_name || '' })),
             patches: relevantPatches.map(x => ({ fileId: x.file.file_id, name: x.file.name, version: x.file.version, category: x.file.category_name || '', why: x.match.why })),
+            components,
           },
           candidates: topCandidates,
         });
@@ -284,6 +313,7 @@ async function main() {
     generatedAt: new Date().toISOString(),
     variantPolicyFile: policyFile,
     variantPolicyCount: Object.keys(policies.policies || {}).length,
+    componentClosure: true,
     profile: {
       platform: profile.platform,
       bodyType: profile.bodyType,
