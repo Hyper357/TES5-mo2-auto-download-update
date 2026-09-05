@@ -70,19 +70,22 @@ function main() {
   const appended = [];
   const report = [];
   const known = new Set(rows.filter(r => r.modId && r.fileId).map(r => key(r.modId, r.fileId)));
+  const closureEligible = new Set(['DOWNLOAD', 'HOLD_PATCH', 'HOLD_TRANSLATION']);
 
   for (const row of rows) {
-    if (row.action !== 'DOWNLOAD') {
+    if (!closureEligible.has(row.action)) {
       finalRows.push(row);
       report.push({ modId: row.modId, fileId: row.fileId, action: row.action, closure: 'NOT_APPLICABLE' });
       continue;
     }
 
+    const originalAction = row.action;
     const relevant = rules.filter(x => String(x.mainModId) === String(row.modId) && versionMatches(x.mainVersion, row.ver));
     const selfAux = relevant.some(x => x.kind === 'SELF' && x.status === 'AUX');
     if (selfAux) {
-      finalRows.push(row);
-      report.push({ modId: row.modId, fileId: row.fileId, action: 'DOWNLOAD', closure: 'AUX_EXEMPT' });
+      const released = { ...row, action: 'DOWNLOAD', note: `${row.note || ''}; closure=AUX_EXEMPT`.replace(/^;\s*/, '') };
+      finalRows.push(released);
+      report.push({ modId: row.modId, fileId: row.fileId, originalAction, action: 'DOWNLOAD', closure: 'AUX_EXEMPT' });
       continue;
     }
 
@@ -121,14 +124,19 @@ function main() {
       };
       finalRows.push(held);
       report.push({
-        modId: row.modId, fileId: row.fileId, action: held.action,
+        modId: row.modId, fileId: row.fileId, originalAction, action: held.action,
         closure: 'FAILED', missingKinds, invalidRules,
       });
       continue;
     }
 
-    // 主文件先进入最终清单，随后追加 REQUIRED 附属文件；nexus-autodl 会逐条精确 fileId 下载。
-    finalRows.push(row);
+    const released = {
+      ...row,
+      action: 'DOWNLOAD',
+      note: `${row.note || ''}; closure=PASS`.replace(/^;\s*/, ''),
+    };
+    finalRows.push(released);
+
     for (const rule of required) {
       const k = key(rule.auxModId, rule.auxFileId);
       if (known.has(k)) continue;
@@ -146,7 +154,7 @@ function main() {
     }
 
     report.push({
-      modId: row.modId, fileId: row.fileId, action: 'DOWNLOAD', closure: 'PASS',
+      modId: row.modId, fileId: row.fileId, originalAction, action: 'DOWNLOAD', closure: 'PASS',
       requiredAux: required.map(x => ({ kind: x.kind, modId: x.auxModId, fileId: x.auxFileId, version: x.auxVersion, name: x.auxName })),
     });
   }
