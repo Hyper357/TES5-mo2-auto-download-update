@@ -49,10 +49,26 @@ function latestJob(runDir) {
   }
   return null;
 }
+function findLatestReviewRun() {
+  const runsDir = path.resolve(__dirname, '..', '.runtime', 'runs');
+  if (!fs.existsSync(runsDir)) return '';
+  const dirs = fs.readdirSync(runsDir, { withFileTypes: true })
+    .filter(x => x.isDirectory())
+    .map(x => x.name)
+    .sort()
+    .reverse();
+  for (const name of dirs) {
+    const candidate = path.join(runsDir, name);
+    if (fs.existsSync(path.join(candidate, 'review-center.html')) && fs.existsSync(path.join(candidate, 'review-center.json'))) return candidate;
+  }
+  return '';
+}
 
 async function main() {
-  const runDir = path.resolve(argValue('--run', process.argv[2] || ''));
-  if (!runDir || !fs.existsSync(runDir)) throw new Error('缺少有效 --run <runDir>');
+  const requested = argValue('--run', process.argv[2] || '');
+  const resolved = requested ? path.resolve(requested) : findLatestReviewRun();
+  if (!resolved || !fs.existsSync(resolved)) throw new Error('找不到 Review Center 运行目录。先运行 pipeline，或使用 --run <runDir>。');
+  const runDir = resolved;
   const htmlFile = path.join(runDir, 'review-center.html');
   const reviewFile = path.join(runDir, 'review-center.json');
   const decisionsFile = path.join(runDir, 'review-decisions.json');
@@ -61,7 +77,7 @@ async function main() {
   const token = crypto.randomBytes(24).toString('hex');
   let activeChild = null;
   const basePort = Math.max(1024, Number(argValue('--port', '3217')) || 3217);
-  const shouldOpen = process.argv.includes('--open');
+  const shouldOpen = process.argv.includes('--open') || !process.argv.includes('--no-open');
 
   const server = http.createServer(async (req, res) => {
     const parsed = url.parse(req.url, true);
