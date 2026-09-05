@@ -9,12 +9,14 @@ const decision = id => state.decisions[id] || (state.decisions[id] = { patches: 
 
 function summary() {
   const auto = D.autoSummary;
+  const env = D.environment;
   document.getElementById('auto-summary').innerHTML = auto ?
     '<span class="pill">自动请求 ' + auto.requested + '</span>' +
     '<span class="pill good">VERIFIED ' + auto.verified + '</span>' +
     '<span class="pill ' + (auto.failed ? 'danger' : 'good') + '">失败/未验证 ' + auto.failed + '</span>' +
     '<span class="pill">延后人工复核 ' + auto.humanReview + '</span>' : '';
   document.getElementById('summary').innerHTML =
+    (env ? '<span class="pill ' + (env.profileResolved ? 'good' : 'danger') + '">MO2 Profile ' + h(env.profileName || 'UNRESOLVED') + '</span>' : '') +
     '<span class="pill">待复核 ' + D.items.length + '</span>' +
     '<span class="pill">多分支 ' + (D.counts.variant || 0) + '</span>' +
     '<span class="pill">Component 未闭合 ' + (D.counts.component ?? D.counts.patch ?? 0) + '</span>' +
@@ -60,13 +62,17 @@ function renderComponentFamilies(it) {
       '<option value="">请选择…</option><option value="DOWNLOAD">下载一个候选</option><option value="NOT_APPLICABLE">不适用于当前环境</option>' +
       '<option value="ALREADY_INCLUDED">已包含/已有</option><option value="OBSOLETE">已废弃/无需</option><option value="SKIP_FOR_NOW">本次跳过整个 MOD</option></select></div>';
     for (const p of f.candidates || []) {
+      const env = p.environmentDecision;
+      const envLine = env?.reason ? '<div class="meta">Environment: ' + h(env.reason) + (env.evidence?.length ? ' · ' + h(env.evidence.join(' | ')) : '') + '</div>' : '';
       out += '<label class="option"><div class="row"><input type="radio" name="component-' + h(it.id) + '-' + h(groupKey) + '" value="' + h(p.modId) + ':' + h(p.fileId) + '" ' + (!p.selectable ? 'disabled' : '') + '><div><b>' + h(p.name || ('候选 ' + p.key)) + '</b>' +
         (p.requiredHint ? '<span class="tag">Requirements 指向</span>' : '') +
         (p.optionalHint ? '<span class="tag">Optional 线索</span>' : '') +
-        (p.installedContextMatch ? '<span class="tag">本地环境命中</span>' : '') +
+        (p.installedContextMatch ? '<span class="tag">当前 Profile 命中</span>' : '') +
+        (env?.reason === 'REQUIRED_DEPENDENCY_DISABLED' ? '<span class="tag">依赖已禁用</span>' : '') +
+        (env?.reason === 'REQUIRED_DEPENDENCY_ABSENT' ? '<span class="tag">依赖未发现</span>' : '') +
         (!p.selectable ? '<span class="tag">需 Pi 补 exact fileId</span>' : '') +
         '<div class="meta">' + h(p.kind || f.kind || 'PATCH') + ' · ' + h(p.source) + ' · modId ' + h(p.modId || '?') + ' · fileId ' + h(p.fileId || '?') + ' · v' + h(p.version || '?') + '</div>' +
-        (p.evidence ? '<div class="desc">' + h(p.evidence) + '</div>' : '') + '</div></div></label>';
+        envLine + (p.evidence ? '<div class="desc">' + h(p.evidence) + '</div>' : '') + '</div></div></label>';
     }
     out += '</div>';
   }
@@ -84,7 +90,7 @@ function render() {
     const card = document.createElement('div');
     card.className = 'card';
     const blockers = (it.blockers || []).map(x => '<div class="blocker">⚠ ' + h(x) + '</div>').join('');
-    card.innerHTML = '<div class="head"><div><b>' + h(it.localName || it.mainName || ('Mod ' + it.modId)) + '</b><div class="meta">modId ' + h(it.modId) + ' · ' + h(it.action || 'REVIEW') + '</div></div>' +
+    card.innerHTML = '<div class="head"><div><b>' + h(it.localName || it.mainName || ('Mod ' + it.modId)) + '</b><div class="meta">modId ' + h(it.modId) + ' · ' + h(it.action || 'REVIEW') + ' · Profile ' + h(it.profileState || 'UNKNOWN') + '</div></div>' +
       '<a class="link" target="_blank" href="https://www.nexusmods.com/skyrimspecialedition/mods/' + encodeURIComponent(it.modId) + '?tab=files">打开 Nexus Files ↗</a></div>' +
       '<div class="body">' + blockers + renderMainOptions(it) + renderComponentFamilies(it) +
       '<div class="section"><button class="btn secondary" data-skip="' + h(it.id) + '">本次跳过这个 MOD</button></div></div>';
