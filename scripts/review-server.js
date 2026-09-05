@@ -63,6 +63,22 @@ function findLatestReviewRun() {
   }
   return '';
 }
+function esc(s) {
+  return String(s ?? '').replace(/[&<>"']/g, c => ({ '&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;' }[c]));
+}
+function decorateHtml(html, runDir) {
+  const reportFile = path.join(runDir, 'final-report.json');
+  if (!fs.existsSync(reportFile)) return html;
+  let r;
+  try { r = JSON.parse(fs.readFileSync(reportFile, 'utf8')); } catch (_) { return html; }
+  const requested = Number(r.requested ?? r.downloadReady ?? r.download ?? 0) || 0;
+  const verified = Number(r.verified ?? 0) || 0;
+  const failed = Number(r.failed ?? Math.max(0, requested - verified)) || 0;
+  const review = Number(r.humanReview ?? 0) || 0;
+  const mode = esc(r.mode || 'AUDIT');
+  const banner = `<div style="background:#171d24;border:1px solid #2b3541;border-radius:16px;padding:18px 20px;margin:0 0 18px"><div style="font-weight:700;margin-bottom:10px">📊 本轮自动阶段汇报 <span style="color:#9caaba;font-weight:400">${mode}</span></div><div style="display:flex;gap:10px;flex-wrap:wrap"><span class="pill">自动请求 ${requested}</span><span class="pill" style="color:#9be7a6">VERIFIED ${verified}</span><span class="pill" style="color:${failed ? '#ffb4ab' : '#9be7a6'}">失败/未验证 ${failed}</span><span class="pill">延后人工复核 ${review}</span></div></div>`;
+  return html.replace('<div id="root"></div>', `${banner}<div id="root"></div>`);
+}
 
 async function main() {
   const requested = argValue('--run', process.argv[2] || '');
@@ -77,7 +93,7 @@ async function main() {
   const token = crypto.randomBytes(24).toString('hex');
   let activeChild = null;
   const basePort = Math.max(1024, Number(argValue('--port', '3217')) || 3217);
-  const shouldOpen = process.argv.includes('--open') || !process.argv.includes('--no-open');
+  const shouldOpen = !process.argv.includes('--no-open');
 
   const server = http.createServer(async (req, res) => {
     const parsed = url.parse(req.url, true);
@@ -87,7 +103,7 @@ async function main() {
     if (supplied !== token) return json(res, 403, { error: 'BAD_REVIEW_TOKEN' });
 
     if (req.method === 'GET' && parsed.pathname === '/') {
-      const body = fs.readFileSync(htmlFile);
+      const body = Buffer.from(decorateHtml(fs.readFileSync(htmlFile, 'utf8'), runDir));
       res.writeHead(200, {
         'content-type': 'text/html; charset=utf-8', 'content-length': body.length, 'cache-control': 'no-store',
         'content-security-policy': "default-src 'self' 'unsafe-inline'; img-src 'self' data:; connect-src 'self'; frame-ancestors 'none'",
@@ -149,3 +165,5 @@ async function main() {
 }
 
 main().catch(err => { console.error(`review-server failed: ${err.message}`); process.exit(1); });
+
+module.exports = { findLatestReviewRun, decorateHtml };
