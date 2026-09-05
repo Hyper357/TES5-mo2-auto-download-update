@@ -4,6 +4,7 @@
 const fs = require('fs');
 const path = require('path');
 const https = require('https');
+const net = require('net');
 const cp = require('child_process');
 const { argValue, hasFlag } = require('./lib/cli');
 const { loadJson, saveJson } = require('./lib/fs-json');
@@ -11,6 +12,8 @@ const {
   getCdpPort,
   getCdpUrl,
   getProfileDir,
+  explicitCdpPort,
+  persistCdpPort,
   ensureMarker,
   sentinelUrl,
   managedSessionStatus,
@@ -46,26 +49,45 @@ function findRecursive(dir, filename, depth = 5) {
   return '';
 }
 
-function browserCandidates() {
-  const local = process.env.LOCALAPPDATA || '';
+function explicitBrowserCandidates() {
   return [
     process.env.MO2_AUTOMATION_BROWSER,
     process.env.MO2_CHROME_FOR_TESTING,
+  ].filter(Boolean);
+}
+
+function managedBrowserCandidates() {
+  return [
+    ...explicitBrowserCandidates(),
     loadJson(installMeta, {})?.executable || '',
     findRecursive(browserRoot, 'chrome.exe', 6),
+  ].filter(Boolean);
+}
+
+function systemBrowserCandidates() {
+  const local = process.env.LOCALAPPDATA || '';
+  return [
     'C:\\Program Files\\Google\\Chrome\\Application\\chrome.exe',
     'C:\\Program Files (x86)\\Google\\Chrome\\Application\\chrome.exe',
     local ? path.join(local, 'Google', 'Chrome', 'Application', 'chrome.exe') : '',
   ].filter(Boolean);
 }
 
-function findBrowser() {
-  return browserCandidates().find(existsFile) || '';
+function browserCandidates({ includeSystem = false } = {}) {
+  return [...managedBrowserCandidates(), ...(includeSystem ? systemBrowserCandidates() : [])];
+}
+
+function findBrowser(options = {}) {
+  return browserCandidates(options).find(existsFile) || '';
+}
+
+function allowSystemChrome() {
+  return hasFlag(process.argv, '--allow-system-chrome') || /^(1|true|yes)$/i.test(String(process.env.MO2_ALLOW_SYSTEM_CHROME || ''));
 }
 
 function httpsBuffer(url, redirects = 5) {
   return new Promise((resolve, reject) => {
-    const req = https.get(url, { headers: { 'User-Agent': 'TES5-MO2-AutoUpdate/3.8' } }, res => {
+    const req = https.get(url, { headers: { 'User-Agent': 'TES5-MO2-AutoUpdate/4.1.2' } }, res => {
       if ([301, 302, 303, 307, 308].includes(res.statusCode) && res.headers.location && redirects > 0) {
         res.resume();
         return resolve(httpsBuffer(new URL(res.headers.location, url).toString(), redirects - 1));
@@ -114,35 +136,96 @@ async function installChromeForTesting() {
   return { installed: true, version: stable.version, executable };
 }
 
+async function resolveAutomationBrowser() {
+  const explicit = explicitBrowserCandidates().find(existsFile);
+  if (explicit) return { executable: explicit, source: 'EXPLICIT' };
+
+  const managed = [loadJson(installMeta, {})?.executable || '', findRecursive(browserRoot, 'chrome.exe', 6)].find(existsFile);
+  if (managed) return { executable: managed, source: 'CHROME_FOR_TESTING_MANAGED' };
+
+  if (!hasFlag(process.argv, '--no-install')) {
+    const install = await installChromeForTesting();
+    return { executable: install.executable, source: 'CHROME_FOR_TESTING_AUTO_INSTALL', install };
+  }
+
+  if (allowSystemChrome()) {
+    const system = systemBrowserCandidates().find(existsFile);
+    if (system) return { executable: system, source: 'SYSTEM_CHROME_EXPLICIT_FALLBACK' };
+  }
+
+  throw new Error('No managed Chrome for Testing found. Run npm run browser:install, or explicitly set MO2_AUTOMATION_BROWSER. System Chrome is not used by default.');
+}
+
+function portIsFree(port, timeoutMs = 500) {
+  return new Promise(resolve => {
+    const server = net.createServer();
+    let done = false;
+    const finish = value => {
+      if (done) return;
+      done = true;
+      try { server.close(); } catch (_) {}
+      resolve(value);
+    };
+    server.once('error', () => finish(false));
+    server.listen({ host: '127.0.0.1', port, exclusive: true }, () => finish(true));
+    setTimeout(() => finish(false), timeoutMs).unref?.();
+  });
+}
+
+async function selectLaunchPort(preferred = getCdpPort(), span = 32) {
+  if (await portIsFree(preferred)) return { port: preferred, changed: false };
+  if (explicitCdpPort()) {
+    const e = new Error(`BROWSER_PROFILE_MISMATCH: explicit CDP port ${preferred} is already occupied; refusing to silently change an explicitly configured port`);
+    e.code = 'BROWSER_PROFILE_MISMATCH';
+    throw e;
+  }
+  for (let offset = 1; offset <= span; offset += 1) {
+    const candidate = preferred + offset;
+    if (candidate >= 65536) break;
+    if (await portIsFree(candidate)) {
+      persistCdpPort(candidate, { reason: 'AUTO_FALLBACK_FROM_OCCUPIED_PORT', previousPort: preferred });
+      return { port: candidate, changed: true, previousPort: preferred };
+    }
+  }
+  const e = new Error(`CDP_PORT_EXHAUSTED: no free localhost port found near ${preferred}`);
+  e.code = 'CDP_PORT_EXHAUSTED';
+  throw e;
+}
+
 async function waitManaged(timeoutMs = 30000) {
   const deadline = Date.now() + timeoutMs;
   let last;
   while (Date.now() < deadline) {
     last = await managedSessionStatus({ timeout: 1500 });
     if (last.state === 'MANAGED') return last;
-    if (last.state === 'MISMATCH') throw Object.assign(new Error(`BROWSER_PROFILE_MISMATCH: port ${getCdpPort()} is occupied by another browser/profile`), { code: 'BROWSER_PROFILE_MISMATCH', status: last });
+    if (last.state === 'MISMATCH') throw Object.assign(new Error(`BROWSER_PROFILE_MISMATCH: port ${getCdpPort()} is occupied by another browser/profile/service`), { code: 'BROWSER_PROFILE_MISMATCH', status: last });
     await new Promise(r => setTimeout(r, 700));
   }
-  throw new Error(`CDP_UNAVAILABLE: managed browser did not become ready within ${timeoutMs}ms (${JSON.stringify(last || {})})`);
+  const e = new Error(`CDP_UNAVAILABLE: managed browser did not become ready within ${timeoutMs}ms (${JSON.stringify(last || {})})`);
+  e.code = 'CDP_UNAVAILABLE';
+  throw e;
 }
 
 async function start() {
-  const before = await managedSessionStatus();
+  let before = await managedSessionStatus();
   if (before.state === 'MANAGED') return { action: 'start', changed: false, status: before, message: 'managed browser already running' };
-  if (before.state === 'MISMATCH') {
-    const e = new Error(`BROWSER_PROFILE_MISMATCH: 127.0.0.1:${getCdpPort()} is already occupied by an unmanaged browser. Close that remote-debug browser first; daily Edge must not own this port.`);
-    e.code = 'BROWSER_PROFILE_MISMATCH';
-    throw e;
+
+  // If the current/default port is owned by another service, move the project-managed
+  // browser to a free nearby port instead of waiting 30 seconds and then failing.
+  let portSelection = { port: getCdpPort(), changed: false };
+  if (before.state === 'MISMATCH' || !(await portIsFree(getCdpPort()))) {
+    portSelection = await selectLaunchPort(getCdpPort());
+    before = await managedSessionStatus({ timeout: 800 });
+    if (before.state === 'MANAGED') return { action: 'start', changed: false, status: before, portSelection };
+    if (before.state === 'MISMATCH') {
+      const e = new Error(`BROWSER_PROFILE_MISMATCH: fallback port ${getCdpPort()} is unexpectedly occupied`);
+      e.code = 'BROWSER_PROFILE_MISMATCH';
+      throw e;
+    }
   }
 
-  let executable = findBrowser();
-  let install = null;
-  if (!executable) {
-    if (hasFlag(process.argv, '--no-install')) throw new Error('No automation Chrome found. Run npm run browser:install or set MO2_AUTOMATION_BROWSER.');
-    install = await installChromeForTesting();
-    executable = install.executable;
-  }
-
+  const resolved = await resolveAutomationBrowser();
+  const executable = resolved.executable;
   const profileDir = getProfileDir();
   const marker = ensureMarker(profileDir);
   const port = getCdpPort();
@@ -162,13 +245,23 @@ async function start() {
   const child = cp.spawn(executable, browserArgs, { detached: true, stdio: 'ignore', windowsHide: false });
   child.unref();
   const status = await waitManaged(Number(argValue(process.argv, '--timeout-ms', '30000')) || 30000);
-  return { action: 'start', changed: true, executable, profileDir, port, install, status };
+  return {
+    action: 'start',
+    changed: true,
+    executable,
+    browserSource: resolved.source,
+    profileDir,
+    port,
+    portSelection,
+    install: resolved.install || null,
+    status,
+  };
 }
 
 async function stop() {
   const status = await managedSessionStatus();
   if (status.state === 'STOPPED') return { action: 'stop', changed: false, status };
-  if (status.state !== 'MANAGED') throw Object.assign(new Error('BROWSER_PROFILE_MISMATCH: refusing to close an unmanaged browser'), { code: 'BROWSER_PROFILE_MISMATCH' });
+  if (status.state !== 'MANAGED') throw Object.assign(new Error('BROWSER_PROFILE_MISMATCH: refusing to close an unmanaged browser/service'), { code: 'BROWSER_PROFILE_MISMATCH' });
   const puppeteer = require('puppeteer-core');
   const browser = await puppeteer.connect({ browserURL: getCdpUrl(), defaultViewport: null });
   await browser.close();
@@ -187,7 +280,27 @@ async function main() {
   jsonOut(result);
 }
 
-main().catch(err => {
-  jsonOut({ ok: false, errorCode: err.code || 'BROWSER_MANAGER_FAILED', message: err.message, port: getCdpPort(), profileDir: getProfileDir() });
-  process.exit(2);
-});
+if (require.main === module) {
+  main().catch(err => {
+    jsonOut({ ok: false, errorCode: err.code || 'BROWSER_MANAGER_FAILED', message: err.message, port: getCdpPort(), profileDir: getProfileDir() });
+    process.exit(2);
+  });
+}
+
+module.exports = {
+  existsFile,
+  findRecursive,
+  explicitBrowserCandidates,
+  managedBrowserCandidates,
+  systemBrowserCandidates,
+  browserCandidates,
+  findBrowser,
+  allowSystemChrome,
+  portIsFree,
+  selectLaunchPort,
+  resolveAutomationBrowser,
+  installChromeForTesting,
+  waitManaged,
+  start,
+  stop,
+};

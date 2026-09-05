@@ -6,15 +6,47 @@ const path = require('path');
 const http = require('http');
 const crypto = require('crypto');
 
-const DEFAULT_PORT = Number(process.env.MO2_CDP_PORT || 9222);
+const ROOT_DIR = path.resolve(__dirname, '..', '..');
+const FALLBACK_PORT = 9222;
+const PORT_STATE_FILE = path.join(ROOT_DIR, '.runtime', 'state', 'browser-port.json');
 const PROFILE_ROOT = process.env.MO2_AUTOMATION_PROFILE
   || path.join(process.env.LOCALAPPDATA || os.homedir(), 'TES5-MO2-AutoUpdate', 'browser-profile');
 const MARKER_FILE = '.tes5-mo2-automation.json';
 const SENTINEL_PREFIX = 'tes5-mo2-automation=';
 
+function validPort(value) {
+  const n = Number(value);
+  return Number.isInteger(n) && n > 0 && n < 65536 ? n : null;
+}
+
+function explicitCdpPort() {
+  return validPort(process.env.MO2_CDP_PORT);
+}
+
+function persistedCdpPort() {
+  try {
+    const doc = JSON.parse(fs.readFileSync(PORT_STATE_FILE, 'utf8'));
+    return validPort(doc?.port);
+  } catch {
+    return null;
+  }
+}
+
 function getCdpPort() {
-  const n = Number(process.env.MO2_CDP_PORT || DEFAULT_PORT);
-  return Number.isFinite(n) && n > 0 && n < 65536 ? n : 9222;
+  return explicitCdpPort() || persistedCdpPort() || FALLBACK_PORT;
+}
+
+function persistCdpPort(port, metadata = {}) {
+  const n = validPort(port);
+  if (!n) throw new Error(`invalid CDP port: ${port}`);
+  fs.mkdirSync(path.dirname(PORT_STATE_FILE), { recursive: true });
+  fs.writeFileSync(PORT_STATE_FILE, JSON.stringify({
+    schema: 1,
+    port: n,
+    selectedAt: new Date().toISOString(),
+    ...metadata,
+  }, null, 2), 'utf8');
+  return n;
 }
 
 function getCdpUrl() {
@@ -64,14 +96,14 @@ function httpJson(url, timeout = 2500) {
       res.on('data', c => body += c);
       res.on('end', () => {
         try {
-          resolve({ ok: res.statusCode >= 200 && res.statusCode < 300, status: res.statusCode, json: JSON.parse(body) });
+          resolve({ ok: res.statusCode >= 200 && res.statusCode < 300, connected: true, status: res.statusCode, json: JSON.parse(body) });
         } catch {
-          resolve({ ok: false, status: res.statusCode, error: 'INVALID_JSON' });
+          resolve({ ok: false, connected: true, status: res.statusCode, error: 'INVALID_JSON' });
         }
       });
     });
-    req.on('error', e => resolve({ ok: false, error: e.code || e.message }));
-    req.on('timeout', () => { req.destroy(); resolve({ ok: false, error: 'TIMEOUT' }); });
+    req.on('error', e => resolve({ ok: false, connected: false, error: e.code || e.message }));
+    req.on('timeout', () => { req.destroy(); resolve({ ok: false, connected: true, error: 'TIMEOUT' }); });
   });
 }
 
@@ -87,10 +119,20 @@ async function managedSessionStatus(options = {}) {
   const marker = loadMarker(profileDir);
   const version = await httpJson(`${baseUrl}/json/version`, options.timeout || 2500);
   if (!version.ok) {
+    // A TCP/HTTP responder that is not Chrome CDP means the port is occupied.
+    // Treating HTTP 404 / invalid JSON as STOPPED caused browser-manager to wait
+    // 30 seconds for a port it could never bind to.
+    const occupied = !!version.connected;
     return {
-      state: 'STOPPED', managed: false, cdp: false,
-      port: getCdpPort(), profileDir, markerPresent: !!marker,
+      state: occupied ? 'MISMATCH' : 'STOPPED',
+      managed: false,
+      cdp: false,
+      port: getCdpPort(),
+      profileDir,
+      markerPresent: !!marker,
+      portOccupied: occupied,
       error: version.error || `HTTP_${version.status || 'UNKNOWN'}`,
+      httpStatus: version.status || null,
     };
   }
   const list = await httpJson(`${baseUrl}/json/list`, options.timeout || 2500);
@@ -102,6 +144,7 @@ async function managedSessionStatus(options = {}) {
     cdp: true,
     port: getCdpPort(), profileDir,
     markerPresent: !!marker, sentinel,
+    portOccupied: true,
     browser: version.json?.Browser || '',
     protocol: version.json?.['Protocol-Version'] || '',
     targetCount: targets.length,
@@ -112,7 +155,7 @@ async function assertManagedSession(options = {}) {
   const status = await managedSessionStatus(options);
   if (status.state === 'MANAGED') return status;
   const err = new Error(status.state === 'MISMATCH'
-    ? `BROWSER_PROFILE_MISMATCH: CDP ${status.port} is occupied by an unmanaged browser/profile`
+    ? `BROWSER_PROFILE_MISMATCH: CDP ${status.port} is occupied by an unmanaged browser/profile/service`
     : `CDP_UNAVAILABLE: managed automation browser is not running on ${status.port}`);
   err.code = status.state === 'MISMATCH' ? 'BROWSER_PROFILE_MISMATCH' : 'CDP_UNAVAILABLE';
   err.status = status;
@@ -120,9 +163,15 @@ async function assertManagedSession(options = {}) {
 }
 
 module.exports = {
+  FALLBACK_PORT,
+  PORT_STATE_FILE,
   MARKER_FILE,
   SENTINEL_PREFIX,
+  validPort,
+  explicitCdpPort,
+  persistedCdpPort,
   getCdpPort,
+  persistCdpPort,
   getCdpUrl,
   getProfileDir,
   markerPath,
