@@ -24,6 +24,7 @@ function sourceHintsFor(code) {
   if (/^(MO2_DIALOG|MO2_UI)/.test(c)) return ['scripts/lib/mo2-ui-guard.js', 'scripts/mo2-ui.js', 'scripts/mo2-ui-state.ps1'];
   if (/^(MO2_QUEUE|MO2_DOWNLOAD|CONCURRENT_|LEDGER_)/.test(c)) return ['scripts/lib/download-guard.js', 'scripts/execute-plan.js'];
   if (/^(MO2_ENVIRONMENT|PROFILE_)/.test(c)) return ['scripts/lib/mo2-environment.js', 'npm run environment:status'];
+  if (/^(UPDATE_|MO2_HINT_)/.test(c)) return ['scripts/lib/update-eligibility.js', 'npm run update:status'];
   if (/^VARIANT_POLICY/.test(c)) return ['scripts/lib/variant-policy.js', 'scripts/lib/variant-review.js', 'npm run variant:status'];
   if (/COMPONENT|RESOURCE|BODYSLIDE|PHYSICS|HOTFIX/.test(c)) return ['scripts/discover-patches.js', 'scripts/lib/component-discovery.js', 'scripts/lib/mo2-environment.js', 'scripts/closure-gate.js'];
   if (/^(CLOSURE_|REGISTRY_|VARIANT_|AMBIGUOUS_MAIN)/.test(c)) return ['scripts/closure-gate.js', 'scripts/lib/file-selector.js', 'scripts/lib/variant-review.js'];
@@ -39,15 +40,7 @@ function readRecentErrors(runDir, limit = 5) {
     let e;
     try { e = JSON.parse(line); } catch { return { code: 'UNPARSEABLE_LOG_ENTRY', sourceHints: [] }; }
     const code = e.errorCode || e.code || e.error?.code || 'UNKNOWN';
-    return {
-      code,
-      stage: e.stage || e.component || null,
-      modId: e.modId || e.context?.modId || null,
-      fileId: e.fileId || e.context?.fileId || null,
-      status: e.status || null,
-      action: e.action || e.error?.action || null,
-      sourceHints: sourceHintsFor(code),
-    };
+    return { code, stage: e.stage || e.component || null, modId: e.modId || e.context?.modId || null, fileId: e.fileId || e.context?.fileId || null, status: e.status || null, action: e.action || e.error?.action || null, sourceHints: sourceHintsFor(code) };
   });
 }
 
@@ -55,10 +48,7 @@ function ledgerSummary() {
   const stateDir = path.join(rootDir, '.runtime', 'state');
   const ledger = loadJson(path.join(stateDir, 'submission-ledger.json'), { items: {} });
   const counts = {};
-  for (const item of Object.values(ledger.items || {})) {
-    const status = item.status || 'UNKNOWN';
-    counts[status] = (counts[status] || 0) + 1;
-  }
+  for (const item of Object.values(ledger.items || {})) { const status = item.status || 'UNKNOWN'; counts[status] = (counts[status] || 0) + 1; }
   return { counts, executorLocked: fs.existsSync(path.join(stateDir, 'download-executor.lock')) };
 }
 
@@ -83,9 +73,10 @@ function nextActions(state, summary) {
   const actions = [];
   if (summary.browser.state !== 'MANAGED') actions.push('npm run browser:start');
   if (summary.environment && !summary.environment.profileResolved) actions.push('MO2 active profile is unresolved; set MO2_PROFILE_NAME or MO2_PROFILE_DIR before relying on automatic applicability decisions.');
+  if ((summary.updateEligibility?.uncertain || 0) > 0) actions.push('Run npm run update:status and resolve update eligibility before discussing Main/Patch choices.');
   if (state === 'ATTENTION') actions.push('Use errors[].sourceHints; do not read large source files wholesale.');
   if (summary.componentTasks > 0) actions.push('Process component discovery tasks before changing any HOLD; do not assume every candidate is REQUIRED.');
-  if ((summary.review.total || 0) > 0) actions.push('Open Review Center with npm run review; do not guess complex variants/components.');
+  if ((summary.review.total || 0) > 0) actions.push('Open Review Center with npm run review; do not guess complex update eligibility/variants/components.');
   if (state === 'READY_FOR_GO') actions.push('Await explicit user authorization before --go.');
   if (!actions.length) actions.push('No action required.');
   return actions;
@@ -93,6 +84,7 @@ function nextActions(state, summary) {
 
 async function buildStatus(runDir) {
   const report = loadJson(path.join(runDir, 'final-report.json'), null);
+  const plan = loadJson(path.join(runDir, 'plan.json'), { updateEligibility: {}, items: [] });
   const review = loadJson(path.join(runDir, 'review-center.json'), { counts: {}, items: [] });
   const environmentFile = path.join(runDir, 'mo2-environment.json');
   const environmentGraph = loadJson(environmentFile, null);
@@ -102,39 +94,26 @@ async function buildStatus(runDir) {
   const componentTasks = countTsvRows(taskFile);
   const browser = await managedSessionStatus({ timeout: 800 }).catch(err => ({ state: 'ERROR', errorCode: err.code || 'BROWSER_STATUS_FAILED' }));
   const job = latestReviewJob(runDir);
+  const ec = plan.updateEligibility?.eligibilityCounts || {};
   const summary = {
-    version: 4,
+    version: 5,
     generatedAt: new Date().toISOString(),
     runDir,
     browser: { state: browser.state || 'UNKNOWN', managed: browser.state === 'MANAGED' },
     environment,
-    automatic: {
-      mode: report?.mode || null,
-      requested: Number(report?.requested ?? report?.downloadReady ?? report?.download ?? 0) || 0,
-      verified: Number(report?.verified ?? 0) || 0,
-      failed: Number(report?.failed ?? 0) || 0,
-      holds: Number(report?.holds ?? 0) || 0,
+    updateEligibility: {
+      confirmedUpdates: Number(ec.UPDATE_CONFIRMED || 0),
+      current: Number(ec.CURRENT_CONFIRMED || 0),
+      falsePositives: Number(ec.MO2_HINT_FALSE_POSITIVE || 0),
+      ignored: Number(ec.UPDATE_IGNORED || 0),
+      uncertain: Number(ec.UPDATE_UNCERTAIN || 0),
+      mo2ArrowHints: Number(plan.updateEligibility?.mo2ArrowHints || 0),
+      mo2MissedExactUpdates: Number(plan.updateEligibility?.mo2MissedUpdates || 0),
     },
-    review: {
-      total: (review.items || []).length,
-      variant: Number(review.counts?.variant || 0),
-      component: Number(review.counts?.component ?? review.counts?.patch ?? 0),
-      patch: Number(review.counts?.patch || 0),
-      other: Number(review.counts?.other || 0),
-      latestJob: job ? { status: job.status || 'UNKNOWN', jobDir: job.jobDir || null } : null,
-    },
-    variantMemory: variantMemorySummary(),
-    componentTasks,
-    patchTasks: componentTasks,
-    errors,
-    queue: ledgerSummary(),
-    artifacts: {
-      environment: environmentGraph ? environmentFile : null,
-      reviewCenter: fs.existsSync(path.join(runDir, 'review-center.html')) ? path.join(runDir, 'review-center.html') : null,
-      failedItems: fs.existsSync(path.join(runDir, 'diagnostics', 'failed-items.json')) ? path.join(runDir, 'diagnostics', 'failed-items.json') : null,
-      componentTasks: componentTasks ? taskFile : null,
-      patchTasks: componentTasks ? taskFile : null,
-    },
+    automatic: { mode: report?.mode || null, requested: Number(report?.requested ?? report?.downloadReady ?? report?.download ?? 0) || 0, verified: Number(report?.verified ?? 0) || 0, failed: Number(report?.failed ?? 0) || 0, holds: Number(report?.holds ?? 0) || 0 },
+    review: { total: (review.items || []).length, updateEligibility: Number(review.counts?.updateEligibility || 0), variant: Number(review.counts?.variant || 0), component: Number(review.counts?.component ?? review.counts?.patch ?? 0), patch: Number(review.counts?.patch || 0), other: Number(review.counts?.other || 0), latestJob: job ? { status: job.status || 'UNKNOWN', jobDir: job.jobDir || null } : null },
+    variantMemory: variantMemorySummary(), componentTasks, patchTasks: componentTasks, errors, queue: ledgerSummary(),
+    artifacts: { environment: environmentGraph ? environmentFile : null, updatePlan: fs.existsSync(path.join(runDir, 'plan.json')) ? path.join(runDir, 'plan.json') : null, reviewCenter: fs.existsSync(path.join(runDir, 'review-center.html')) ? path.join(runDir, 'review-center.html') : null, failedItems: fs.existsSync(path.join(runDir, 'diagnostics', 'failed-items.json')) ? path.join(runDir, 'diagnostics', 'failed-items.json') : null, componentTasks: componentTasks ? taskFile : null, patchTasks: componentTasks ? taskFile : null },
   };
   summary.state = pipelineState({ report, review, errors, componentTasks, latestJob: job });
   summary.nextActions = nextActions(summary.state, summary);
@@ -145,7 +124,7 @@ async function main() {
   const requested = argValue(process.argv, '--run', '');
   const runDir = requested ? path.resolve(requested) : findLatestRun(rootDir);
   if (!runDir || !fs.existsSync(runDir)) {
-    const empty = { version: 4, generatedAt: new Date().toISOString(), state: 'NO_RUN', variantMemory: variantMemorySummary(), nextActions: ['Run an AUDIT first.'] };
+    const empty = { version: 5, generatedAt: new Date().toISOString(), state: 'NO_RUN', variantMemory: variantMemorySummary(), nextActions: ['Run an AUDIT first.'] };
     console.log(JSON.stringify(empty, null, hasFlag(process.argv, '--compact') ? 0 : 2));
     return;
   }
@@ -155,8 +134,6 @@ async function main() {
   console.log(JSON.stringify(status, null, hasFlag(process.argv, '--compact') ? 0 : 2));
 }
 
-if (require.main === module) {
-  main().catch(err => { console.error(JSON.stringify({ state: 'STATUS_FAILED', error: err.message })); process.exit(1); });
-}
+if (require.main === module) main().catch(err => { console.error(JSON.stringify({ state: 'STATUS_FAILED', error: err.message })); process.exit(1); });
 
 module.exports = { buildStatus, pipelineState, readRecentErrors, sourceHintsFor, variantMemorySummary };
