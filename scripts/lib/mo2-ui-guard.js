@@ -93,10 +93,17 @@ function evaluateSnapshot(snapshot, target = {}) {
       safeButton: null,
     };
 
-    if (kind === 'DUPLICATE_QUEUE_INFO' && exactIds) {
+    // A duplicate-queue information dialog has no destructive affirmative action;
+    // acknowledging it is safe when either the exact IDs or a strong target-name match is present.
+    if (kind === 'DUPLICATE_QUEUE_INFO' && (exactIds || strongName)) {
       record.safe = true;
       record.safeButton = 'OK';
-      safeActions.push({ handle: w.handle, kind, buttonRole: 'OK', reason: 'EXACT_MOD_FILE_DUPLICATE' });
+      safeActions.push({
+        handle: w.handle,
+        kind,
+        buttonRole: 'OK',
+        reason: exactIds ? 'EXACT_MOD_FILE_DUPLICATE' : 'STRONG_TARGET_NAME_DUPLICATE',
+      });
     } else if (kind === 'REDOWNLOAD_PROMPT' && strongName) {
       // Only cancel a re-download. Never select Yes/Retry/Download.
       record.safe = true;
