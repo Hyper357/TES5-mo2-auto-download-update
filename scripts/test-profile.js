@@ -27,9 +27,16 @@ function mods(names) {
 
 {
   const p = ModProfile.analyzeFromMods(mods([
-    'CBBE 3BA', '3BA BodySlide', 'CBBE textures', 'BHUNP optional',
+    'CBBE 3BA', '3BA BodySlide', '3BA Physics', 'CBBE textures', 'BHUNP optional',
   ]));
-  assert.ok(['3BA', 'CBBE'].includes(p.bodyType), `expected CBBE ecosystem, got ${p.bodyType}`);
+  assert.strictEqual(p.bodyType, '3BA');
+}
+
+{
+  const p = ModProfile.analyzeFromMods(mods([
+    'CBBE Body', 'BHUNP Body',
+  ]));
+  assert.strictEqual(p.bodyType, 'UNKNOWN', 'ambiguous body evidence must remain UNKNOWN');
 }
 
 {
