@@ -164,14 +164,11 @@ function candidateRuleMatches(candidate, rule) {
   const candidateModId = String(candidate.auxModId || '');
   const ruleModId = String(rule.auxModId || '');
 
-  // Exact file evidence is authoritative. Never let a rule for another file on the same Nexus page resolve this candidate.
   if (candidateFileId && ruleFileId) {
     if (candidateFileId !== ruleFileId) return false;
     if (candidateModId && ruleModId && candidateModId !== ruleModId) return false;
     return true;
   }
-
-  // A page relationship without exact file identity may match the same aux page, but still remains subject to the rule's decision/evidence.
   if (!candidateFileId && candidateModId && ruleModId && candidateModId === ruleModId) return true;
 
   const rf = normalizeFamilyKey(rule.family || '');
@@ -184,11 +181,26 @@ function resolveCandidate(candidate, rules) {
   if (!matching.length) return { resolved: false, status: 'UNRESOLVED', rule: null };
   const resolved = matching.find(r => RESOLVED_STATUSES.has(String(r.status || '').toUpperCase()));
   if (!resolved) return { resolved: false, status: 'UNRESOLVED', rule: matching[0] };
-  return { resolved: true, status: String(resolved.status).toUpperCase(), rule: resolved };
+  return { resolved: true, status: String(resolved.status).toUpperCase(), rule: resolved, source: 'REGISTRY' };
+}
+
+function effectiveDecision(candidate, rules) {
+  const env = candidate?.environmentDecision;
+  if (env?.resolved && env.source === 'ENVIRONMENT_GRAPH' && env.confidence === 'high' && env.status === 'NOT_APPLICABLE') {
+    return {
+      resolved: true,
+      status: 'NOT_APPLICABLE',
+      rule: null,
+      source: 'ENVIRONMENT_GRAPH',
+      reason: env.reason || 'PROFILE_NOT_APPLICABLE',
+      evidence: env.evidence || [],
+    };
+  }
+  return resolveCandidate(candidate, rules);
 }
 
 function assessComponentDiscovery({ candidates, rules, coverage }) {
-  const assessed = (candidates || []).map(c => ({ ...c, decision: resolveCandidate(c, rules) }));
+  const assessed = (candidates || []).map(c => ({ ...c, decision: effectiveDecision(c, rules) }));
   const unresolved = assessed.filter(c => !c.decision.resolved);
   const coverageProblems = Object.entries(coverage || {})
     .filter(([, v]) => v && v.required && !v.complete)
@@ -218,6 +230,7 @@ module.exports = {
   withInstalledContext,
   candidateRuleMatches,
   resolveCandidate,
+  effectiveDecision,
   assessComponentDiscovery,
   countsByKind,
 };
