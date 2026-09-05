@@ -1,6 +1,7 @@
 #!/usr/bin/env node
 // index.js
 // 高精度总控流水线：默认只审计；只有显式 --go 才提交下载。
+// v3 核心：主文件选择门禁 + PATCH/TRANSLATION 闭合门禁 + 精确 fileId 下载 + 落盘验证。
 
 const cp = require('child_process');
 const path = require('path');
@@ -14,6 +15,7 @@ const positional = cli.filter(x => !x.startsWith('--'));
 const modsDir = positional[0] || process.env.MO2_MODS_DIR || 'E:\\SkyrimAE\\mo2\\mods';
 const apiKeyFile = positional[1] || process.env.NEXUS_API_KEY_FILE || 'E:\\SkyrimAE\\tools\\.nexus_api_key';
 const downloadsDir = process.env.MO2_DOWNLOADS_DIR || 'E:\\SkyrimAE\\mo2\\downloads';
+const auxRegistry = process.env.MO2_AUX_REGISTRY || path.join(rootDir, 'config', 'aux-registry.tsv');
 const go = cli.includes('--go');
 const forceRefresh = cli.includes('--force-refresh');
 
@@ -38,59 +40,79 @@ function parseTsvLine(line) {
 async function run() {
   console.log('========================================================');
   console.log('🛡️ Skyrim MO2 高精度更新流水线 v3');
-  console.log(`模式: ${go ? 'DOWNLOAD（仅高置信 DOWNLOAD 项）' : 'AUDIT（默认，不会下载）'}`);
+  console.log(`模式: ${go ? 'DOWNLOAD（仅通过全部门禁的精确 fileId）' : 'AUDIT（默认，不会下载）'}`);
   console.log('========================================================');
 
   const stamp = new Date().toISOString().replace(/[:.]/g, '-');
-  const manifestTsv = path.join(rootDir, `manifest-${stamp}.tsv`);
+  const rawManifest = path.join(rootDir, `manifest-raw-${stamp}.tsv`);
   const planJson = path.join(rootDir, `plan-${stamp}.json`);
+  const finalManifest = path.join(rootDir, `manifest-final-${stamp}.tsv`);
+  const closureJson = path.join(rootDir, `closure-${stamp}.json`);
 
-  console.log('\n[Step 1/4] 扫描 MO2 + Nexus，并进行 fileId 锚定与变体判定...');
+  console.log('\n[Step 1/5] 扫描 MO2 + Nexus，并进行 fileId 锚定、产品线/变体判定...');
   const checkArgs = [
     path.join(rootDir, 'scripts', 'check-outdated.js'),
     modsDir,
     apiKeyFile,
-    '--out', manifestTsv,
+    '--out', rawManifest,
     '--report', planJson,
   ];
   if (forceRefresh) checkArgs.push('--force-refresh');
   runNode(checkArgs);
 
-  const lines = fs.readFileSync(manifestTsv, 'utf8').split(/\r?\n/).filter(Boolean);
+  console.log('\n[Step 2/5] 强制 PATCH / TRANSLATION 闭合...');
+  const closureOut = runNode([
+    path.join(rootDir, 'scripts', 'closure-gate.js'),
+    rawManifest,
+    auxRegistry,
+    '--out', finalManifest,
+    '--report', closureJson,
+  ], { capture: true });
+  let closureSummary = null;
+  try { closureSummary = JSON.parse(closureOut); } catch (_) {}
+  if (closureSummary) {
+    console.log(`  appendedAux=${closureSummary.appendedAux} holdClosure=${closureSummary.holdClosure}`);
+  }
+  console.log(`  registry: ${auxRegistry}`);
+
+  const lines = fs.readFileSync(finalManifest, 'utf8').split(/\r?\n/).filter(Boolean);
   const rows = lines.map(parseTsvLine);
   const byAction = new Map();
   for (const row of rows) byAction.set(row.action, (byAction.get(row.action) || 0) + 1);
 
-  console.log('\n[Step 2/4] 决策门禁结果:');
+  console.log('\n[Step 3/5] 最终门禁结果:');
   for (const [action, count] of [...byAction.entries()].sort()) console.log(`  ${action}: ${count}`);
-  console.log(`  审计证据: ${planJson}`);
-  console.log(`  完整清单: ${manifestTsv}`);
+  console.log(`  选择证据: ${planJson}`);
+  console.log(`  闭合证据: ${closureJson}`);
+  console.log(`  最终清单: ${finalManifest}`);
 
   const downloadRows = rows.filter(r => r.action === 'DOWNLOAD' && r.modId && r.fileId);
   const holdRows = rows.filter(r => /^HOLD_/.test(r.action || ''));
 
   if (holdRows.length) {
-    console.log(`\n⚠️ 有 ${holdRows.length} 项被安全门禁拦截。它们不会被自动下载。`);
-    for (const r of holdRows.slice(0, 20)) console.log(`  - ${r.action} | ${r.modId} | ${r.name} | ${r.note}`);
-    if (holdRows.length > 20) console.log(`  ... 另有 ${holdRows.length - 20} 项，详见 plan JSON。`);
+    console.log(`\n⚠️ 有 ${holdRows.length} 项未通过安全门禁，不会被自动下载。`);
+    for (const r of holdRows.slice(0, 25)) console.log(`  - ${r.action} | ${r.modId} | ${r.name} | ${r.note}`);
+    if (holdRows.length > 25) console.log(`  ... 另有 ${holdRows.length - 25} 项，详见 JSON 报告。`);
   }
 
   if (!downloadRows.length) {
-    console.log('\n✅ 没有达到高置信自动下载门槛的更新项。未触发任何下载。');
+    console.log('\n✅ 当前没有通过全部门禁的下载项。未触发任何下载。');
     return;
   }
 
   const runManifest = path.join(rootDir, `run-${stamp}.tsv`);
   fs.writeFileSync(runManifest, downloadRows.map(r => [r.modId, r.name, r.ver, r.note, r.fileId, 'DOWNLOAD'].join('\t')).join('\n') + '\n', 'utf8');
-  console.log(`\n高置信 DOWNLOAD 项: ${downloadRows.length}，执行清单: ${runManifest}`);
+  console.log(`\n通过全部门禁的精确 DOWNLOAD 项: ${downloadRows.length}`);
+  console.log(`执行清单: ${runManifest}`);
 
   if (!go) {
     console.log('\n🔎 当前是 AUDIT 模式：到这里停止。');
-    console.log('Pi Agent 应先处理 HOLD_TRANSLATION / HOLD_PATCH / HOLD_MULTI_SOURCE / HOLD_AMBIGUOUS，再由用户或上层任务显式传 --go。');
+    console.log('Pi Agent 必须先消除 HOLD：核验 Nexus Files/Requirements/Translations，并把结论写入 config/aux-registry.tsv。');
+    console.log('只有 registry 对当前主版本同时给出 PATCH 与 TRANSLATION 的 NONE/REQUIRED 结论，主 MOD 才能进入下载队列。');
     return;
   }
 
-  console.log('\n[Step 3/4] 提交高置信文件到 MO2（精确 modId + fileId）...');
+  console.log('\n[Step 4/5] 提交精确 modId + fileId 到 MO2...');
   runNode([
     path.join(rootDir, 'scripts', 'nexus-autodl.js'), 'dl', runManifest,
     '--go', '--wait', '6', '--sort', 'small-first',
@@ -100,7 +122,7 @@ async function run() {
     '--reconnect',
   ]);
 
-  console.log('\n[Step 4/4] 验证归档与 .meta...');
+  console.log('\n[Step 5/5] 验证归档、.meta 与 7-Zip 完整性...');
   const verifyOut = runNode([
     path.join(rootDir, 'scripts', 'nexus-autodl.js'), 'verify', runManifest,
     '--downloads', downloadsDir,
