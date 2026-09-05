@@ -5,7 +5,7 @@ const fs = require('fs');
 const path = require('path');
 const { scanModsDirectory } = require('./lib/mo2-reader');
 const ModProfile = require('./lib/profile');
-const { categoryRole, isActive, groupLatestAuxFiles, selectUpdateTarget, tokenSimilarity } = require('./lib/file-selector');
+const { categoryRole, isActive, hardVariantConflicts, groupLatestAuxFiles, selectUpdateTarget, tokenSimilarity } = require('./lib/file-selector');
 const { detectVariantReview, branchKey } = require('./lib/variant-review');
 const { compareVersions } = require('./lib/semver');
 const { argValue, hasFlag } = require('./lib/cli');
@@ -155,15 +155,29 @@ async function main() {
         let choice = baseChoice;
         let action = choice.decision;
         let policyTarget = null;
+        let policyConflicts = [];
+        let policyIssueCode = null;
 
         if (rememberedPolicy) {
           policyTarget = newestInPolicyBranch(files, rememberedPolicy.branchKey);
           const stable = rememberedPolicy.branchKey && rememberedPolicy.branchKey !== 'GENERIC';
-          if (!stable || !policyTarget || ['CHANGED', 'AMBIGUOUS', 'UNUSABLE'].includes(policyResolution.status)) {
+          if (!stable) {
             action = 'HOLD_VARIANT_POLICY_CHANGED';
+            policyIssueCode = 'VARIANT_POLICY_UNSTABLE';
+          } else if (!policyTarget || ['CHANGED', 'AMBIGUOUS', 'UNUSABLE'].includes(policyResolution.status)) {
+            action = 'HOLD_VARIANT_POLICY_CHANGED';
+            policyIssueCode = policyResolution.code || 'VARIANT_POLICY_CHANGED';
           } else {
-            choice = choiceFromPolicy(mine, policyTarget, rememberedPolicy);
-            action = choice.decision;
+            const localText = `${r.name} ${r.instFile || ''} ${mine.name || ''} ${mine.file_name || ''}`;
+            const candidateText = `${policyTarget.name || ''} ${policyTarget.file_name || ''}`;
+            policyConflicts = hardVariantConflicts(localText, candidateText, profile);
+            if (policyConflicts.length) {
+              action = 'HOLD_VARIANT_POLICY_CHANGED';
+              policyIssueCode = 'VARIANT_POLICY_ENVIRONMENT_CONFLICT';
+            } else {
+              choice = choiceFromPolicy(mine, policyTarget, rememberedPolicy);
+              action = choice.decision;
+            }
           }
         } else {
           if (action === 'DOWNLOAD' && choice.confidence !== 'high') action = 'HOLD_REVIEW';
@@ -200,6 +214,8 @@ async function main() {
         if (choice.margin !== undefined && choice.margin !== null) noteParts.push(`margin=${choice.margin}`);
         if (variantReview.required) noteParts.push(`variantReview=${variantReview.reason}`);
         if (rememberedPolicy) noteParts.push(`variantPolicy=${rememberedPolicy.branchKey}:${policyResolution.status}`);
+        if (policyIssueCode) noteParts.push(`variantPolicyIssue=${policyIssueCode}`);
+        if (policyConflicts.length) noteParts.push(`variantPolicyConflicts=${policyConflicts.join(',')}`);
         if (missingTranslations.length) noteParts.push(`translationCandidates=${missingTranslations.map(f => f.file_id).join(',')}`);
         if (relevantPatches.length) noteParts.push(`patchCandidates=${relevantPatches.map(x => x.file.file_id).join(',')}`);
 
@@ -214,7 +230,7 @@ async function main() {
           latestName: target?.name || '',
           latestRole: target ? categoryRole(target) : '',
           action,
-          reason: action === 'HOLD_VARIANT_REVIEW' ? 'MULTI_VARIANT_REVIEW' : (action === 'HOLD_VARIANT_POLICY_CHANGED' ? (policyResolution.code || 'VARIANT_POLICY_CHANGED') : choice.decision),
+          reason: action === 'HOLD_VARIANT_REVIEW' ? 'MULTI_VARIANT_REVIEW' : (action === 'HOLD_VARIANT_POLICY_CHANGED' ? (policyIssueCode || policyResolution.code || 'VARIANT_POLICY_CHANGED') : choice.decision),
           confidence: choice.confidence,
           margin: choice.margin,
           sourceResolution: resolved.reason,
@@ -226,13 +242,16 @@ async function main() {
             lastConfirmedName: rememberedPolicy.lastConfirmedName || '',
             resolution: policyResolution.status,
             targetFileId: policyTarget ? String(policyTarget.file_id) : '',
+            conflicts: policyConflicts,
           } : null,
           manualReview: manualReviewRequired ? {
+            ...variantReview,
             type: 'MULTI_VARIANT',
             required: true,
-            ...variantReview,
             policy: rememberedPolicy || null,
             policyResolution: policyResolution.status,
+            policyIssueCode,
+            policyConflicts,
           } : (variantReview.required ? { type: 'MULTI_VARIANT', ...variantReview } : null),
           aux: {
             translations: missingTranslations.map(f => ({ fileId: f.file_id, name: f.name, version: f.version, category: f.category_name || '' })),
