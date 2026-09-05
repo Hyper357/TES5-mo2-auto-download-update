@@ -14,10 +14,11 @@ const review = {
       { fileId: '100', name: 'Vanilla', version: '1.0', current: true, selectable: true, branchKey: 'VANILLA', tags: ['VANILLA'] },
       { fileId: '300', name: 'KS Hairdos HDT', version: '1.02.1', current: false, selectable: true, branchKey: 'HDT_SMP+KS_HAIRDOS', tags: ['HDT_SMP', 'KS_HAIRDOS'] },
     ],
-    patchFamilies: [{
-      family: 'KS_HAIRDOS_HDT_HOTFIX',
-      candidates: [{ modId: '160675', fileId: '301', name: 'HDT Hotfix', version: '1.02.1', selectable: true }],
+    componentFamilies: [{
+      key: 'HOTFIX:KS_HAIRDOS_HDT_HOTFIX', kind: 'HOTFIX', family: 'KS_HAIRDOS_HDT_HOTFIX',
+      candidates: [{ kind: 'HOTFIX', modId: '160675', fileId: '301', name: 'HDT Hotfix', version: '1.02.1', selectable: true }],
     }],
+    patchFamilies: [],
   }],
 };
 
@@ -25,7 +26,7 @@ const review = {
   const x = validateAndBuild(review, {
     'mod:160675': {
       mainFileId: '300',
-      patches: { KS_HAIRDOS_HDT_HOTFIX: { decision: 'OBSOLETE' } },
+      components: { 'HOTFIX:KS_HAIRDOS_HDT_HOTFIX': { decision: 'OBSOLETE', kind: 'HOTFIX', family: 'KS_HAIRDOS_HDT_HOTFIX' } },
     },
   });
   assert.deepStrictEqual(x.errors, []);
@@ -38,12 +39,12 @@ const review = {
   const x = validateAndBuild(review, {
     'mod:160675': {
       mainFileId: '300', rememberMain: true,
-      patches: { KS_HAIRDOS_HDT_HOTFIX: { decision: 'DOWNLOAD', modId: '160675', fileId: '301' } },
+      components: { 'HOTFIX:KS_HAIRDOS_HDT_HOTFIX': { decision: 'DOWNLOAD', kind: 'HOTFIX', family: 'KS_HAIRDOS_HDT_HOTFIX', modId: '160675', fileId: '301' } },
     },
   });
   assert.deepStrictEqual(x.errors, []);
   assert.strictEqual(x.rows.length, 2);
-  assert.match(x.rows[1].note, /closure:PATCH/);
+  assert.match(x.rows[1].note, /closure:HOTFIX/);
   assert.strictEqual(x.accepted[0].rememberMain, true);
   assert.strictEqual(x.accepted[0].mainSelection.branchKey, 'HDT_SMP+KS_HAIRDOS');
 
@@ -60,13 +61,48 @@ const review = {
 }
 
 {
-  const x = validateAndBuild(review, { 'mod:160675': { mainFileId: '999999', patches: {} } });
+  const x = validateAndBuild(review, { 'mod:160675': { mainFileId: '999999', components: {} } });
   assert.ok(x.errors.some(e => e.code === 'REVIEW_SELECTION_INVALID'));
 }
 
 {
-  const x = validateAndBuild(review, { 'mod:160675': { mainFileId: '300', patches: {} } });
-  assert.ok(x.errors.some(e => e.code === 'REVIEW_PATCH_DECISION_REQUIRED'));
+  const x = validateAndBuild(review, { 'mod:160675': { mainFileId: '300', components: {} } });
+  assert.ok(x.errors.some(e => e.code === 'REVIEW_COMPONENT_DECISION_REQUIRED'));
+}
+
+// If Main was already high-confidence and only component closure held it, reviewed download must restore Main + selected components.
+{
+  const componentOnly = { items: [{
+    id: 'mod:42', modId: '42', localFileId: '400', targetMainFileId: '500', targetMainVersion: '2.0', targetMainName: 'Example Main 2.0', blockers: [],
+    mainOptions: [],
+    componentFamilies: [
+      { key: 'RESOURCE:CUSTOM:FRAMEWORK', kind: 'RESOURCE', family: 'CUSTOM:FRAMEWORK', candidates: [{ kind: 'RESOURCE', modId: '77', fileId: '701', version: '3.0', name: 'Required Framework', selectable: true }] },
+      { key: 'BODYSLIDE:CUSTOM:CBBE', kind: 'BODYSLIDE', family: 'CUSTOM:CBBE', candidates: [{ kind: 'BODYSLIDE', modId: '42', fileId: '702', version: '2.0', name: 'CBBE BodySlide', selectable: true }] },
+    ],
+  }] };
+  const x = validateAndBuild(componentOnly, { 'mod:42': { components: {
+    'RESOURCE:CUSTOM:FRAMEWORK': { decision: 'DOWNLOAD', kind: 'RESOURCE', family: 'CUSTOM:FRAMEWORK', modId: '77', fileId: '701' },
+    'BODYSLIDE:CUSTOM:CBBE': { decision: 'NOT_APPLICABLE', kind: 'BODYSLIDE', family: 'CUSTOM:CBBE' },
+  } } });
+  assert.deepStrictEqual(x.errors, []);
+  assert.strictEqual(x.rows.length, 2);
+  assert.strictEqual(x.rows[0].fileId, '500', 'held exact Main must be restored after component decisions');
+  assert.match(x.rows[0].note, /planner-main-released-after-component-review/);
+  assert.strictEqual(x.rows[1].fileId, '701');
+  assert.match(x.rows[1].note, /closure:RESOURCE/);
+  assert.strictEqual(x.accepted[0].automaticMain, true);
+}
+
+// Legacy patch-only review payload remains supported.
+{
+  const legacy = { items: [{
+    id:'mod:9',modId:'9',localFileId:'8',targetMainFileId:'10',targetMainVersion:'2',targetMainName:'Legacy Main',blockers:[],mainOptions:[],
+    patchFamilies:[{family:'USSEP',candidates:[{modId:'99',fileId:'100',name:'Patch',version:'1',selectable:true}]}],
+  }]};
+  const x=validateAndBuild(legacy,{'mod:9':{patches:{USSEP:{decision:'DOWNLOAD',modId:'99',fileId:'100'}}}});
+  assert.deepStrictEqual(x.errors,[]);
+  assert.strictEqual(x.rows.length,2);
+  assert.match(x.rows[1].note,/closure:PATCH/);
 }
 
 console.log('review download tests: OK');
