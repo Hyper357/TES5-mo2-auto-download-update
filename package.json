@@ -1,6 +1,6 @@
 {
   "name": "tes5-mo2-auto-download-update",
-  "version": "4.1.1-beta.1",
+  "version": "4.1.3-beta.1",
   "private": true,
   "description": "Evidence-bound Nexus/MO2 update automation with exact update eligibility, one-click full update orchestration, active-profile Environment Graph, variant memory, generalized component closure, deferred human review, diagnostics, and verified downloads.",
   "type": "commonjs",
