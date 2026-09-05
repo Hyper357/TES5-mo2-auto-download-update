@@ -23,8 +23,9 @@ function sourceHintsFor(code) {
   if (/^(MO2_DIALOG|MO2_UI)/.test(c)) return ['scripts/lib/mo2-ui-guard.js', 'scripts/mo2-ui.js', 'scripts/mo2-ui-state.ps1'];
   if (/^(MO2_QUEUE|MO2_DOWNLOAD|CONCURRENT_|LEDGER_)/.test(c)) return ['scripts/lib/download-guard.js', 'scripts/execute-plan.js'];
   if (/^VARIANT_POLICY/.test(c)) return ['scripts/lib/variant-policy.js', 'scripts/lib/variant-review.js', 'npm run variant:status'];
+  if (/COMPONENT|RESOURCE|BODYSLIDE|PHYSICS|HOTFIX/.test(c)) return ['scripts/discover-patches.js', 'scripts/lib/component-discovery.js', 'scripts/closure-gate.js'];
   if (/^(CLOSURE_|REGISTRY_|VARIANT_|AMBIGUOUS_MAIN)/.test(c)) return ['scripts/closure-gate.js', 'scripts/lib/file-selector.js', 'scripts/lib/variant-review.js'];
-  if (/PATCH/.test(c)) return ['scripts/discover-patches.js', 'scripts/lib/patch-discovery.js'];
+  if (/PATCH/.test(c)) return ['scripts/discover-patches.js', 'scripts/lib/component-discovery.js', 'scripts/lib/patch-discovery.js'];
   return [];
 }
 
@@ -56,29 +57,22 @@ function ledgerSummary() {
     const status = item.status || 'UNKNOWN';
     counts[status] = (counts[status] || 0) + 1;
   }
-  return {
-    counts,
-    executorLocked: fs.existsSync(path.join(stateDir, 'download-executor.lock')),
-  };
+  return { counts, executorLocked: fs.existsSync(path.join(stateDir, 'download-executor.lock')) };
 }
 
 function variantMemorySummary() {
   const file = defaultPolicyFile(rootDir);
   const doc = loadVariantPolicies(file);
-  return {
-    file,
-    count: Object.keys(doc.policies || {}).length,
-    updatedAt: doc.updatedAt || null,
-  };
+  return { file, count: Object.keys(doc.policies || {}).length, updatedAt: doc.updatedAt || null };
 }
 
-function pipelineState({ report, review, errors, patchTasks, latestJob }) {
+function pipelineState({ report, review, errors, componentTasks, latestJob }) {
   if (!report) return 'IN_PROGRESS_OR_ABORTED';
   if ((report.failed || 0) > 0 || errors.length) return 'ATTENTION';
   if (latestJob?.status === 'RUNNING') return 'REVIEW_DOWNLOAD_RUNNING';
   if (latestJob?.status === 'FAILED' || latestJob?.status === 'BLOCKED') return 'ATTENTION';
   if ((review.items || []).length > 0) return 'REVIEW_REQUIRED';
-  if (patchTasks > 0) return 'PATCH_REVIEW_REQUIRED';
+  if (componentTasks > 0) return 'COMPONENT_REVIEW_REQUIRED';
   if (report.mode === 'AUDIT' && (report.downloadReady || 0) > 0) return 'READY_FOR_GO';
   return 'COMPLETE';
 }
@@ -87,8 +81,8 @@ function nextActions(state, summary) {
   const actions = [];
   if (summary.browser.state !== 'MANAGED') actions.push('npm run browser:start');
   if (state === 'ATTENTION') actions.push('Use errors[].sourceHints; do not read large source files wholesale.');
-  if (summary.patchTasks > 0) actions.push('Process patch-discovery-tasks.tsv before changing any HOLD.');
-  if ((summary.review.total || 0) > 0) actions.push('Open Review Center with npm run review; do not guess complex variants.');
+  if (summary.componentTasks > 0) actions.push('Process component discovery tasks before changing any HOLD; do not assume every candidate is REQUIRED.');
+  if ((summary.review.total || 0) > 0) actions.push('Open Review Center with npm run review; do not guess complex variants/components.');
   if (state === 'READY_FOR_GO') actions.push('Await explicit user authorization before --go.');
   if (!actions.length) actions.push('No action required.');
   return actions;
@@ -98,11 +92,12 @@ async function buildStatus(runDir) {
   const report = loadJson(path.join(runDir, 'final-report.json'), null);
   const review = loadJson(path.join(runDir, 'review-center.json'), { counts: {}, items: [] });
   const errors = readRecentErrors(runDir, 5);
-  const patchTasks = countTsvRows(path.join(runDir, 'patch-discovery-tasks.tsv'));
+  const taskFile = path.join(runDir, 'patch-discovery-tasks.tsv'); // historical filename; contents are generalized component tasks in v3.9 phase 2.
+  const componentTasks = countTsvRows(taskFile);
   const browser = await managedSessionStatus({ timeout: 800 }).catch(err => ({ state: 'ERROR', errorCode: err.code || 'BROWSER_STATUS_FAILED' }));
   const job = latestReviewJob(runDir);
   const summary = {
-    version: 2,
+    version: 3,
     generatedAt: new Date().toISOString(),
     runDir,
     browser: { state: browser.state || 'UNKNOWN', managed: browser.state === 'MANAGED' },
@@ -116,21 +111,24 @@ async function buildStatus(runDir) {
     review: {
       total: (review.items || []).length,
       variant: Number(review.counts?.variant || 0),
+      component: Number(review.counts?.component ?? review.counts?.patch ?? 0),
       patch: Number(review.counts?.patch || 0),
       other: Number(review.counts?.other || 0),
       latestJob: job ? { status: job.status || 'UNKNOWN', jobDir: job.jobDir || null } : null,
     },
     variantMemory: variantMemorySummary(),
-    patchTasks,
+    componentTasks,
+    patchTasks: componentTasks,
     errors,
     queue: ledgerSummary(),
     artifacts: {
       reviewCenter: fs.existsSync(path.join(runDir, 'review-center.html')) ? path.join(runDir, 'review-center.html') : null,
       failedItems: fs.existsSync(path.join(runDir, 'diagnostics', 'failed-items.json')) ? path.join(runDir, 'diagnostics', 'failed-items.json') : null,
-      patchTasks: patchTasks ? path.join(runDir, 'patch-discovery-tasks.tsv') : null,
+      componentTasks: componentTasks ? taskFile : null,
+      patchTasks: componentTasks ? taskFile : null,
     },
   };
-  summary.state = pipelineState({ report, review, errors, patchTasks, latestJob: job });
+  summary.state = pipelineState({ report, review, errors, componentTasks, latestJob: job });
   summary.nextActions = nextActions(summary.state, summary);
   return summary;
 }
@@ -139,7 +137,7 @@ async function main() {
   const requested = argValue(process.argv, '--run', '');
   const runDir = requested ? path.resolve(requested) : findLatestRun(rootDir);
   if (!runDir || !fs.existsSync(runDir)) {
-    const empty = { version: 2, generatedAt: new Date().toISOString(), state: 'NO_RUN', variantMemory: variantMemorySummary(), nextActions: ['Run an AUDIT first.'] };
+    const empty = { version: 3, generatedAt: new Date().toISOString(), state: 'NO_RUN', variantMemory: variantMemorySummary(), nextActions: ['Run an AUDIT first.'] };
     console.log(JSON.stringify(empty, null, hasFlag(process.argv, '--compact') ? 0 : 2));
     return;
   }
