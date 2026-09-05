@@ -1,68 +1,27 @@
 #!/usr/bin/env node
-// scripts/check-outdated.js
-// 高精度更新检测：以本地 fileId 为锚点，结合文件角色、变体、版本、名称族与上传时间做确定性选择。
-// v3.7: 多个互斥 Main 分支不再由 AI 强猜，统一进入 HUMAN REVIEW CENTER。
+// High-precision update scan. v3.8 keeps v3.7 behavior while sharing API/cache infrastructure.
 
 const fs = require('fs');
 const path = require('path');
-const https = require('https');
 const { scanModsDirectory } = require('./lib/mo2-reader');
 const ModProfile = require('./lib/profile');
-const {
-  categoryRole,
-  groupLatestAuxFiles,
-  selectUpdateTarget,
-  tokenSimilarity,
-} = require('./lib/file-selector');
+const { categoryRole, groupLatestAuxFiles, selectUpdateTarget, tokenSimilarity } = require('./lib/file-selector');
 const { detectVariantReview } = require('./lib/variant-review');
-
-const agent = new https.Agent({ keepAlive: true, maxSockets: 20 });
-const CACHE_DIR = path.join(__dirname, '.api_cache');
-if (!fs.existsSync(CACHE_DIR)) fs.mkdirSync(CACHE_DIR, { recursive: true });
+const { argValue, hasFlag } = require('./lib/cli');
+const { saveJson } = require('./lib/fs-json');
+const { readApiKey, createFilesClient } = require('./lib/nexus-api');
 
 const modsDir = process.argv[2];
 const keyArg = process.argv[3];
-const asJson = process.argv.includes('--json');
-const forceRefresh = process.argv.includes('--force-refresh') || process.argv.includes('--no-cache');
-const outFlag = process.argv.indexOf('--out');
-const outFile = outFlag > 0 ? process.argv[outFlag + 1] : null;
-const reportFlag = process.argv.indexOf('--report');
-const reportFile = reportFlag > 0 ? process.argv[reportFlag + 1] : null;
-
-function apiGet(modId, key) {
-  const cacheFile = path.join(CACHE_DIR, `${modId}.json`);
-  if (fs.existsSync(cacheFile)) {
-    try {
-      const stats = fs.statSync(cacheFile);
-      if (!forceRefresh && (Date.now() - stats.mtimeMs < 6 * 3600 * 1000)) {
-        return Promise.resolve(JSON.parse(fs.readFileSync(cacheFile, 'utf8')));
-      }
-    } catch (_) {}
-  }
-
-  return new Promise((resolve, reject) => {
-    const req = https.get({
-      hostname: 'api.nexusmods.com',
-      path: `/v1/games/skyrimspecialedition/mods/${modId}/files.json`,
-      headers: { apikey: key, Accept: 'application/json', 'User-Agent': 'TES5-mo2-auto-download-update/3.7' },
-      timeout: 15000,
-      agent,
-    }, res => {
-      let body = '';
-      res.on('data', chunk => body += chunk);
-      res.on('end', () => {
-        if (res.statusCode >= 200 && res.statusCode < 300) {
-          try {
-            fs.writeFileSync(cacheFile, body, 'utf8');
-            resolve(JSON.parse(body));
-          } catch (e) { reject(e); }
-        } else reject(new Error(`HTTP ${res.statusCode}`));
-      });
-    });
-    req.on('error', reject);
-    req.on('timeout', () => { req.destroy(); reject(new Error('TIMEOUT')); });
-  });
-}
+const asJson = hasFlag(process.argv, '--json');
+const forceRefresh = hasFlag(process.argv, '--force-refresh') || hasFlag(process.argv, '--no-cache');
+const outFile = argValue(process.argv, '--out', null);
+const reportFile = argValue(process.argv, '--report', null);
+const api = createFilesClient({
+  cacheDir: path.join(__dirname, '.api_cache'),
+  forceRefresh,
+  maxSockets: 20,
+});
 
 function resolveInstalledFile(files, row) {
   const byArchive = row.instFile ? files.find(f => f.file_name === row.instFile) : null;
@@ -71,7 +30,6 @@ function resolveInstalledFile(files, row) {
   const matches = (row.installedFiles || [])
     .map(fid => files.find(f => String(f.file_id) === String(fid)))
     .filter(Boolean);
-
   if (matches.length === 1) return { mine: matches[0], reason: 'single-fileId' };
   if (matches.length > 1) return { mine: null, reason: 'MULTI_SOURCE', candidates: matches };
 
@@ -85,7 +43,6 @@ function resolveInstalledFile(files, row) {
 function likelyRelevantPatch(patch, allLocalNames) {
   const text = `${patch.name || ''} ${patch.file_name || ''}`;
   if (/\b(hotfix|critical fix|bug ?fix|修复)\b/i.test(text)) return { relevant: true, why: 'hotfix/fix' };
-
   let best = { score: 0, name: '' };
   for (const local of allLocalNames) {
     const score = tokenSimilarity(text, local);
@@ -101,9 +58,7 @@ async function main() {
     console.error('用法: node check-outdated.js <modsDir> [apiKeyFile] [--json] [--out manifest.tsv] [--report plan.json]');
     process.exit(1);
   }
-
-  let apiKey = process.env.NEXUS_API_KEY;
-  if (keyArg && fs.existsSync(keyArg)) apiKey = fs.readFileSync(keyArg, 'utf8').trim();
+  const apiKey = readApiKey(keyArg);
   if (!apiKey) {
     console.error('错误: 未找到 Nexus API key (请提供文件或设置 NEXUS_API_KEY 环境变量)');
     process.exit(1);
@@ -135,9 +90,8 @@ async function main() {
       const i = cursor++;
       const r = rows[i];
       if (i > 0 && i % 250 === 0) console.error(`progress ${i}/${rows.length}`);
-
       try {
-        const data = await apiGet(r.modId, apiKey);
+        const data = await api.getFiles(r.modId, apiKey);
         const files = Array.isArray(data.files) ? data.files : [];
         if (!files.length) {
           results.push({ ...r, action: 'HOLD_NO_FILES', reason: 'NO_FILES', confidence: 'low' });
@@ -163,9 +117,7 @@ async function main() {
 
         const variantReview = detectVariantReview({ files, mine, localNames: allLocalNames });
         const decisionNeedsMainChoice = !['SKIP_CURRENT', 'SKIP_DOWNGRADE'].includes(choice.decision);
-        if (variantReview.required && (decisionNeedsMainChoice || variantReview.recommendedDifferentFromCurrent)) {
-          action = 'HOLD_VARIANT_REVIEW';
-        }
+        if (variantReview.required && (decisionNeedsMainChoice || variantReview.recommendedDifferentFromCurrent)) action = 'HOLD_VARIANT_REVIEW';
 
         const aux = groupLatestAuxFiles(files);
         const missingTranslations = aux.filter(f => categoryRole(f) === 'TRANSLATION' && !r.installedFiles.includes(String(f.file_id)));
@@ -250,9 +202,12 @@ async function main() {
       confidence: profile.confidence,
       evidence: profile.evidence,
     },
-    total: rows.length, apiFail, counts, items: results,
+    total: rows.length,
+    apiFail,
+    counts,
+    items: results,
   };
-  if (reportFile) fs.writeFileSync(reportFile, JSON.stringify(payload, null, 2), 'utf8');
+  if (reportFile) saveJson(reportFile, payload, { atomic: false });
   if (asJson) console.log(JSON.stringify(payload, null, 2));
 }
 
