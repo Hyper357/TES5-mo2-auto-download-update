@@ -18,6 +18,12 @@ assert.strictEqual(classifyComponent('Chinese Translation'), 'TRANSLATION');
 assert.strictEqual(classifyComponent('Plain unrelated sentence'), '');
 assert.strictEqual(classifyComponent('Some Framework', { source: 'REQUIREMENTS_FORWARD' }), 'RESOURCE');
 
+const optional = mergeComponentCandidates([
+  { source: 'SAME_PAGE_FILE', fileId: '40', name: 'Optional 2K texture pack', mainName: 'Example Main' },
+]);
+assert.strictEqual(optional[0].kind, 'TEXTURE');
+assert.strictEqual(optional[0].optionalHint, true, 'explicit Optional wording should be visible as a hint but not auto-resolved');
+
 const raw = [
   { source: 'REQUIREMENTS_FORWARD', kind: 'RESOURCE', auxModId: '10', name: 'Required Framework', evidence: 'Nexus requirements', mainName: 'Example Main', requiredHint: true },
   { source: 'SAME_PAGE_FILE', fileId: '20', version: '1.0', name: 'HDT-SMP Physics Files', mainName: 'Example Main' },
@@ -25,7 +31,10 @@ const raw = [
 ];
 const merged = mergeComponentCandidates(raw);
 assert.strictEqual(merged.length, 3);
-assert.deepStrictEqual(countsByKind(merged), { RESOURCE: 1, PHYSICS: 1, HOTFIX: 1 });
+const counts = countsByKind(merged);
+assert.strictEqual(counts.RESOURCE, 1);
+assert.strictEqual(counts.PHYSICS, 1);
+assert.strictEqual(counts.HOTFIX, 1);
 assert.ok(merged.find(x => x.kind === 'RESOURCE').requiredHint);
 assert.match(componentFamily('PHYSICS', 'HDT-SMP Physics Files', 'Example Main'), /CUSTOM|GENERAL/);
 
