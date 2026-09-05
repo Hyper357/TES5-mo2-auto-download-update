@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 // scripts/check-outdated.js
 // 高精度更新检测：以本地 fileId 为锚点，结合文件角色、变体、版本、名称族与上传时间做确定性选择。
-// 规则：无法证明目标文件正确时一律 HOLD，不让 Agent 猜。
+// 职责边界：这里只决定“主文件候选是否可信”并收集 Patch/汉化证据；是否闭合由 closure-gate 独占决定。
 
 const fs = require('fs');
 const path = require('path');
@@ -43,7 +43,7 @@ function apiGet(modId, key) {
     const req = https.get({
       hostname: 'api.nexusmods.com',
       path: `/v1/games/skyrimspecialedition/mods/${modId}/files.json`,
-      headers: { apikey: key, Accept: 'application/json', 'User-Agent': 'TES5-mo2-auto-download-update/3' },
+      headers: { apikey: key, Accept: 'application/json', 'User-Agent': 'TES5-mo2-auto-download-update/3.1' },
       timeout: 15000,
       agent,
     }, res => {
@@ -73,8 +73,6 @@ function resolveInstalledFile(files, row) {
 
   if (matches.length === 1) return { mine: matches[0], reason: 'single-fileId' };
   if (matches.length > 1) {
-    // 同一个 MO2 条目如果记录了多个 Nexus fileId，无法安全知道哪一个代表“主来源”。
-    // 这类条目必须人工/Agent 核验，禁止取数组第一项。
     return { mine: null, reason: 'MULTI_SOURCE', candidates: matches };
   }
 
@@ -115,7 +113,7 @@ async function main() {
   const rawMods = scanModsDirectory(modsDir);
   console.error(`rows=${rawMods.length}`);
   const profile = ModProfile.analyzeFromMods(rawMods);
-  console.error(`[Profile] 平台=${profile.platform}, 身形=${profile.bodyType}, 纹理=${profile.textureTier}`);
+  console.error(`[Profile] 平台=${profile.platform}(${profile.confidence.platform}), 身形=${profile.bodyType}(${profile.confidence.bodyType}), 纹理=${profile.textureTier}(${profile.confidence.textureTier})`);
 
   const allLocalNames = rawMods.map(m => `${m.folderName} ${m.installationFile || ''}`);
   const rows = rawMods.map(m => ({
@@ -178,11 +176,8 @@ async function main() {
           .map(f => ({ file: f, match: likelyRelevantPatch(f, allLocalNames) }))
           .filter(x => x.match.relevant);
 
-        // 发现“同页明确存在”的汉化或高相关补丁时，主文件不能悄悄自动下载后就宣告完成。
-        // 先 HOLD，让 Agent 把附属项加入清单，形成原子事务。
-        if (action === 'DOWNLOAD' && missingTranslations.length) action = 'HOLD_TRANSLATION';
-        if (action === 'DOWNLOAD' && relevantPatches.length) action = 'HOLD_PATCH';
-
+        // 注意：发现附属候选不再修改主文件 action。
+        // 它们只是证据，由 closure-gate 与 aux-registry 做唯一的最终闭合决策。
         const target = choice.target || mine;
         const topCandidates = (choice.ranked || []).slice(0, 5).map(x => ({
           fileId: x.file.file_id,
@@ -217,10 +212,11 @@ async function main() {
           reason: choice.decision,
           confidence: choice.confidence,
           margin: choice.margin,
+          sourceResolution: resolved.reason,
           note: noteParts.join('; '),
           aux: {
-            translations: missingTranslations.map(f => ({ fileId: f.file_id, name: f.name, version: f.version })),
-            patches: relevantPatches.map(x => ({ fileId: x.file.file_id, name: x.file.name, version: x.file.version, why: x.match.why })),
+            translations: missingTranslations.map(f => ({ fileId: f.file_id, name: f.name, version: f.version, category: f.category_name || '' })),
+            patches: relevantPatches.map(x => ({ fileId: x.file.file_id, name: x.file.name, version: x.file.version, category: x.file.category_name || '', why: x.match.why })),
           },
           candidates: topCandidates,
         });
@@ -239,7 +235,6 @@ async function main() {
   console.error(`done rows=${rows.length} apiFail=${apiFail} ${Object.entries(counts).map(([k, v]) => `${k}=${v}`).join(' ')}`);
 
   if (outFile) {
-    // nexus-autodl 只会真实执行 action === DOWNLOAD；所有 HOLD/SKIP 都会被安全跳过。
     const lines = results.map(o => [
       o.modId,
       o.latestName || o.name,
@@ -253,7 +248,13 @@ async function main() {
 
   const payload = {
     generatedAt: new Date().toISOString(),
-    profile: { platform: profile.platform, bodyType: profile.bodyType, textureTier: profile.textureTier },
+    profile: {
+      platform: profile.platform,
+      bodyType: profile.bodyType,
+      textureTier: profile.textureTier,
+      confidence: profile.confidence,
+      evidence: profile.evidence,
+    },
     total: rows.length,
     apiFail,
     counts,
