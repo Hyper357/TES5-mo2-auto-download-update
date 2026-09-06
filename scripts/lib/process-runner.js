@@ -7,15 +7,27 @@ const { sanitizeString } = require('./diagnostics');
 
 const CDP_PRELOAD = path.join(__dirname, 'cdp-compat-preload.js');
 
-function nodeOptionsWithProjectPreload(existing = '') {
+// Node parses NODE_OPTIONS itself rather than delegating argument parsing to
+// child_process. On Windows, a quoted value containing backslashes can be
+// interpreted as escape sequences (for example E:\\SkyrimAE\\... becoming
+// E:SkyrimAE...), which makes --require fail before the child entrypoint runs.
+// Node accepts forward slashes in absolute Windows paths, so normalize only the
+// preload token used inside NODE_OPTIONS. The filesystem path itself stays intact.
+function normalizeNodeRequirePath(value) {
+  return String(value || '').replace(/\\/g, '/');
+}
+
+function nodeOptionsWithProjectPreload(existing = '', preloadPath = CDP_PRELOAD) {
   const current = String(existing || '').trim();
-  if (current.toLowerCase().includes(CDP_PRELOAD.toLowerCase())) return current;
-  const quoted = `"${CDP_PRELOAD.replace(/"/g, '\\"')}"`;
+  const safePreload = normalizeNodeRequirePath(preloadPath);
+  const currentLower = current.toLowerCase();
+  if (currentLower.includes(safePreload.toLowerCase()) || currentLower.includes(String(preloadPath || '').toLowerCase())) return current;
+  const quoted = `"${safePreload.replace(/"/g, '\\"')}"`;
   return `${current}${current ? ' ' : ''}--require ${quoted}`;
 }
 
-function projectNodeEnv(base = process.env) {
-  return { ...base, NODE_OPTIONS: nodeOptionsWithProjectPreload(base?.NODE_OPTIONS || '') };
+function projectNodeEnv(base = process.env, preloadPath = CDP_PRELOAD) {
+  return { ...base, NODE_OPTIONS: nodeOptionsWithProjectPreload(base?.NODE_OPTIONS || '', preloadPath) };
 }
 
 // Also update the current process environment so raw child_process calls made by
@@ -79,6 +91,7 @@ function openDefault(target) {
 
 module.exports = {
   CDP_PRELOAD,
+  normalizeNodeRequirePath,
   nodeOptionsWithProjectPreload,
   projectNodeEnv,
   runNode,
