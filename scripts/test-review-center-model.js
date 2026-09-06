@@ -14,7 +14,7 @@ const environment = {
   summary: { enabledMods: 1500, disabledMods: 400 },
   uiWarningTrustedForUpdateDecision: false,
 };
-const plan = { environment, items: [{
+const plan = { environment, updateEligibilityCounts: { UPDATE_CONFIRMED: 12, HOLD_UPDATE_ELIGIBILITY: 4 }, items: [{
   modId: '160675', name: 'Sassy SnW', profileState:'ENABLED', localFileId: '100', latestFileId:'300', latestVersion:'2', latestName:'KS Hairdos HDT', action: 'HOLD_VARIANT_REVIEW',
   manualReview: {
     required: true, recommendedFileId: '300',
@@ -25,23 +25,30 @@ const plan = { environment, items: [{
   },
 }] };
 const discovery = { environment, items: [{
-  modId: '160675', mainFileId: '300', mainVersion:'2', mainName: 'Sassy SnW', complete: false, coverageProblems: [],
+  modId: '160675', mainFileId: '300', mainVersion:'2', mainName: 'Sassy SnW', complete: false, coverageProblems: [], advisoryCoverage:[{source:'requirementsReverse',status:'SECTION_NOT_PROVEN'}],
+  candidates:[{kind:'PATCH',source:'REQUIREMENTS_REVERSE',relevance:{blocking:false,disposition:'NON_BLOCKING_REVERSE_UNINSTALLED'}}],
   unresolved: [
-    { kind:'HOTFIX', key: 'same:400', family: 'HDT_HOTFIX', source: 'SAME_PAGE_FILE', fileId: '400', version: '2.0.1', name: 'HDT Hotfix' },
+    { kind:'HOTFIX', key: 'same:400', family: 'HDT_HOTFIX', source: 'SAME_PAGE_FILE', fileId: '400', version: '2.0.1', name: 'HDT Hotfix', relevance:{blocking:true,disposition:'BLOCKING_DISCOVERED'} },
     { kind:'RESOURCE', key:'mod:500', family:'CUSTOM:FRAMEWORK', source:'REQUIREMENTS_FORWARD', auxModId:'500', fileId:'501', version:'3', name:'Required Framework', requiredHint:true,
+      relevance:{blocking:true,disposition:'BLOCKING_REQUIRED'},
       environmentDecision:{resolved:false,status:'UNRESOLVED',confidence:'high',reason:'REQUIRED_DEPENDENCY_DISABLED',evidence:['Required Framework']} },
   ],
 }] };
 const closure = { items: [] };
 
 const autoSummary = summarizeAutoReport({ mode: 'DOWNLOAD', requested: 42, verified: 40, failed: 2, humanReview: 7 });
-const payload = buildReviewPayload(plan, discovery, closure, { plan: 'plan.json', autoSummary, environment });
+const payload = buildReviewPayload(plan, discovery, closure, { plan: '.runtime/runs/test-run/plan.json', autoSummary, environment });
 assert.strictEqual(payload.items.length, 1);
+assert.strictEqual(payload.counts.actionable, 1);
+assert.strictEqual(payload.counts.eligibility, 0);
 assert.strictEqual(payload.counts.variant, 1);
 assert.strictEqual(payload.counts.component, 1);
 assert.strictEqual(payload.counts.patch, 1);
+assert.strictEqual(payload.updateSummary.UPDATE_CONFIRMED, 12);
+assert.strictEqual(payload.nonBlockingEvidence, 1);
 assert.strictEqual(payload.environment.profileName, 'Default');
 assert.strictEqual(payload.environment.uiWarningTrustedForUpdateDecision, false);
+assert.strictEqual(payload.items[0].reviewClass, 'actionable');
 assert.strictEqual(payload.items[0].profileState, 'ENABLED');
 assert.strictEqual(payload.items[0].targetMainFileId, '300');
 assert.strictEqual(payload.items[0].mainOptions.find(x => x.fileId === '300').recommended, true);
@@ -50,6 +57,7 @@ assert.ok(payload.items[0].componentFamilies.some(x => x.kind === 'RESOURCE'));
 assert.ok(payload.items[0].componentFamilies.some(x => x.kind === 'HOTFIX'));
 assert.strictEqual(payload.items[0].patchFamilies[0].kind, 'HOTFIX');
 assert.strictEqual(payload.items[0].componentFamilies.find(x => x.kind==='HOTFIX').candidates[0].modId, '160675');
+assert.strictEqual(payload.items[0].componentFamilies.find(x => x.kind==='HOTFIX').candidates[0].relevance.disposition, 'BLOCKING_DISCOVERED');
 const resourceCandidate = payload.items[0].componentFamilies.find(x => x.kind==='RESOURCE').candidates[0];
 assert.strictEqual(resourceCandidate.modId, '500');
 assert.strictEqual(resourceCandidate.environmentDecision.reason, 'REQUIRED_DEPENDENCY_DISABLED');
@@ -63,8 +71,9 @@ assert.match(html, /Required Framework/);
 assert.match(html, /REQUIRED_DEPENDENCY_DISABLED/);
 assert.match(html, /Default/);
 assert.match(html, /HDT Hotfix/);
-assert.match(html, /下载所有已确认项/);
-assert.match(html, /Review Center|人工决策中心/);
+assert.match(html, /下载已确认项/);
+assert.match(html, /更新决策中心/);
+assert.match(html, /需要我决定/);
 assert.match(html, /data-auto-summary="embedded"/);
 assert.ok(!html.includes('/*__STYLE__*/'));
 assert.ok(!html.includes('/*__APP__*/'));
