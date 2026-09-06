@@ -9,6 +9,8 @@ const {
   buildDirectDownloadArgs,
   fastVerifyPublished,
   localExecutionGuard,
+  clampConcurrency,
+  isTransactionMain,
   txOf,
   priority,
 } = require('./execute-plan');
@@ -28,9 +30,13 @@ assert.ok(args.includes('--sevenzip'));
 assert.ok(!args.includes('dl'));
 assert.ok(!args.includes('--go'));
 assert.strictEqual(txOf({ modId: '1', fileId: '2', note: '' }), '1:2');
+assert.strictEqual(isTransactionMain({ modId: '1', fileId: '2' }, '1:2'), true);
 assert.strictEqual(priority({ modId: '1', fileId: '2', note: '' }, '1:2'), 0);
 assert.strictEqual(priority({ modId: '3', fileId: '4', note: 'closure:PATCH' }, '1:2'), 1);
 assert.strictEqual(priority({ modId: '5', fileId: '6', note: 'closure:TRANSLATION' }, '1:2'), 2);
+assert.strictEqual(clampConcurrency(0), 1);
+assert.strictEqual(clampConcurrency(2), 2);
+assert.strictEqual(clampConcurrency(99), 3);
 
 // Executor defense-in-depth: exact target already installed => never download again.
 {
@@ -48,11 +54,41 @@ assert.strictEqual(priority({ modId: '5', fileId: '6', note: 'closure:TRANSLATIO
   assert.strictEqual(d.reason, 'LOCAL_VERSION_MATCHES_TARGET_FILE_ID_CONFLICT');
 }
 
+// Main row disappearing between scan and execution is unsafe and must HOLD.
+{
+  const d = localExecutionGuard(
+    { modId: '999', fileId: '1000', ver: '2.0' },
+    new Map(),
+    { requireExistingLocal: true }
+  );
+  assert.strictEqual(d.decision, 'HOLD');
+  assert.strictEqual(d.reason, 'LOCAL_MOD_NOT_FOUND_AT_EXECUTION');
+}
+
+// A newly-required auxiliary component may legitimately be absent locally; Closure owns that decision.
+{
+  const d = localExecutionGuard(
+    { modId: '999', fileId: '1000', ver: '2.0' },
+    new Map(),
+    { requireExistingLocal: false }
+  );
+  assert.strictEqual(d.decision, 'ALLOW');
+  assert.strictEqual(d.reason, 'AUX_NOT_INSTALLED_REQUIRED_BY_CLOSURE');
+}
+
 // Real newer target remains allowed.
 {
   const idx = new Map([['16495', [{ version: '4.3.2', installedFiles: [700000] }]]]);
   const d = localExecutionGuard({ modId: '16495', fileId: '900000', ver: '4.4.0' }, idx);
   assert.strictEqual(d.decision, 'ALLOW');
+}
+
+// Unreliable target version is not safe for automatic replacement of an installed main.
+{
+  const idx = new Map([['1', [{ version: '1.0', installedFiles: [10] }]]]);
+  const d = localExecutionGuard({ modId: '1', fileId: '11', ver: '' }, idx);
+  assert.strictEqual(d.decision, 'HOLD');
+  assert.strictEqual(d.reason, 'TARGET_VERSION_UNRELIABLE_AT_EXECUTION');
 }
 
 // Fast final verification trusts the already completed pre-publish 7-Zip test only when

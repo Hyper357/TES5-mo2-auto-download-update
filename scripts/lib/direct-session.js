@@ -2,7 +2,6 @@
 
 const cp = require('child_process');
 const fs = require('fs');
-const os = require('os');
 const path = require('path');
 const { getCdpUrl } = require('./browser-session');
 const { readApiKey, createFilesClient } = require('./nexus-api');
@@ -18,10 +17,26 @@ const {
 const ROOT = path.resolve(__dirname, '..', '..');
 const GAME_DOMAIN = 'skyrimspecialedition';
 const MO2_GAME_NAME = 'SkyrimSE';
+const targetLocks = new Map();
 
 function sleep(ms) { return new Promise(resolve => setTimeout(resolve, ms)); }
 function nowMs() { return Number(process.hrtime.bigint() / 1000000n); }
 function elapsed(start) { return Math.max(0, nowMs() - start); }
+
+async function withTargetLock(key, fn) {
+  const previous = targetLocks.get(key) || Promise.resolve();
+  let release;
+  const gate = new Promise(resolve => { release = resolve; });
+  const chain = previous.then(() => gate);
+  targetLocks.set(key, chain);
+  await previous;
+  try {
+    return await fn();
+  } finally {
+    release();
+    if (targetLocks.get(key) === chain) targetLocks.delete(key);
+  }
+}
 
 function expectedBytes(exact) {
   const n = Number(exact?.size_in_bytes || 0);
@@ -37,15 +52,37 @@ function fileNameForExact(exact, row) {
 function testArchive(archivePath, sevenzip) {
   const exe = sevenzip || (process.platform === 'win32' ? 'C:\\Program Files\\7-Zip\\7z.exe' : '7z');
   const t0 = nowMs();
-  const r = cp.spawnSync(exe, ['t', '-y', archivePath], { encoding: 'utf8', windowsHide: true });
-  if (r.error && r.error.code === 'ENOENT') {
-    const e = new Error(`SEVENZIP_NOT_FOUND: ${exe}`); e.code = 'SEVENZIP_NOT_FOUND'; throw e;
-  }
-  if (r.status !== 0) {
-    const e = new Error(`ARCHIVE_TEST_FAILED: ${String(r.stderr || r.stdout || '').slice(-800)}`);
-    e.code = 'ARCHIVE_TEST_FAILED'; throw e;
-  }
-  return elapsed(t0);
+  return new Promise((resolve, reject) => {
+    let stdout = '';
+    let stderr = '';
+    let child;
+    try {
+      child = cp.spawn(exe, ['t', '-y', archivePath], {
+        windowsHide: true,
+        stdio: ['ignore', 'pipe', 'pipe'],
+      });
+    } catch (err) {
+      if (err.code === 'ENOENT') {
+        const e = new Error(`SEVENZIP_NOT_FOUND: ${exe}`); e.code = 'SEVENZIP_NOT_FOUND'; reject(e); return;
+      }
+      reject(err); return;
+    }
+    child.stdout?.on('data', chunk => { stdout = `${stdout}${chunk}`.slice(-12000); });
+    child.stderr?.on('data', chunk => { stderr = `${stderr}${chunk}`.slice(-12000); });
+    child.on('error', err => {
+      if (err.code === 'ENOENT') {
+        const e = new Error(`SEVENZIP_NOT_FOUND: ${exe}`); e.code = 'SEVENZIP_NOT_FOUND'; reject(e); return;
+      }
+      reject(err);
+    });
+    child.on('close', code => {
+      if (code !== 0) {
+        const e = new Error(`ARCHIVE_TEST_FAILED: ${String(stderr || stdout || '').slice(-800)}`);
+        e.code = 'ARCHIVE_TEST_FAILED'; reject(e); return;
+      }
+      resolve(elapsed(t0));
+    });
+  });
 }
 
 async function readSignedNxm(page) {
@@ -134,21 +171,67 @@ async function extractSignedNxmFast(page, modId, fileId, { timeoutMs = 25000 } =
   }
 }
 
-async function createDirectSession({ apiKeyFile, cacheDir = path.join(ROOT, 'scripts', '.api_cache') } = {}) {
+function normalizePageCount(value) {
+  const n = Number(value);
+  if (!Number.isFinite(n)) return 1;
+  return Math.max(1, Math.min(3, Math.floor(n)));
+}
+
+async function createDirectSessionPool({
+  apiKeyFile,
+  pageCount = 1,
+  cacheDir = path.join(ROOT, 'scripts', '.api_cache'),
+} = {}) {
   const apiKey = readApiKey(apiKeyFile);
   if (!apiKey) {
     const e = new Error(`NEXUS_API_KEY_MISSING: ${apiKeyFile || ''}`); e.code = 'NEXUS_API_KEY_MISSING'; throw e;
   }
-  const api = createFilesClient({ cacheDir, forceRefresh: false, maxSockets: 8, ttlMs: 6 * 3600 * 1000 });
+  const count = normalizePageCount(pageCount);
+  const api = createFilesClient({ cacheDir, forceRefresh: false, maxSockets: Math.max(8, count * 4), ttlMs: 6 * 3600 * 1000 });
   const puppeteer = require('puppeteer-core');
   const browser = await puppeteer.connect({ browserURL: getCdpUrl(), defaultViewport: null });
-  const page = await browser.newPage();
-  await page.setViewport({ width: 1450, height: 900 });
-  return { apiKey, api, browser, page, cacheDir, createdAt: new Date().toISOString() };
+  const workers = [];
+  try {
+    for (let i = 0; i < count; i++) {
+      const page = await browser.newPage();
+      await page.setViewport({ width: 1450, height: 900 });
+      workers.push({ apiKey, api, browser, page, cacheDir, workerId: i });
+    }
+    return {
+      apiKey, api, browser, workers, cacheDir,
+      pageCount: workers.length,
+      createdAt: new Date().toISOString(),
+    };
+  } catch (err) {
+    for (const worker of workers) {
+      try { await worker.page?.close(); } catch (_) {}
+    }
+    try { await browser.disconnect(); } catch (_) {}
+    throw err;
+  }
+}
+
+async function closeDirectSessionPool(pool) {
+  if (!pool) return;
+  for (const worker of pool.workers || []) {
+    try { await worker.page?.close(); } catch (_) {}
+  }
+  try { await pool.browser?.disconnect(); } catch (_) {}
+}
+
+async function createDirectSession(opts = {}) {
+  const pool = await createDirectSessionPool({ ...opts, pageCount: 1 });
+  const worker = pool.workers[0];
+  worker._pool = pool;
+  return worker;
 }
 
 async function closeDirectSession(session) {
   if (!session) return;
+  if (session._pool) {
+    await closeDirectSessionPool(session._pool);
+    return;
+  }
   try { await session.page?.close(); } catch (_) {}
   try { await session.browser?.disconnect(); } catch (_) {}
 }
@@ -178,7 +261,7 @@ function atomicPublishFromSameVolume({ sourcePath, downloadsDir, archiveName, fi
   }
 }
 
-async function runDirectTarget({ row, downloads, sevenzip, timeoutSec = 600, session }) {
+async function runDirectTargetUnlocked({ row, downloads, sevenzip, timeoutSec = 600, session }) {
   if (!row?.modId || !row?.fileId) throw Object.assign(new Error('DIRECT_ROW_IDENTITY_MISSING'), { code: 'DIRECT_ROW_IDENTITY_MISSING' });
   if (!session?.api || !session?.apiKey || !session?.page) throw Object.assign(new Error('DIRECT_SESSION_MISSING'), { code: 'DIRECT_SESSION_MISSING' });
 
@@ -234,7 +317,7 @@ async function runDirectTarget({ row, downloads, sevenzip, timeoutSec = 600, ses
       const e = new Error(`CDN_CONTENT_LENGTH_MISMATCH: expected=${dl.contentLength} actual=${dl.bytes}`); e.code = 'CDN_CONTENT_LENGTH_MISMATCH'; throw e;
     }
 
-    timings.archiveTestMs = testArchive(payload, sevenzip);
+    timings.archiveTestMs = await testArchive(payload, sevenzip);
 
     const metaText = buildMo2Meta({
       gameName: MO2_GAME_NAME, modId: row.modId, fileId: row.fileId,
@@ -262,6 +345,7 @@ async function runDirectTarget({ row, downloads, sevenzip, timeoutSec = 600, ses
       ok: true, status: 'PUBLISHED_VERIFIED', transport: 'DIRECT_NEXUS_CDN',
       modId: String(row.modId), fileId: String(row.fileId), name: row.name,
       bytes: dl.bytes, archive: path.basename(published.finalPath), archiveValidated: true,
+      workerId: session.workerId ?? 0,
       timings,
     };
   } finally {
@@ -269,12 +353,24 @@ async function runDirectTarget({ row, downloads, sevenzip, timeoutSec = 600, ses
   }
 }
 
+async function runDirectTarget(args) {
+  const row = args?.row || {};
+  const downloads = path.resolve(args?.downloads || '.');
+  const key = `${downloads}|${String(row.modId || '')}:${String(row.fileId || '')}`;
+  return withTargetLock(key, () => runDirectTargetUnlocked(args));
+}
+
 module.exports = {
   expectedBytes,
   fileNameForExact,
+  testArchive,
+  withTargetLock,
   extractSignedNxmFast,
+  normalizePageCount,
   createDirectSession,
   closeDirectSession,
+  createDirectSessionPool,
+  closeDirectSessionPool,
   runDirectTarget,
   atomicPublishFromSameVolume,
 };
