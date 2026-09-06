@@ -5,11 +5,29 @@ const fs = require('fs');
 const path = require('path');
 const { sanitizeString } = require('./diagnostics');
 
+const CDP_PRELOAD = path.join(__dirname, 'cdp-compat-preload.js');
+
+function nodeOptionsWithProjectPreload(existing = '') {
+  const current = String(existing || '').trim();
+  if (current.toLowerCase().includes(CDP_PRELOAD.toLowerCase())) return current;
+  const quoted = `"${CDP_PRELOAD.replace(/"/g, '\\"')}"`;
+  return `${current}${current ? ' ' : ''}--require ${quoted}`;
+}
+
+function projectNodeEnv(base = process.env) {
+  return { ...base, NODE_OPTIONS: nodeOptionsWithProjectPreload(base?.NODE_OPTIONS || '') };
+}
+
+// Also update the current process environment so raw child_process calls made by
+// legacy wrappers inherit the same shared-CDP preload. This does not patch the
+// current process; it only guarantees that subsequently spawned Node children do.
+process.env.NODE_OPTIONS = nodeOptionsWithProjectPreload(process.env.NODE_OPTIONS || '');
+
 function runNode(args, options = {}) {
   const capture = !!options.capture;
   const r = cp.spawnSync(process.execPath, args, {
     cwd: options.cwd,
-    env: options.env || process.env,
+    env: projectNodeEnv(options.env || process.env),
     encoding: capture ? 'utf8' : undefined,
     windowsHide: true,
     stdio: capture ? ['ignore', 'pipe', 'pipe'] : 'inherit',
@@ -36,7 +54,7 @@ function spawnNodeDetached(args, { cwd, logFile, env } = {}) {
   }
   const child = cp.spawn(process.execPath, args, {
     cwd,
-    env: env || process.env,
+    env: projectNodeEnv(env || process.env),
     windowsHide: true,
     detached: true,
     stdio: ['ignore', fd, fd],
@@ -59,4 +77,11 @@ function openDefault(target) {
   } catch { return false; }
 }
 
-module.exports = { runNode, spawnNodeDetached, openDefault };
+module.exports = {
+  CDP_PRELOAD,
+  nodeOptionsWithProjectPreload,
+  projectNodeEnv,
+  runNode,
+  spawnNodeDetached,
+  openDefault,
+};
