@@ -39,6 +39,11 @@ function compactComponentCandidate(candidate, mainModId) {
     optionalHint: !!candidate.optionalHint,
     installedContextMatch: !!candidate.installedContextMatch,
     localMatches: candidate.localMatches || [],
+    relevance: candidate.relevance ? {
+      blocking: candidate.relevance.blocking !== false,
+      disposition: candidate.relevance.disposition || '',
+      reason: candidate.relevance.reason || '',
+    } : null,
     environmentDecision: candidate.environmentDecision ? {
       resolved: !!candidate.environmentDecision.resolved,
       status: candidate.environmentDecision.status || 'UNRESOLVED',
@@ -75,6 +80,12 @@ function eligibilityOption(item) {
   };
 }
 
+function classifyReviewRow(row) {
+  if (row.action === 'HOLD_UPDATE_ELIGIBILITY') return 'eligibility';
+  if ((row.mainOptions || []).length > 1 || (row.componentFamilies || []).length) return 'actionable';
+  return 'technical';
+}
+
 function buildReviewPayload(plan, discoveryDoc, closure, metadata = {}) {
   const discoveryMap = new Map((discoveryDoc.items || []).map(x => [keyOf(x.modId, x.mainFileId), x]));
   const closureMap = new Map((closure.items || []).map(x => [keyOf(x.modId, x.fileId), x]));
@@ -104,6 +115,9 @@ function buildReviewPayload(plan, discoveryDoc, closure, metadata = {}) {
       componentFamilies: [],
       patchFamilies: [],
       blockers: [],
+      nonBlockingEvidenceCount: 0,
+      advisoryCoverageCount: 0,
+      reviewClass: 'technical',
     });
     const row = map.get(id);
     if (!row.variantPolicy && item.variantPolicy) row.variantPolicy = item.variantPolicy;
@@ -169,10 +183,12 @@ function buildReviewPayload(plan, discoveryDoc, closure, metadata = {}) {
       targetMainName: discovery.mainName,
       action: 'HOLD_COMPONENT_DISCOVERY',
     });
-    row.action = row.action || 'HOLD_COMPONENT_DISCOVERY';
+    if (!row.action || row.action === 'DOWNLOAD') row.action = 'HOLD_COMPONENT_DISCOVERY';
     for (const problem of discovery.coverageProblems || []) {
       row.blockers.push(`Component discovery 覆盖不完整：${problem.source} / ${problem.status}${problem.detail ? ` — ${problem.detail}` : ''}`);
     }
+    row.advisoryCoverageCount += (discovery.advisoryCoverage || []).length;
+    row.nonBlockingEvidenceCount += (discovery.candidates || []).filter(c => c.relevance?.blocking === false).length;
 
     const families = new Map();
     for (const candidate of discovery.unresolved || []) {
@@ -197,20 +213,38 @@ function buildReviewPayload(plan, discoveryDoc, closure, metadata = {}) {
     row.blockers = [...new Set(row.blockers)];
     const discovery = discoveryMap.get(keyOf(row.modId, targetId));
     if (discovery && !discovery.complete && !row.componentFamilies.length) {
-      row.blockers.push('Component Discovery 尚未闭合；需要 Pi Agent 先补候选 exact fileId/证据。');
+      row.blockers.push('Component Discovery 尚未闭合；需要 Pi Agent 先补证据，当前没有需要你手工选择的候选。');
     }
     row.patchFamilies = row.componentFamilies.filter(x => x.kind === 'PATCH' || x.kind === 'HOTFIX');
+    row.reviewClass = classifyReviewRow(row);
   }
 
-  const items = [...map.values()].sort((a, b) => Number(b.updateEligibility?.priority || 0) - Number(a.updateEligibility?.priority || 0) || Number(a.modId) - Number(b.modId));
+  const items = [...map.values()].sort((a, b) => {
+    const rank = { actionable: 0, eligibility: 1, technical: 2 };
+    const ra = rank[a.reviewClass] ?? 9;
+    const rb = rank[b.reviewClass] ?? 9;
+    return ra - rb || Number(b.updateEligibility?.priority || 0) - Number(a.updateEligibility?.priority || 0) || Number(a.modId) - Number(b.modId);
+  });
   const counts = {
+    actionable: items.filter(x => x.reviewClass === 'actionable').length,
+    eligibility: items.filter(x => x.reviewClass === 'eligibility').length,
+    technical: items.filter(x => x.reviewClass === 'technical').length,
     updateEligibility: items.filter(x => x.action === 'HOLD_UPDATE_ELIGIBILITY').length,
     variant: items.filter(x => x.mainOptions.length > 1 && x.action !== 'HOLD_UPDATE_ELIGIBILITY').length,
     component: items.filter(x => x.componentFamilies.length || x.blockers.some(b => /Component|Closure/i.test(b))).length,
     patch: items.filter(x => x.componentFamilies.some(f => ['PATCH', 'HOTFIX'].includes(f.kind))).length,
     other: items.filter(x => x.mainOptions.length <= 1 && !x.componentFamilies.length && x.action !== 'HOLD_UPDATE_ELIGIBILITY').length,
   };
-  return { generatedAt: new Date().toISOString(), version: 6, ...metadata, counts, items };
+  const nonBlockingEvidence = items.reduce((n, x) => n + Number(x.nonBlockingEvidenceCount || 0), 0);
+  return {
+    generatedAt: new Date().toISOString(),
+    version: 7,
+    ...metadata,
+    updateSummary: plan.updateEligibilityCounts || {},
+    nonBlockingEvidence,
+    counts,
+    items,
+  };
 }
 
-module.exports = { keyOf, compactMainOption, compactComponentCandidate, compactPatchCandidate, eligibilityOption, buildReviewPayload };
+module.exports = { keyOf, compactMainOption, compactComponentCandidate, compactPatchCandidate, eligibilityOption, classifyReviewRow, buildReviewPayload };

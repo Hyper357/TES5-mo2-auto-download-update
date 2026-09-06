@@ -9,15 +9,32 @@
 <body>
 <div class="wrap">
   <div class="hero" __AUTO_MARKER__>
-    <h1>🎛️ MO2 人工决策中心</h1>
-    <div class="muted">简单 MOD 已交给自动流水线。这里只处理多分支、多 Patch、或 AI 不确定的项目。</div>
+    <div class="hero-top">
+      <div>
+        <h1>🎛️ MO2 更新决策中心</h1>
+        <div class="muted">默认只显示真正需要你做选择的 MOD。机器证据收进“技术详情”，不再整页铺开。</div>
+      </div>
+      <div class="run-meta" id="run-meta"></div>
+    </div>
+    <div id="zero-warning"></div>
     <div class="summary" id="auto-summary"></div>
     <div class="summary" id="summary"></div>
   </div>
+
+  <div class="toolbar">
+    <div class="filters" id="filters"></div>
+    <div class="toolbar-right">
+      <input id="search" class="search" type="search" autocomplete="off" placeholder="搜索 MOD 名称 / modId…">
+      <span class="visible-status" id="visible-status"></span>
+    </div>
+  </div>
+
   <div id="root"></div>
+  <div class="more-wrap"><button class="btn secondary" id="more" hidden>显示更多</button></div>
+
   <div class="actions">
-    <button class="btn secondary" id="save">保存选择</button>
-    <button class="btn primary" id="download">下载所有已确认项</button>
+    <button class="btn secondary" id="save">保存已做选择</button>
+    <button class="btn primary" id="download">下载已确认项</button>
     <span class="status" id="status"></span>
   </div>
 </div>
