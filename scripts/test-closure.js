@@ -40,6 +40,28 @@ const plan={items:[{modId:'123',latestFileId:'456',action:'DOWNLOAD',aux:{patche
   assert.match(x.out,/HOLD_COMPONENT_DISCOVERY/);
 }
 
+// v4.1.6: complete zero-candidate discovery is enough. A Main no longer needs a
+// synthetic TRANSLATION NONE registry row just to be allowed through closure.
+{
+  const registry='';
+  const discovery={items:[{modId:'123',mainFileId:'456',complete:true,candidateCount:0,candidates:[],unresolved:[],coverageProblems:[]}]};
+  const x=runCase({registry,plan,discovery});
+  assert.match(x.out,/\tDOWNLOAD$/m);
+  assert.strictEqual(x.report.holdClosure,0);
+}
+
+// Non-blocking reverse/optional evidence remains visible in discovery but does not
+// force a registry decision or hold an otherwise clean Main.
+{
+  const registry='';
+  const discovery={items:[{
+    modId:'123',mainFileId:'456',complete:true,candidateCount:1,candidateCountsByKind:{PATCH:1},unresolved:[],coverageProblems:[],
+    candidates:[{kind:'PATCH',family:'CUSTOM:DOWNSTREAM',source:'REQUIREMENTS_REVERSE',decision:{resolved:false,status:'UNRESOLVED'},relevance:{blocking:false,disposition:'NON_BLOCKING_REVERSE_UNINSTALLED'}}],
+  }]};
+  const x=runCase({registry,plan,discovery});
+  assert.match(x.out,/\tDOWNLOAD$/m);
+}
+
 {
   const registry=`123\t456\t2.0\tTRANSLATION\tNONE\t\t\t\t\t${today}\tTranslations checked\tnone\n`;
   const discovery={items:[{modId:'123',mainFileId:'456',complete:true,candidateCount:0,candidateCountsByKind:{},unresolved:[],coverageProblems:[]}]};
