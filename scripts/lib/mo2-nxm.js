@@ -22,8 +22,7 @@ function mo2Roots({ modsDir = '', downloadsDir = '' } = {}) {
 }
 
 function findMo2Executable({ modsDir = '', downloadsDir = '' } = {}) {
-  const explicit = [process.env.MO2_EXE, process.env.MO2_NXM_HANDLER].filter(existsFile);
-  if (explicit.length) return path.resolve(explicit[0]);
+  if (existsFile(process.env.MO2_EXE)) return path.resolve(process.env.MO2_EXE);
   for (const root of mo2Roots({ modsDir, downloadsDir })) {
     for (const name of ['ModOrganizer.exe', 'ModOrganizer2.exe']) {
       const candidate = path.join(root, name);
@@ -39,6 +38,8 @@ function findMo2Executable({ modsDir = '', downloadsDir = '' } = {}) {
 function configureDirectNxmTarget({ modsDir = '', downloadsDir = '' } = {}) {
   const executable = findMo2Executable({ modsDir, downloadsDir });
   if (!executable) return { ok: false, executable: '', reason: 'MO2_EXE_NOT_FOUND' };
+  // nexus-autodl historically reads MO2_NXM_HANDLER. Point that compatibility
+  // variable at ModOrganizer.exe itself; do not derive a proxy path from repo depth.
   process.env.MO2_NXM_HANDLER = executable;
   process.env.MO2_EXE = process.env.MO2_EXE || executable;
   process.env.MO2_ROOT = process.env.MO2_ROOT || path.dirname(executable);
