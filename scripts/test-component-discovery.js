@@ -6,6 +6,7 @@ const {
   componentFamily,
   mergeComponentCandidates,
   candidateRuleMatches,
+  candidateRelevance,
   assessComponentDiscovery,
   countsByKind,
 } = require('./lib/component-discovery');
@@ -23,7 +24,8 @@ const optional = mergeComponentCandidates([
   { source: 'SAME_PAGE_FILE', fileId: '40', name: 'Optional 2K texture pack', mainName: 'Example Main' },
 ]);
 assert.strictEqual(optional[0].kind, 'TEXTURE');
-assert.strictEqual(optional[0].optionalHint, true, 'explicit Optional wording should be visible as a hint but not auto-resolved');
+assert.strictEqual(optional[0].optionalHint, true);
+assert.strictEqual(candidateRelevance(optional[0]).blocking, false, 'explicit optional/uninstalled file is evidence, not an automatic closure blocker');
 
 assert.strictEqual(candidateRuleMatches(
   { kind:'PHYSICS', auxModId:'123', fileId:'200', family:'CUSTOM:HDT' },
@@ -68,6 +70,57 @@ const assessed = assessComponentDiscovery({
 });
 assert.strictEqual(assessed.complete, true);
 assert.strictEqual(assessed.unresolved.length, 0);
+
+// A reverse Nexus requirement is a downstream consumer, not automatically a Main companion.
+const reverseOnly = assessComponentDiscovery({
+  candidates: [{
+    kind: 'PATCH', family: 'CUSTOM:SOME_DOWNSTREAM_MOD', source: 'REQUIREMENTS_REVERSE', key: 'PATCH:mod:900:',
+    auxModId: '900', name: 'Some downstream compatibility mod', installedContextMatch: false,
+  }],
+  rules: [],
+  coverage: {
+    requirementsForward: { required: true, complete: true },
+    requirementsReverse: { required: true, complete: false, status: 'SECTION_NOT_PROVEN' },
+    description: { required: true, complete: true },
+  },
+});
+assert.strictEqual(reverseOnly.complete, true, 'reverse-section coverage is advisory for Main closure');
+assert.strictEqual(reverseOnly.unresolved.length, 0);
+assert.strictEqual(reverseOnly.nonBlocking.length, 1);
+assert.strictEqual(reverseOnly.nonBlocking[0].relevance.disposition, 'NON_BLOCKING_REVERSE_UNINSTALLED');
+
+// If the same downstream/companion evidence matches active local context, it becomes blocking again.
+const reverseInstalled = assessComponentDiscovery({
+  candidates: [{
+    kind: 'PATCH', family: 'CUSTOM:SOME_DOWNSTREAM_MOD', source: 'REQUIREMENTS_REVERSE', key: 'PATCH:mod:900:',
+    auxModId: '900', name: 'Some downstream compatibility mod', installedContextMatch: true,
+  }],
+  rules: [],
+  coverage: { requirementsForward: { required: true, complete: true }, description: { required: true, complete: true } },
+});
+assert.strictEqual(reverseInstalled.complete, false);
+assert.strictEqual(reverseInstalled.unresolved.length, 1);
+assert.strictEqual(reverseInstalled.unresolved[0].relevance.disposition, 'BLOCKING_INSTALLED_CONTEXT');
+
+// Explicit optional same-page evidence does not hold an otherwise clean Main.
+const optionalAssessed = assessComponentDiscovery({
+  candidates: optional,
+  rules: [],
+  coverage: { samePageComponents: { required: true, complete: true }, requirementsForward: { required: true, complete: true }, description: { required: true, complete: true } },
+});
+assert.strictEqual(optionalAssessed.complete, true);
+assert.strictEqual(optionalAssessed.unresolved.length, 0);
+assert.strictEqual(optionalAssessed.nonBlocking.length, 1);
+
+// A directly discovered translation remains blocking so localization is never silently forgotten.
+const translationHeld = assessComponentDiscovery({
+  candidates: [{ kind: 'TRANSLATION', family: 'ZH_CN', source: 'SAME_PAGE_FILE', fileId: '77', name: 'Chinese Translation', optionalHint: true }],
+  rules: [],
+  coverage: { samePageComponents: { required: true, complete: true }, requirementsForward: { required: true, complete: true }, description: { required: true, complete: true } },
+});
+assert.strictEqual(translationHeld.complete, false);
+assert.strictEqual(translationHeld.unresolved.length, 1);
+assert.strictEqual(translationHeld.unresolved[0].relevance.disposition, 'BLOCKING_DISCOVERED_TRANSLATION');
 
 // A resolved active-profile compatibility decision is allowed to close a PATCH/HOTFIX candidate without a persisted registry row.
 const envResolved = assessComponentDiscovery({
