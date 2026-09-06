@@ -1,8 +1,9 @@
 #!/usr/bin/env node
 'use strict';
 
-// Main -> required component families -> Translation closure gate.
+// Main -> required component families -> discovered Translation closure gate.
 // v4.0 may accept a narrow, high-confidence NOT_APPLICABLE decision from a resolved MO2 profile graph.
+// v4.1.6 distinguishes blocking component candidates from non-blocking discovery evidence.
 
 const fs = require('fs');
 const path = require('path');
@@ -39,13 +40,19 @@ function evidenceCandidates(planItem, kind) {
   return (planItem.aux.components || []).filter(x => String(x.kind || '').toUpperCase() === kind);
 }
 function candidateCountsByKind(pd) {
-  if (pd?.candidateCountsByKind) return pd.candidateCountsByKind;
+  if (pd?.blockingCandidateCountsByKind) return pd.blockingCandidateCountsByKind;
   const out = {};
   for (const c of pd?.candidates || []) {
+    if (c?.relevance?.blocking === false) continue;
     const k = String(c.kind || 'PATCH').toUpperCase();
     out[k] = (out[k] || 0) + 1;
   }
-  if (!Object.keys(out).length && Number(pd?.candidateCount || 0) > 0) out.PATCH = Number(pd.candidateCount || 0);
+  if (!Object.keys(out).length && !Array.isArray(pd?.candidates) && Number(pd?.candidateCount || 0) > 0) {
+    // Compatibility fallback for pre-v4.1.6 discovery payloads that did not carry
+    // per-candidate relevance. New payloads always include candidates/relevance.
+    if (pd?.candidateCountsByKind) return pd.candidateCountsByKind;
+    out.PATCH = Number(pd.candidateCount || 0);
+  }
   return out;
 }
 function rulesByFamily(kindRules) {
@@ -58,7 +65,8 @@ function rulesByFamily(kindRules) {
   return map;
 }
 function discoveryCandidatesOfKind(pd, kind) {
-  return (pd?.candidates || []).filter(c => String(c.kind || 'PATCH').toUpperCase() === kind);
+  return (pd?.candidates || []).filter(c =>
+    String(c.kind || 'PATCH').toUpperCase() === kind && c?.relevance?.blocking !== false);
 }
 function isTrustedEnvironmentResolution(candidate) {
   const d = candidate?.decision;
@@ -155,7 +163,11 @@ function main() {
     const environmentResolved = [];
     const counts = candidateCountsByKind(pd);
 
-    const kindsToCheck = new Set(['TRANSLATION']);
+    // v4.1.6: no universal TRANSLATION bookkeeping requirement. Complete discovery
+    // with zero blocking translation candidates is itself proof that there is no
+    // translation relationship to close for this exact Main. A discovered/installed
+    // translation still enters this set and must resolve exactly like other components.
+    const kindsToCheck = new Set();
     for (const kind of COMPONENT_KINDS) if ((counts[kind] || 0) > 0) kindsToCheck.add(kind);
     for (const r of relevant) if (COMPONENT_KINDS.includes(r.kind)) kindsToCheck.add(r.kind);
 
@@ -166,12 +178,9 @@ function main() {
       environmentResolved.push(...autoResolved.map(c => ({ kind, family: c.family || '', key: c.key || '', status: c.decision.status, reason: c.decision.reason || '', evidence: c.decision.evidence || [] })));
       const registryNeeded = discovered.filter(c => !isTrustedEnvironmentResolution(c));
       const candidateCount = Number(counts[kind] || 0);
-      const discoveryProvesEmpty = requireDiscovery && pd?.complete && candidateCount === 0;
 
       if (!kindRules.length) {
-        // Translation remains an explicit baseline decision. Other kinds need registry evidence only for candidates
-        // that were not already resolved NOT_APPLICABLE by a high-confidence active-profile compatibility check.
-        if (kind === 'TRANSLATION' || registryNeeded.length > 0 || (!discoveryProvesEmpty && candidateCount === 0)) missingKinds.push(kind);
+        if (registryNeeded.length > 0) missingKinds.push(kind);
         continue;
       }
 
