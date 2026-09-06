@@ -1,6 +1,7 @@
 'use strict';
 
 const crypto = require('crypto');
+const { compareVersions } = require('./semver');
 const {
   inferFamily,
   normalizeText,
@@ -24,13 +25,17 @@ const COMPONENT_KINDS = [
 
 const RESOLVED_STATUSES = new Set(['REQUIRED', 'NOT_APPLICABLE', 'ALREADY_INCLUDED', 'OBSOLETE']);
 const NON_BLOCKING_TEXT = /(\boptional\b|purely optional|not required|no need|choose one|alternative only|cosmetic only)/i;
+const CONTEXT_NOISE = new Set([
+  'alpha','beta','preview','old','legacy','archive','archived','release','latest','main','loose','optional',
+  'file','files','version','update','updated','patch','fix','hotfix','resource','resources','plugin','plugins',
+]);
 
 function classifyComponent(text, meta = {}) {
   const raw = String(text || '');
   const t = normalizeText(raw);
   if (!t) return '';
 
-  if (/(translation|translate|chinese|中文|汉化|简中|繁中|chs|cht)/i.test(raw)) return 'TRANSLATION';
+  if (/(translation|translate|chinese|mandarin|中文|汉化|简中|繁中|chs|cht)/i.test(raw)) return 'TRANSLATION';
   if (/(hotfix|critical fix|missing textures? fix|missing meshes? fix|emergency fix|bug ?fix)/i.test(raw)) return 'HOTFIX';
   if (/\b(body\s*slide|bodyslide|outfit studio|slider set|slider files?)\b/i.test(raw)) return 'BODYSLIDE';
   if (/\b(hdt[-\s]?smp|faster hdt|fsmp|smp physics|physics meshes?|cloth physics|hair physics)\b/i.test(raw)) return 'PHYSICS';
@@ -51,7 +56,7 @@ function componentFamily(kind, text, mainName = '') {
   if (k === 'PATCH' || k === 'HOTFIX') return inferFamily(raw, mainName);
   if (k === 'TRANSLATION') {
     if (/(繁体|traditional chinese|cht)/i.test(raw)) return 'ZH_TW';
-    if (/(中文|汉化|简体|simplified chinese|chs|chinese)/i.test(raw)) return 'ZH_CN';
+    if (/(中文|汉化|简体|simplified chinese|mandarin|chs|chinese)/i.test(raw)) return 'ZH_CN';
     return 'GENERAL';
   }
 
@@ -101,6 +106,9 @@ function normalizeCandidate(raw) {
     fileId: raw.fileId ? String(raw.fileId) : '',
     version: raw.version || '',
     name: raw.name || '',
+    mainName: raw.mainName || '',
+    category: raw.category || '',
+    uploadedTime: raw.uploadedTime || '',
     url: raw.url || '',
     evidence: raw.evidence || '',
     installed: !!raw.installed,
@@ -138,21 +146,28 @@ function mergeComponentCandidates(items) {
   return [...map.values()].sort((a, b) => sourceRank(b.source) - sourceRank(a.source) || a.kind.localeCompare(b.kind) || a.family.localeCompare(b.family));
 }
 
+function meaningfulContextTokens(input) {
+  return tokens(input).filter(t => t.length >= 3 && !CONTEXT_NOISE.has(t) && !/^\d+(?:\.\d+)*$/.test(t));
+}
+
+function tokenOverlap(a, b) {
+  const at = [...new Set(meaningfulContextTokens(a))];
+  const bt = new Set(meaningfulContextTokens(b));
+  if (!at.length) return { count: 0, ratio: 0, tokens: at };
+  const count = at.filter(x => bt.has(x)).length;
+  return { count, ratio: count / at.length, tokens: at };
+}
+
 function withInstalledContext(candidate, localNames) {
   const base = installedContext(candidate, localNames);
-  if (base.installedContextMatch) return { ...candidate, ...base };
+  if (base.installedContextMatch && !String(candidate.family || '').startsWith('CUSTOM:')) return { ...candidate, ...base };
 
-  const ct = new Set(tokens(candidate.name || candidate.evidence || ''));
   const hits = [];
-  if (ct.size >= 2) {
-    for (const name of localNames || []) {
-      const nt = new Set(tokens(name));
-      let n = 0;
-      for (const x of ct) if (nt.has(x)) n++;
-      if (n >= 2 && n / Math.max(1, ct.size) >= 0.35) hits.push(String(name));
-    }
+  for (const name of localNames || []) {
+    const overlap = tokenOverlap(candidate.name || '', name);
+    if (overlap.tokens.length >= 2 && overlap.count >= 2 && overlap.ratio >= 0.6) hits.push(String(name));
   }
-  return { ...candidate, installedContextMatch: hits.length > 0, localMatches: hits.slice(0, 10) };
+  return { ...candidate, installedContextMatch: hits.length > 0, localMatches: hits.slice(0, 8) };
 }
 
 function candidateRuleMatches(candidate, rule) {
@@ -199,9 +214,17 @@ function effectiveDecision(candidate, rules) {
   return resolveCandidate(candidate, rules);
 }
 
-function candidateRelevance(candidate) {
+function looksLikeHistoricalSibling(candidate, context = {}) {
+  if (String(candidate?.source || '') !== 'SAME_PAGE_FILE') return false;
+  const mainVersion = context.mainVersion || '';
+  if (!candidate?.version || !mainVersion) return false;
+  if (compareVersions(candidate.version, mainVersion) >= 0) return false;
+  const overlap = tokenOverlap(candidate.name || '', context.mainName || candidate.mainName || '');
+  return overlap.count >= 1 && overlap.ratio >= 0.5;
+}
+
+function candidateRelevance(candidate, context = {}) {
   const c = candidate || {};
-  const kind = String(c.kind || '').toUpperCase();
   const source = String(c.source || 'UNKNOWN').toUpperCase();
   const decision = c.decision || null;
   const envReason = String(c.environmentDecision?.reason || '');
@@ -212,8 +235,17 @@ function candidateRelevance(candidate) {
   if (c.requiredHint || source === 'REQUIREMENTS_FORWARD') {
     return { blocking: true, disposition: 'BLOCKING_REQUIRED', reason: 'FORWARD_OR_EXPLICIT_REQUIRED' };
   }
-  if (c.installed || c.installedContextMatch || ['INSTALLED_COMPONENT', 'LOCAL_FOMOD'].includes(source)) {
-    return { blocking: true, disposition: 'BLOCKING_INSTALLED_CONTEXT', reason: 'ACTIVE_OR_LOCAL_COMPONENT_EVIDENCE' };
+  if (c.installed || ['INSTALLED_COMPONENT', 'LOCAL_FOMOD'].includes(source)) {
+    return { blocking: true, disposition: 'BLOCKING_INSTALLED_CONTEXT', reason: 'EXACT_LOCAL_COMPONENT_EVIDENCE' };
+  }
+  if (looksLikeHistoricalSibling(c, context)) {
+    return { blocking: false, disposition: 'NON_BLOCKING_HISTORICAL_SIBLING', reason: 'OLDER_SAME_PRODUCT_FILE' };
+  }
+  if (c.optionalHint) {
+    return { blocking: false, disposition: 'NON_BLOCKING_OPTIONAL', reason: 'EXPLICIT_OPTIONAL_NOT_EXACTLY_INSTALLED' };
+  }
+  if (c.installedContextMatch) {
+    return { blocking: true, disposition: 'BLOCKING_INSTALLED_CONTEXT', reason: 'STRONG_ACTIVE_CONTEXT_MATCH' };
   }
   if (source === 'RELATION_REGISTRY') {
     return { blocking: true, disposition: 'BLOCKING_LEARNED_RELATION', reason: 'CURATED_RELATION_EVIDENCE' };
@@ -221,46 +253,34 @@ function candidateRelevance(candidate) {
   if (envReason === 'COMPAT_COUNTERPART_ENABLED') {
     return { blocking: true, disposition: 'BLOCKING_ACTIVE_COUNTERPART', reason: envReason };
   }
-
-  // Nexus "Mods requiring this file" describes downstream consumers of the Main.
-  // An uninstalled downstream mod is useful evidence, but is not itself a required
-  // companion of the Main update and must not create hundreds of false closure tasks.
   if (source === 'REQUIREMENTS_REVERSE') {
     return { blocking: false, disposition: 'NON_BLOCKING_REVERSE_UNINSTALLED', reason: 'DOWNSTREAM_MOD_NOT_ACTIVE' };
   }
-
-  // A directly discovered translation is intentionally still blocking: the project
-  // promises not to silently forget a Chinese/localized companion. Reverse-only,
-  // uninstalled translations were already classified above as non-blocking evidence.
-  if (kind === 'TRANSLATION') {
-    return { blocking: true, disposition: 'BLOCKING_DISCOVERED_TRANSLATION', reason: 'TRANSLATION_RELATION_DISCOVERED' };
-  }
-
-  if (c.optionalHint) {
-    return { blocking: false, disposition: 'NON_BLOCKING_OPTIONAL', reason: 'EXPLICIT_OPTIONAL_NOT_ACTIVE' };
-  }
-
   if (source === 'DESCRIPTION_TEXT') {
     return { blocking: false, disposition: 'NON_BLOCKING_DESCRIPTION_WEAK', reason: 'TEXT_ONLY_NO_REQUIRED_OR_LOCAL_MATCH' };
   }
   if (source === 'DESCRIPTION_LINK') {
+    if (c.kind === 'TRANSLATION' && c.family === 'ZH_CN') {
+      return { blocking: true, disposition: 'BLOCKING_TRANSLATION_LINK', reason: 'DIRECT_ZH_CN_TRANSLATION' };
+    }
     return { blocking: false, disposition: 'NON_BLOCKING_DESCRIPTION_LINK', reason: 'LINK_ONLY_NO_REQUIRED_OR_LOCAL_MATCH' };
   }
 
   return { blocking: true, disposition: 'BLOCKING_DISCOVERED', reason: 'DIRECT_COMPONENT_EVIDENCE' };
 }
 
-function assessComponentDiscovery({ candidates, rules, coverage }) {
+function assessComponentDiscovery({ candidates, rules, coverage, mainVersion = '', mainName = '' }) {
+  const context = { mainVersion, mainName };
   const assessed = (candidates || []).map(c => {
     const decision = effectiveDecision(c, rules);
     const withDecision = { ...c, decision };
-    return { ...withDecision, relevance: candidateRelevance(withDecision) };
+    return { ...withDecision, relevance: candidateRelevance(withDecision, context) };
   });
   const blockingCandidates = assessed.filter(c => c.relevance?.blocking !== false);
   const nonBlocking = assessed.filter(c => c.relevance?.blocking === false);
   const unresolved = blockingCandidates.filter(c => !c.decision.resolved);
   const coverageProblems = Object.entries(coverage || {})
-    .filter(([source, v]) => source !== 'requirementsReverse' && v && v.required && !v.complete)
+    .filter(([, v]) => v && v.required && !v.complete)
     .map(([source, v]) => ({ source, status: v.status || 'INCOMPLETE', detail: v.detail || '' }));
   return {
     candidates: assessed,
@@ -291,6 +311,7 @@ module.exports = {
   resolveCandidate,
   effectiveDecision,
   candidateRelevance,
+  looksLikeHistoricalSibling,
   assessComponentDiscovery,
   countsByKind,
 };
