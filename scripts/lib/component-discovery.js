@@ -201,6 +201,7 @@ function effectiveDecision(candidate, rules) {
 
 function candidateRelevance(candidate) {
   const c = candidate || {};
+  const kind = String(c.kind || '').toUpperCase();
   const source = String(c.source || 'UNKNOWN').toUpperCase();
   const decision = c.decision || null;
   const envReason = String(c.environmentDecision?.reason || '');
@@ -228,6 +229,13 @@ function candidateRelevance(candidate) {
     return { blocking: false, disposition: 'NON_BLOCKING_REVERSE_UNINSTALLED', reason: 'DOWNSTREAM_MOD_NOT_ACTIVE' };
   }
 
+  // A directly discovered translation is intentionally still blocking: the project
+  // promises not to silently forget a Chinese/localized companion. Reverse-only,
+  // uninstalled translations were already classified above as non-blocking evidence.
+  if (kind === 'TRANSLATION') {
+    return { blocking: true, disposition: 'BLOCKING_DISCOVERED_TRANSLATION', reason: 'TRANSLATION_RELATION_DISCOVERED' };
+  }
+
   if (c.optionalHint) {
     return { blocking: false, disposition: 'NON_BLOCKING_OPTIONAL', reason: 'EXPLICIT_OPTIONAL_NOT_ACTIVE' };
   }
@@ -252,7 +260,7 @@ function assessComponentDiscovery({ candidates, rules, coverage }) {
   const nonBlocking = assessed.filter(c => c.relevance?.blocking === false);
   const unresolved = blockingCandidates.filter(c => !c.decision.resolved);
   const coverageProblems = Object.entries(coverage || {})
-    .filter(([, v]) => v && v.required && !v.complete)
+    .filter(([source, v]) => source !== 'requirementsReverse' && v && v.required && !v.complete)
     .map(([source, v]) => ({ source, status: v.status || 'INCOMPLETE', detail: v.detail || '' }));
   return {
     candidates: assessed,
