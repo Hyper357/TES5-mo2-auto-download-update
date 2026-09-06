@@ -14,6 +14,24 @@ function versionEqual(a, b) {
   return validVersion(a) && validVersion(b) && compareVersions(a, b) === 0;
 }
 
+function normalizeArchiveIdentity(value) {
+  return String(value || '')
+    .replace(/\\/g, '/')
+    .split('/').pop()
+    .replace(/\.(?:7z|zip|rar)$/i, '')
+    .normalize('NFKC')
+    .toLowerCase()
+    .replace(/[^\p{L}\p{N}]+/gu, ' ')
+    .replace(/\s+/g, ' ')
+    .trim();
+}
+
+function installationFileMatchesTarget(installationFile, target) {
+  const local = normalizeArchiveIdentity(installationFile);
+  const remote = normalizeArchiveIdentity(target?.file_name || target?.fileName || '');
+  return !!local && !!remote && local === remote;
+}
+
 function mo2UpdateSignal(meta = {}) {
   const version = meta.version || meta.installedVersion || '';
   const newestVersion = meta.newestVersion || '';
@@ -190,6 +208,19 @@ function localTargetVersionConflict(meta, mine, target) {
   if (String(mine?.file_id || '') === String(target?.file_id || '')) return null;
   const cmp = compareVersions(localVersion, target.version);
   if (cmp === 0) {
+    const installationFile = meta?.installationFile || meta?.instFile || '';
+    if (installationFileMatchesTarget(installationFile, target)) {
+      return {
+        reason: 'HIGH_CONFIDENCE_METADATA_DRIFT_UP_TO_DATE',
+        localVersion,
+        resolvedFileId: String(mine?.file_id || ''),
+        resolvedVersion: mine?.version || '',
+        targetFileId: String(target?.file_id || ''),
+        targetVersion: target?.version || '',
+        installationFile,
+        metadataDrift: true,
+      };
+    }
     return {
       reason: 'LOCAL_VERSION_MATCHES_TARGET_FILE_ID_CONFLICT',
       localVersion,
@@ -212,7 +243,19 @@ function localTargetVersionConflict(meta, mine, target) {
   return null;
 }
 
-function localConflictHold({ conflict, target, mo2, sourceEvidence }) {
+function localConflictDecision({ conflict, target, mo2, sourceEvidence }) {
+  if (conflict.reason === 'HIGH_CONFIDENCE_METADATA_DRIFT_UP_TO_DATE') {
+    return {
+      status: 'SKIP_UP_TO_DATE',
+      reason: conflict.reason,
+      updateNeeded: false,
+      priority: 0,
+      mo2,
+      target: compactFile(target),
+      evidence: [...sourceEvidence, 'LOCAL_VERSION_MATCHES_TARGET', 'INSTALLATION_FILE_MATCHES_EXACT_TARGET'],
+      metadataDrift: conflict,
+    };
+  }
   return {
     status: 'HOLD_UPDATE_ELIGIBILITY',
     reason: conflict.reason,
@@ -243,7 +286,7 @@ function assessUpdateEligibility({ files = [], fileUpdates = [], mine, meta = {}
   if (chain.candidate) {
     const target = chain.candidate;
     const conflict = localTargetVersionConflict(meta, mine, target);
-    if (conflict) return localConflictHold({ conflict, target, mo2, sourceEvidence: ['NEXUS_EXACT_UPDATE_CHAIN'] });
+    if (conflict) return localConflictDecision({ conflict, target, mo2, sourceEvidence: ['NEXUS_EXACT_UPDATE_CHAIN'] });
     if (ignoredTarget(meta, target)) {
       return {
         status: 'SKIP_IGNORED_UPDATE',
@@ -284,7 +327,7 @@ function assessUpdateEligibility({ files = [], fileUpdates = [], mine, meta = {}
   if (fallback.candidate) {
     const target = fallback.candidate;
     const conflict = localTargetVersionConflict(meta, mine, target);
-    if (conflict) return localConflictHold({ conflict, target, mo2, sourceEvidence: ['NEWER_COMPATIBLE_FILE_UPLOAD'] });
+    if (conflict) return localConflictDecision({ conflict, target, mo2, sourceEvidence: ['NEWER_COMPATIBLE_FILE_UPLOAD'] });
     if (ignoredTarget(meta, target)) {
       return {
         status: 'SKIP_IGNORED_UPDATE',
@@ -375,6 +418,8 @@ function eligibilityCounts(items = []) {
 module.exports = {
   MO2_ACTIVE_FILE_STATUSES,
   validVersion,
+  normalizeArchiveIdentity,
+  installationFileMatchesTarget,
   mo2UpdateSignal,
   normalizeUpdateEdge,
   updateChainSuccessors,

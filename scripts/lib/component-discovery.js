@@ -31,6 +31,9 @@ const CONTEXT_NOISE = new Set([
 ]);
 const DIRECT_COMPONENT_WORDS = /(patch|hotfix|physics|bodyslide|body\s*slide|texture|mesh|resource|framework|translation|chinese|mandarin|chs|config|preset|addon|add-on|optional)/i;
 const ZH_LABEL = /(chinese|mandarin|chs|zh[-_ ]?cn|simplified|中文|汉化|简中)/i;
+const OPTIONAL_CATEGORY = /(optional|miscellaneous|misc|old files?|archive|archived|obsolete)/i;
+const EXPLICIT_FORWARD_REQUIRED = /(this mod requires|required by this mod|required dependenc(?:y|ies)|required mods?|must (?:have|install)|requires?:)/i;
+const EXPLICIT_SAME_PAGE_REQUIRED = /(required (?:file|files|resource|resources|component|components)|must install|mandatory|core files?|base assets?)/i;
 
 function classifyComponent(text, meta = {}) {
   const raw = String(text || '');
@@ -116,7 +119,7 @@ function normalizeCandidate(raw) {
     evidence: raw.evidence || '',
     installed: !!raw.installed,
     requiredHint: !!raw.requiredHint || source === 'REQUIREMENTS_FORWARD',
-    optionalHint: !!raw.optionalHint || NON_BLOCKING_TEXT.test(combined) || kind === 'OPTIONAL_COMPONENT',
+    optionalHint: !!raw.optionalHint || NON_BLOCKING_TEXT.test(combined) || kind === 'OPTIONAL_COMPONENT' || OPTIONAL_CATEGORY.test(String(raw.category || '')),
     family,
     applicabilityHints: Array.isArray(raw.applicabilityHints) ? raw.applicabilityHints.slice() : [],
   };
@@ -228,6 +231,11 @@ function looksLikeHistoricalSibling(candidate, context = {}) {
   return false;
 }
 
+function explicitForwardRequirement(candidate) {
+  const text = `${candidate?.name || ''} ${candidate?.evidence || ''}`;
+  return !/mods requiring this file/i.test(text) && EXPLICIT_FORWARD_REQUIRED.test(text);
+}
+
 function candidateRelevance(candidate, context = {}) {
   const c = candidate || {};
   const source = String(c.source || 'UNKNOWN').toUpperCase();
@@ -237,38 +245,84 @@ function candidateRelevance(candidate, context = {}) {
   if (decision?.resolved && decision.status === 'REQUIRED') {
     return { blocking: true, disposition: 'BLOCKING_REQUIRED_RULE', reason: 'REGISTRY_REQUIRED' };
   }
-  if (c.requiredHint || source === 'REQUIREMENTS_FORWARD') {
-    return { blocking: true, disposition: 'BLOCKING_REQUIRED', reason: 'FORWARD_OR_EXPLICIT_REQUIRED' };
+
+  // Natural-language description mining is advisory evidence only. A sentence that
+  // happens to contain "required" must never authorize or block a download by itself.
+  if (source === 'DESCRIPTION_TEXT') {
+    return { blocking: false, disposition: 'NON_BLOCKING_DESCRIPTION_TEXT', reason: 'TEXT_ONLY_NEVER_HARD_REQUIRED' };
   }
-  if (c.installed || ['INSTALLED_COMPONENT', 'LOCAL_FOMOD'].includes(source)) {
-    return { blocking: true, disposition: 'BLOCKING_INSTALLED_CONTEXT', reason: 'EXACT_LOCAL_COMPONENT_EVIDENCE' };
+
+  // Description links are also advisory unless they are a direct Chinese translation.
+  // Compatibility links are checked later by the explicit patch-applicability gate.
+  if (source === 'DESCRIPTION_LINK') {
+    if (c.kind === 'TRANSLATION' && c.family === 'ZH_CN') {
+      return { blocking: true, disposition: 'BLOCKING_TRANSLATION_LINK', reason: 'DIRECT_ZH_CN_TRANSLATION' };
+    }
+    return { blocking: false, disposition: 'NON_BLOCKING_DESCRIPTION_LINK', reason: 'LINK_ONLY_NO_EXACT_COMPONENT_RELATION' };
   }
+
+  if (source === 'REQUIREMENTS_REVERSE') {
+    return { blocking: false, disposition: 'NON_BLOCKING_REVERSE_UNINSTALLED', reason: 'DOWNSTREAM_RELATION_NOT_A_COMPANION' };
+  }
+
+  // Nexus Requirements are prerequisites, not companion archives. If the prerequisite
+  // is already enabled, it is satisfied and must not block updating the Main. Only an
+  // explicit, positively parsed requirement that is missing/disabled/unknown can HOLD.
+  if (source === 'REQUIREMENTS_FORWARD') {
+    if (envReason === 'REQUIRED_DEPENDENCY_ENABLED') {
+      return { blocking: false, disposition: 'NON_BLOCKING_REQUIRED_DEPENDENCY_SATISFIED', reason: envReason };
+    }
+    if (!explicitForwardRequirement(c)) {
+      return { blocking: false, disposition: 'NON_BLOCKING_REQUIREMENTS_UNPROVEN', reason: 'GENERIC_REQUIREMENTS_SECTION_NOT_EXPLICIT' };
+    }
+    return { blocking: true, disposition: 'BLOCKING_REQUIRED_DEPENDENCY', reason: envReason || 'EXPLICIT_FORWARD_REQUIREMENT' };
+  }
+
   if (looksLikeHistoricalSibling(c, context)) {
     return { blocking: false, disposition: 'NON_BLOCKING_HISTORICAL_SIBLING', reason: 'OLDER_OR_SAME_PRODUCT_FILE' };
   }
   if (c.optionalHint) {
     return { blocking: false, disposition: 'NON_BLOCKING_OPTIONAL', reason: 'EXPLICIT_OPTIONAL_NOT_EXACTLY_INSTALLED' };
   }
-  if (c.installedContextMatch) {
-    return { blocking: true, disposition: 'BLOCKING_INSTALLED_CONTEXT', reason: 'STRONG_ACTIVE_CONTEXT_MATCH' };
+
+  if (source === 'SAME_PAGE_FILE') {
+    if (c.kind === 'TRANSLATION' && c.family === 'ZH_CN') {
+      return { blocking: true, disposition: 'BLOCKING_SAME_PAGE_TRANSLATION', reason: 'DIRECT_ZH_CN_TRANSLATION' };
+    }
+    if (c.requiredHint || EXPLICIT_SAME_PAGE_REQUIRED.test(`${c.name || ''} ${c.evidence || ''}`)) {
+      return { blocking: true, disposition: 'BLOCKING_SAME_PAGE_EXPLICIT_REQUIRED', reason: 'EXPLICIT_REQUIRED_SAME_PAGE_COMPONENT' };
+    }
+    if (['PATCH', 'HOTFIX'].includes(c.kind) && envReason === 'COMPAT_COUNTERPART_ENABLED') {
+      return { blocking: true, disposition: 'BLOCKING_ACTIVE_COUNTERPART', reason: envReason };
+    }
+    return { blocking: false, disposition: 'NON_BLOCKING_SAME_PAGE_OPTION', reason: 'NON_MAIN_SAME_PAGE_FILE_WITHOUT_REQUIRED_EVIDENCE' };
   }
+
+  if (source === 'INSTALLED_COMPONENT') {
+    if (c.kind === 'TRANSLATION') {
+      return { blocking: true, disposition: 'BLOCKING_INSTALLED_TRANSLATION', reason: 'INSTALLED_TRANSLATION_MUST_STAY_IN_SYNC' };
+    }
+    if (['PATCH', 'HOTFIX'].includes(c.kind) && envReason === 'COMPAT_COUNTERPART_ENABLED') {
+      return { blocking: true, disposition: 'BLOCKING_INSTALLED_COMPAT_PATCH', reason: envReason };
+    }
+    return { blocking: false, disposition: 'NON_BLOCKING_INSTALLED_CONTEXT', reason: 'INSTALLED_NEIGHBOR_IS_NOT_PROOF_OF_COMPANION_RELATION' };
+  }
+
+  if (source === 'LOCAL_FOMOD') {
+    return { blocking: true, disposition: 'BLOCKING_LOCAL_FOMOD', reason: 'EXACT_LOCAL_FOMOD_COMPONENT_EVIDENCE' };
+  }
+
   if (source === 'RELATION_REGISTRY') {
     return { blocking: true, disposition: 'BLOCKING_LEARNED_RELATION', reason: 'CURATED_RELATION_EVIDENCE' };
   }
   if (envReason === 'COMPAT_COUNTERPART_ENABLED') {
     return { blocking: true, disposition: 'BLOCKING_ACTIVE_COUNTERPART', reason: envReason };
   }
-  if (source === 'REQUIREMENTS_REVERSE') {
-    return { blocking: false, disposition: 'NON_BLOCKING_REVERSE_UNINSTALLED', reason: 'DOWNSTREAM_MOD_NOT_ACTIVE' };
+  if (c.requiredHint) {
+    return { blocking: true, disposition: 'BLOCKING_REQUIRED', reason: 'EXPLICIT_REQUIRED_HINT' };
   }
-  if (source === 'DESCRIPTION_TEXT') {
-    return { blocking: false, disposition: 'NON_BLOCKING_DESCRIPTION_WEAK', reason: 'TEXT_ONLY_NO_REQUIRED_OR_LOCAL_MATCH' };
-  }
-  if (source === 'DESCRIPTION_LINK') {
-    if (c.kind === 'TRANSLATION' && c.family === 'ZH_CN') {
-      return { blocking: true, disposition: 'BLOCKING_TRANSLATION_LINK', reason: 'DIRECT_ZH_CN_TRANSLATION' };
-    }
-    return { blocking: false, disposition: 'NON_BLOCKING_DESCRIPTION_LINK', reason: 'LINK_ONLY_NO_REQUIRED_OR_LOCAL_MATCH' };
+  if (c.installedContextMatch) {
+    return { blocking: false, disposition: 'NON_BLOCKING_CONTEXT_MATCH_ONLY', reason: 'NAME_MATCH_ALONE_IS_NOT_COMPONENT_PROOF' };
   }
 
   return { blocking: true, disposition: 'BLOCKING_DISCOVERED', reason: 'DIRECT_COMPONENT_EVIDENCE' };
@@ -330,6 +384,7 @@ module.exports = {
   effectiveDecision,
   candidateRelevance,
   looksLikeHistoricalSibling,
+  explicitForwardRequirement,
   assessComponentDiscovery,
   countsByKind,
 };
