@@ -3,6 +3,7 @@
 
 const path = require('path');
 const { runNode } = require('./lib/process-runner');
+const { configureDirectNxmTarget } = require('./lib/mo2-nxm');
 
 const rootDir = path.resolve(__dirname, '..');
 
@@ -82,6 +83,13 @@ function main(argv = process.argv.slice(2)) {
     const modsDir = positionalModsDir(extraArgs);
     console.log('\n[Workflow] 确保 Mod Organizer 2 已运行...');
     runNode([path.join(rootDir, 'scripts', 'mo2-process-manager.js'), 'ensure', '--mods-dir', modsDir], { cwd: rootDir });
+
+    // Prefer ModOrganizer.exe itself as the NXM target. MO2 natively accepts an
+    // nxm:// command-line argument and forwards it to the already-running primary
+    // instance. This avoids deriving nxmhandler.exe from the repository directory.
+    const nxm = configureDirectNxmTarget({ modsDir });
+    if (!nxm.ok) throw new Error(`MO2_EXE_NOT_FOUND: 无法从 modsDir=${modsDir} 解析 ModOrganizer.exe`);
+    console.log(`[Workflow] NXM 交接目标: ${nxm.executable}`);
   }
 
   console.log(`\n[Workflow] 启动 ${desc.title} 流水线...`);
