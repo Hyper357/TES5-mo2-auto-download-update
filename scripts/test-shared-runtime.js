@@ -9,6 +9,11 @@ const { parseStrict } = require('./lib/cli');
 const { saveJson, loadJson } = require('./lib/fs-json');
 const { formatManifest, parseManifestText } = require('./lib/manifest');
 const { findLatestRun, findLatestReviewRun } = require('./lib/runtime');
+const {
+  normalizeNodeRequirePath,
+  nodeOptionsWithProjectPreload,
+  projectNodeEnv,
+} = require('./lib/process-runner');
 
 const cli = parseStrict(['mods', '--go', '--timeout-sec', '42', '--no-open-review'], {
   go: { type: 'boolean', flags: ['--go'], default: false },
@@ -27,6 +32,18 @@ const parsed = parseManifestText(manifest);
 assert.strictEqual(parsed.length, 1);
 assert.strictEqual(parsed[0].name, 'A B');
 assert.strictEqual(parsed[0].note, 'tx=1:3 foo');
+
+// Regression from the real Windows v4.1.4 incident: NODE_OPTIONS parsed
+// E:\SkyrimAE\work\... as E:SkyrimAEwork... before the child script started.
+// Forward slashes are valid to Node on Windows and preserve spaces when quoted.
+const winPreload = 'E:\\SkyrimAE\\work\\repo with space\\scripts\\lib\\cdp-compat-preload.js';
+const safeWinPreload = 'E:/SkyrimAE/work/repo with space/scripts/lib/cdp-compat-preload.js';
+assert.strictEqual(normalizeNodeRequirePath(winPreload), safeWinPreload);
+const winNodeOptions = nodeOptionsWithProjectPreload('--trace-warnings', winPreload);
+assert.strictEqual(winNodeOptions, `--trace-warnings --require "${safeWinPreload}"`);
+assert.strictEqual(winNodeOptions.includes('\\'), false);
+assert.strictEqual(nodeOptionsWithProjectPreload(winNodeOptions, winPreload), winNodeOptions);
+assert.strictEqual(projectNodeEnv({ NODE_OPTIONS: '' }, winPreload).NODE_OPTIONS, `--require "${safeWinPreload}"`);
 
 const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'tes5-shared-'));
 try {
