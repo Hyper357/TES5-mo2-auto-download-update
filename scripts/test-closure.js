@@ -40,8 +40,7 @@ const plan={items:[{modId:'123',latestFileId:'456',action:'DOWNLOAD',aux:{patche
   assert.match(x.out,/HOLD_COMPONENT_DISCOVERY/);
 }
 
-// v4.1.6: complete zero-candidate discovery is enough. A Main no longer needs a
-// synthetic TRANSLATION NONE registry row just to be allowed through closure.
+// Complete zero-candidate discovery is enough; no synthetic TRANSLATION NONE required.
 {
   const registry='';
   const discovery={items:[{modId:'123',mainFileId:'456',complete:true,candidateCount:0,candidates:[],unresolved:[],coverageProblems:[]}]};
@@ -50,8 +49,7 @@ const plan={items:[{modId:'123',latestFileId:'456',action:'DOWNLOAD',aux:{patche
   assert.strictEqual(x.report.holdClosure,0);
 }
 
-// Non-blocking reverse/optional evidence remains visible in discovery but does not
-// force a registry decision or hold an otherwise clean Main.
+// Non-blocking reverse/optional evidence remains visible but does not hold Main.
 {
   const registry='';
   const discovery={items:[{
@@ -69,11 +67,15 @@ const plan={items:[{modId:'123',latestFileId:'456',action:'DOWNLOAD',aux:{patche
   assert.match(x.out,/\tDOWNLOAD$/m);
 }
 
+// REQUIRED compatibility patch may append only when current environment positively proves counterpart applicability.
 {
-  const patchLine=`123\t456\t2.0\tPATCH\tUSSEP\tREQUIRED\t999\t1001\t1.2\tExample USSEP Patch\t${today}\tRequirements reverse + Files\trequired`;
+  const patchLine=`123\t456\t2.0\tPATCH\tUSSEP\tREQUIRED\t999\t1001\t1.2\tExample USSEP Patch\t${today}\tRequirements + environment\trequired`;
   const transLine=`123\t456\t2.0\tTRANSLATION\tNONE\t\t\t\t\t${today}\tTranslations checked\tnone`;
   const patchRuleId='123:456:2.0:PATCH:USSEP:REQUIRED:999:1001:0';
-  const discovery={items:[{modId:'123',mainFileId:'456',complete:true,candidateCount:1,candidateCountsByKind:{PATCH:1},unresolved:[],coverageProblems:[],candidates:[{kind:'PATCH',key:'mod:999',family:'USSEP',decision:{resolved:true,status:'REQUIRED'}}]}]};
+  const discovery={items:[{modId:'123',mainFileId:'456',complete:true,candidateCount:1,candidateCountsByKind:{PATCH:1},unresolved:[],coverageProblems:[],candidates:[{
+    kind:'PATCH',key:'mod:999',family:'USSEP',auxModId:'999',fileId:'1001',decision:{resolved:true,status:'REQUIRED'},
+    installedContextMatch:true,environmentDecision:{resolved:false,reason:'COMPAT_COUNTERPART_ENABLED',confidence:'high'}
+  }]}]};
   const audit={rules:{[patchRuleId]:{status:'PASS'}}};
   const x=runCase({registry:`${patchLine}\n${transLine}\n`,plan,discovery,audit});
   const lines=x.out.trim().split(/\r?\n/);
@@ -81,6 +83,37 @@ const plan={items:[{modId:'123',latestFileId:'456',action:'DOWNLOAD',aux:{patche
   assert.match(lines[0],/\tDOWNLOAD$/);
   assert.match(lines[1],/^999\tExample USSEP Patch\t1\.2\t/);
   assert.match(lines[1],/\t1001\tDOWNLOAD$/);
+}
+
+// v4.1.13 regression: a persisted REQUIRED Lux patch is suppressed when active profile proves Lux is absent.
+{
+  const patchLine=`123\t456\t2.0\tPATCH\tLUX\tREQUIRED\t999\t1001\t1.2\tLux - Example Patch\t${today}\told registry decision\trequired`;
+  const transLine=`123\t456\t2.0\tTRANSLATION\tNONE\t\t\t\t\t${today}\tTranslations checked\tnone`;
+  const patchRuleId='123:456:2.0:PATCH:LUX:REQUIRED:999:1001:0';
+  const discovery={items:[{modId:'123',mainFileId:'456',complete:true,candidateCount:1,candidateCountsByKind:{PATCH:1},unresolved:[],coverageProblems:[],candidates:[{
+    kind:'PATCH',key:'PATCH:mod:999:1001',family:'LUX',auxModId:'999',fileId:'1001',
+    decision:{resolved:true,status:'NOT_APPLICABLE',source:'ENVIRONMENT_GRAPH',reason:'COUNTERPART_ABSENT_FROM_PROFILE',evidence:[]},
+    environmentDecision:{resolved:true,status:'NOT_APPLICABLE',source:'ENVIRONMENT_GRAPH',reason:'COUNTERPART_ABSENT_FROM_PROFILE',confidence:'high'}
+  }]}]};
+  const audit={rules:{[patchRuleId]:{status:'PASS'}}};
+  const x=runCase({registry:`${patchLine}\n${transLine}\n`,plan,discovery,audit});
+  assert.match(x.out,/\tDOWNLOAD$/m);
+  assert.doesNotMatch(x.out,/^999\tLux - Example Patch/m);
+  assert.strictEqual(x.report.suppressedRequired,1);
+}
+
+// v4.1.13 regression: custom compatibility patch cannot auto-download without positive active-profile counterpart evidence.
+{
+  const patchLine=`123\t456\t2.0\tPATCH\tCUSTOM:CAPITAL_WINDHELM\tREQUIRED\t999\t1001\t1.2\tWindhelm Is Snowy - Capital Windhelm\t${today}\told registry decision\trequired`;
+  const patchRuleId='123:456:2.0:PATCH:CUSTOM:CAPITAL_WINDHELM:REQUIRED:999:1001:0';
+  const discovery={items:[{modId:'123',mainFileId:'456',complete:true,candidateCount:1,candidateCountsByKind:{PATCH:1},unresolved:[],coverageProblems:[],candidates:[{
+    kind:'PATCH',family:'CUSTOM:CAPITAL_WINDHELM',auxModId:'999',fileId:'1001',decision:{resolved:true,status:'REQUIRED'},
+    installedContextMatch:false,environmentDecision:{resolved:false,status:'UNRESOLVED',reason:'FAMILY_NOT_CANONICAL',confidence:'none'}
+  }]}]};
+  const audit={rules:{[patchRuleId]:{status:'PASS'}}};
+  const x=runCase({registry:`${patchLine}\n`,plan,discovery,audit});
+  assert.match(x.out,/HOLD_COMPONENT_CLOSURE/);
+  assert.doesNotMatch(x.out,/^999\tWindhelm Is Snowy/m);
 }
 
 {
@@ -113,7 +146,7 @@ const plan={items:[{modId:'123',latestFileId:'456',action:'DOWNLOAD',aux:{patche
   assert.doesNotMatch(x.out,/BodySlide.*DOWNLOAD/);
 }
 
-// v4.0: a high-confidence active-profile NOT_APPLICABLE compatibility decision can close PATCH/HOTFIX without a persisted registry row.
+// High-confidence active-profile NOT_APPLICABLE compatibility decision can close PATCH/HOTFIX without persisted registry row.
 {
   const transLine=`123\t456\t2.0\tTRANSLATION\tNONE\t\t\t\t\t${today}\tTranslations checked\tnone`;
   const discovery={items:[{
@@ -129,7 +162,7 @@ const plan={items:[{modId:'123',latestFileId:'456',action:'DOWNLOAD',aux:{patche
   assert.strictEqual(x.report.items[0].environmentResolved[0].family,'LUX');
 }
 
-// A required Resource missing from the profile is never auto-closed by Environment Graph.
+// Required Resource missing from profile is never auto-closed by Environment Graph.
 {
   const transLine=`123\t456\t2.0\tTRANSLATION\tNONE\t\t\t\t\t${today}\tTranslations checked\tnone`;
   const discovery={items:[{
