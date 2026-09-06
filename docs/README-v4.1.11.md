@@ -1,0 +1,1 @@
+Temporary planning doc; superseded by PR.
