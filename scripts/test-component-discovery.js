@@ -48,9 +48,9 @@ assert.strictEqual(candidateRuleMatches(
 ), true);
 
 const raw = [
-  { source: 'REQUIREMENTS_FORWARD', kind: 'RESOURCE', auxModId: '10', name: 'Required Framework', evidence: 'Nexus requirements', mainName: 'Example Main', requiredHint: true },
-  { source: 'SAME_PAGE_FILE', fileId: '20', version: '1.0', name: 'HDT-SMP Physics Files', mainName: 'Example Main' },
-  { source: 'SAME_PAGE_FILE', fileId: '30', version: '1.0', name: 'HOTFIX - missing textures', mainName: 'Example Main' },
+  { source: 'REQUIREMENTS_FORWARD', kind: 'RESOURCE', auxModId: '10', name: 'Required Framework', evidence: 'This mod requires Required Framework', mainName: 'Example Main', requiredHint: true },
+  { source: 'SAME_PAGE_FILE', fileId: '20', version: '1.0', name: 'HDT-SMP Physics Files', mainName: 'Example Main', requiredHint: true, evidence: 'required files component' },
+  { source: 'SAME_PAGE_FILE', fileId: '30', version: '1.0', name: 'HOTFIX - missing textures', mainName: 'Example Main', requiredHint: true, evidence: 'required file hotfix' },
 ];
 const merged = mergeComponentCandidates(raw);
 assert.strictEqual(merged.length, 3);
@@ -97,7 +97,7 @@ assert.strictEqual(historical.complete, true);
 assert.strictEqual(historical.nonBlocking.length, 1);
 assert.strictEqual(historical.nonBlocking[0].relevance.disposition, 'NON_BLOCKING_HISTORICAL_SIBLING');
 
-// A reverse Nexus requirement is a downstream consumer, not automatically a Main companion.
+// Reverse Nexus requirements are downstream consumers, never companion download authorization.
 const reverseOnly = assessComponentDiscovery({
   candidates: [{
     kind: 'PATCH', family: 'CUSTOM:SOME_DOWNSTREAM_MOD', source: 'REQUIREMENTS_REVERSE', key: 'PATCH:mod:900:',
@@ -129,7 +129,7 @@ assert.strictEqual(forwardMarkupAmbiguous.complete, true);
 assert.strictEqual(forwardMarkupAmbiguous.coverageProblems.length, 0);
 assert.strictEqual(forwardMarkupAmbiguous.advisoryCoverage.length, 1);
 
-// If the same downstream/companion evidence matches active local context, it becomes blocking again.
+// Even an installed downstream consumer stays advisory: reverse dependency does not mean companion file.
 const reverseInstalled = assessComponentDiscovery({
   candidates: [{
     kind: 'PATCH', family: 'CUSTOM:SOME_DOWNSTREAM_MOD', source: 'REQUIREMENTS_REVERSE', key: 'PATCH:mod:900:',
@@ -138,9 +138,9 @@ const reverseInstalled = assessComponentDiscovery({
   rules: [],
   coverage: { requirementsForward: { required: true, complete: true }, description: { required: true, complete: true } },
 });
-assert.strictEqual(reverseInstalled.complete, false);
-assert.strictEqual(reverseInstalled.unresolved.length, 1);
-assert.strictEqual(reverseInstalled.unresolved[0].relevance.disposition, 'BLOCKING_INSTALLED_CONTEXT');
+assert.strictEqual(reverseInstalled.complete, true);
+assert.strictEqual(reverseInstalled.unresolved.length, 0);
+assert.strictEqual(reverseInstalled.nonBlocking[0].relevance.disposition, 'NON_BLOCKING_REVERSE_UNINSTALLED');
 
 // Explicit optional same-page evidence does not hold an otherwise clean Main.
 const optionalAssessed = assessComponentDiscovery({
@@ -178,10 +178,11 @@ assert.strictEqual(envResolved.unresolved.length, 0);
 assert.strictEqual(envResolved.candidates[0].decision.source, 'ENVIRONMENT_GRAPH');
 assert.strictEqual(envResolved.candidates[0].decision.status, 'NOT_APPLICABLE');
 
-// Environment hints must not auto-resolve required resources.
+// A positively explicit required Resource that is absent still HOLDs.
 const envRequiredStillHeld = assessComponentDiscovery({
   candidates: [{
     kind: 'RESOURCE', family: 'GENERAL', source: 'REQUIREMENTS_FORWARD', key: 'RESOURCE:mod:99:', requiredHint: true,
+    name: 'Missing Runtime Library', evidence: 'This mod requires Missing Runtime Library',
     environmentDecision: {
       source: 'ENVIRONMENT_GRAPH', resolved: false, status: 'UNRESOLVED', confidence: 'high', reason: 'REQUIRED_DEPENDENCY_ABSENT', evidence: [],
     },
