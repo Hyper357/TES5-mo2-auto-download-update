@@ -17,10 +17,26 @@ const {
 const ROOT = path.resolve(__dirname, '..', '..');
 const GAME_DOMAIN = 'skyrimspecialedition';
 const MO2_GAME_NAME = 'SkyrimSE';
+const targetLocks = new Map();
 
 function sleep(ms) { return new Promise(resolve => setTimeout(resolve, ms)); }
 function nowMs() { return Number(process.hrtime.bigint() / 1000000n); }
 function elapsed(start) { return Math.max(0, nowMs() - start); }
+
+async function withTargetLock(key, fn) {
+  const previous = targetLocks.get(key) || Promise.resolve();
+  let release;
+  const gate = new Promise(resolve => { release = resolve; });
+  const chain = previous.then(() => gate);
+  targetLocks.set(key, chain);
+  await previous;
+  try {
+    return await fn();
+  } finally {
+    release();
+    if (targetLocks.get(key) === chain) targetLocks.delete(key);
+  }
+}
 
 function expectedBytes(exact) {
   const n = Number(exact?.size_in_bytes || 0);
@@ -245,7 +261,7 @@ function atomicPublishFromSameVolume({ sourcePath, downloadsDir, archiveName, fi
   }
 }
 
-async function runDirectTarget({ row, downloads, sevenzip, timeoutSec = 600, session }) {
+async function runDirectTargetUnlocked({ row, downloads, sevenzip, timeoutSec = 600, session }) {
   if (!row?.modId || !row?.fileId) throw Object.assign(new Error('DIRECT_ROW_IDENTITY_MISSING'), { code: 'DIRECT_ROW_IDENTITY_MISSING' });
   if (!session?.api || !session?.apiKey || !session?.page) throw Object.assign(new Error('DIRECT_SESSION_MISSING'), { code: 'DIRECT_SESSION_MISSING' });
 
@@ -337,10 +353,18 @@ async function runDirectTarget({ row, downloads, sevenzip, timeoutSec = 600, ses
   }
 }
 
+async function runDirectTarget(args) {
+  const row = args?.row || {};
+  const downloads = path.resolve(args?.downloads || '.');
+  const key = `${downloads}|${String(row.modId || '')}:${String(row.fileId || '')}`;
+  return withTargetLock(key, () => runDirectTargetUnlocked(args));
+}
+
 module.exports = {
   expectedBytes,
   fileNameForExact,
   testArchive,
+  withTargetLock,
   extractSignedNxmFast,
   normalizePageCount,
   createDirectSession,
