@@ -17,7 +17,9 @@ const KNOWN_FAMILIES = [
   ['LOTD', /\b(lotd|legacy of the dragonborn)\b/i],
   ['LUX_ORBIS', /\blux\s+orbis\b/i],
   ['LUX_VIA', /\blux\s+via\b/i],
-  ['LUX', /\blux\b/i],
+  // Plain Lux is a distinct ecosystem from Lux Orbis / Lux Via. The negative
+  // look-ahead prevents an Orbis-only profile from satisfying a Lux patch.
+  ['LUX', /\blux\b(?!\s+(?:orbis|via)\b)/i],
   ['JK_SKYRIM', /\bjk'?s?\s+(?:skyrim|interiors?|outdoors?|whiterun|solitude|riften|windhelm|markarth)\b/i],
   ['AI_OVERHAUL', /\bai\s+overhaul\b/i],
   ['WACCF', /\b(waccf|weapons armor clothing and clutter fixes)\b/i],

@@ -4,11 +4,12 @@
 // Main -> required component families -> discovered Translation closure gate.
 // v4.0 may accept a narrow, high-confidence NOT_APPLICABLE decision from a resolved MO2 profile graph.
 // v4.1.6 distinguishes blocking component candidates from non-blocking discovery evidence.
+// v4.1.13 requires positive applicability evidence before a compatibility PATCH/HOTFIX registry rule may append a download.
 
 const fs = require('fs');
 const path = require('path');
 const { parseRegistry, findRules, isFresh } = require('./lib/aux-registry');
-const { COMPONENT_KINDS } = require('./lib/component-discovery');
+const { COMPONENT_KINDS, candidateRuleMatches } = require('./lib/component-discovery');
 
 function argValue(name, fallback = '') { const i = process.argv.indexOf(name); return i >= 0 ? process.argv[i + 1] : fallback; }
 function parseManifest(file) {
@@ -48,8 +49,6 @@ function candidateCountsByKind(pd) {
     out[k] = (out[k] || 0) + 1;
   }
   if (!Object.keys(out).length && !Array.isArray(pd?.candidates) && Number(pd?.candidateCount || 0) > 0) {
-    // Compatibility fallback for pre-v4.1.6 discovery payloads that did not carry
-    // per-candidate relevance. New payloads always include candidates/relevance.
     if (pd?.candidateCountsByKind) return pd.candidateCountsByKind;
     out.PATCH = Number(pd.candidateCount || 0);
   }
@@ -68,9 +67,35 @@ function discoveryCandidatesOfKind(pd, kind) {
   return (pd?.candidates || []).filter(c =>
     String(c.kind || 'PATCH').toUpperCase() === kind && c?.relevance?.blocking !== false);
 }
+function allDiscoveryCandidatesOfKind(pd, kind) {
+  return (pd?.candidates || []).filter(c => String(c.kind || 'PATCH').toUpperCase() === kind);
+}
 function isTrustedEnvironmentResolution(candidate) {
   const d = candidate?.decision;
   return d?.resolved === true && d?.source === 'ENVIRONMENT_GRAPH' && d?.status === 'NOT_APPLICABLE';
+}
+function positivePatchApplicability(candidate) {
+  const env = candidate?.environmentDecision || {};
+  return candidate?.installed === true ||
+    candidate?.installedContextMatch === true ||
+    candidate?.requiredHint === true ||
+    (env.reason === 'COMPAT_COUNTERPART_ENABLED' && env.confidence === 'high');
+}
+function requiredPatchApplicability(rule, discovered) {
+  const kind = String(rule?.kind || '').toUpperCase();
+  if (!['PATCH', 'HOTFIX'].includes(kind)) return { decision: 'ALLOW', reason: 'NON_COMPAT_COMPONENT' };
+  const matching = (discovered || []).filter(c => candidateRuleMatches(c, rule));
+  if (!matching.length) return { decision: 'HOLD', reason: 'REQUIRED_PATCH_WITHOUT_DISCOVERY_EVIDENCE', matching: [] };
+  const envNo = matching.filter(isTrustedEnvironmentResolution);
+  const positive = matching.filter(positivePatchApplicability);
+  if (envNo.length && positive.length) {
+    return { decision: 'HOLD', reason: 'PATCH_APPLICABILITY_CONFLICT', matching };
+  }
+  if (envNo.length) {
+    return { decision: 'SKIP', reason: envNo[0]?.decision?.reason || 'COUNTERPART_NOT_ENABLED', matching };
+  }
+  if (positive.length) return { decision: 'ALLOW', reason: 'POSITIVE_COUNTERPART_EVIDENCE', matching: positive };
+  return { decision: 'HOLD', reason: 'PATCH_APPLICABILITY_UNPROVEN', matching };
 }
 
 function main() {
@@ -160,13 +185,10 @@ function main() {
     const conflicts = [];
     const staleRules = [];
     const required = [];
+    const suppressedRequired = [];
     const environmentResolved = [];
     const counts = candidateCountsByKind(pd);
 
-    // v4.1.6: no universal TRANSLATION bookkeeping requirement. Complete discovery
-    // with zero blocking translation candidates is itself proof that there is no
-    // translation relationship to close for this exact Main. A discovered/installed
-    // translation still enters this set and must resolve exactly like other components.
     const kindsToCheck = new Set();
     for (const kind of COMPONENT_KINDS) if ((counts[kind] || 0) > 0) kindsToCheck.add(kind);
     for (const r of relevant) if (COMPONENT_KINDS.includes(r.kind)) kindsToCheck.add(r.kind);
@@ -174,6 +196,7 @@ function main() {
     for (const kind of kindsToCheck) {
       const kindRules = relevant.filter(r => r.kind === kind);
       const discovered = discoveryCandidatesOfKind(pd, kind);
+      const allDiscovered = allDiscoveryCandidatesOfKind(pd, kind);
       const autoResolved = discovered.filter(isTrustedEnvironmentResolution);
       environmentResolved.push(...autoResolved.map(c => ({ kind, family: c.family || '', key: c.key || '', status: c.decision.status, reason: c.decision.reason || '', evidence: c.decision.evidence || [] })));
       const registryNeeded = discovered.filter(c => !isTrustedEnvironmentResolution(c));
@@ -220,6 +243,16 @@ function main() {
           const ar = audit?.rules?.[rule.id];
           if (!ar || ar.status !== 'PASS') { invalidRules.push(`${kind}:registry-audit-${ar?.status || 'MISSING'}:${rule.id}`); continue; }
         }
+
+        const applicability = requiredPatchApplicability(rule, allDiscovered);
+        if (applicability.decision === 'SKIP') {
+          suppressedRequired.push({ id: rule.id, kind, family: rule.family || '', reason: applicability.reason });
+          continue;
+        }
+        if (applicability.decision === 'HOLD') {
+          invalidRules.push(`${kind}:REQUIRED-applicability-unproven:${rule.id}:${applicability.reason}`);
+          continue;
+        }
         required.push(rule);
       }
     }
@@ -247,6 +280,7 @@ function main() {
         invalidRules,
         conflicts,
         staleRules,
+        suppressedRequired,
         environmentResolved,
         scannerEvidence: p?.aux || null,
         componentDiscovery: pd || null,
@@ -258,7 +292,7 @@ function main() {
     const released = {
       ...row,
       action: 'DOWNLOAD',
-      note: `${row.note || ''}; tx=${tx}; closure=PASS; componentDiscovery=${requireDiscovery ? 'PASS' : 'LEGACY'}; environmentResolved=${environmentResolved.length}`.replace(/^;\s*/, ''),
+      note: `${row.note || ''}; tx=${tx}; closure=PASS; componentDiscovery=${requireDiscovery ? 'PASS' : 'LEGACY'}; environmentResolved=${environmentResolved.length}; suppressedRequired=${suppressedRequired.length}`.replace(/^;\s*/, ''),
     };
     finalRows.push(released);
     for (const rule of required) {
@@ -284,6 +318,7 @@ function main() {
       tx,
       closure: 'PASS',
       environmentResolved,
+      suppressedRequired,
       componentDiscovery: pd || null,
       patchDiscovery: pd || null,
       requiredAux: required.map(r => ({ id: r.id, kind: r.kind, family: r.family || '', modId: r.auxModId, fileId: r.auxFileId, version: r.auxVersion, name: r.auxName })),
@@ -311,6 +346,7 @@ function main() {
       acc[k] = (acc[k] || 0) + 1;
       return acc;
     }, {}),
+    suppressedRequired: report.reduce((n, x) => n + (x.suppressedRequired?.length || 0), 0),
     environmentResolved: report.reduce((n, x) => n + (x.environmentResolved?.length || 0), 0),
     holdClosure: finalRows.filter(r => /^HOLD_(?:COMPONENT|CLOSURE|PATCH_DISCOVERY)/.test(r.action)).length,
     items: report,

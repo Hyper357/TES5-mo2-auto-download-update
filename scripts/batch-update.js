@@ -9,6 +9,8 @@ const { parseManifestText, formatManifest } = require('./lib/manifest');
 const { findLatestRun } = require('./lib/runtime');
 const { runNode } = require('./lib/process-runner');
 const { scanExactDownload } = require('./lib/download-guard');
+const { buildEnvironmentGraph } = require('./lib/mo2-environment');
+const { assessAuxRowEnvironment } = require('./lib/aux-applicability');
 const {
   buildLocalIndex,
   localExecutionGuard,
@@ -47,8 +49,9 @@ function runtimeConfig(runDir) {
   };
 }
 
-function chooseTransactions({ groups, count, modsDir, downloadsDir }) {
+function chooseTransactions({ groups, count, modsDir, downloadsDir, environmentGraph = null }) {
   const localIndex = buildLocalIndex(modsDir);
+  const graph = environmentGraph || buildEnvironmentGraph({ modsDir });
   const selected = [];
   const excluded = [];
 
@@ -75,7 +78,32 @@ function chooseTransactions({ groups, count, modsDir, downloadsDir }) {
       excluded.push({ tx, modId: main.modId, name: main.name, reason: 'TARGET_ARCHIVE_INFLIGHT', decision: 'HOLD' });
       continue;
     }
-    selected.push({ tx, list, main, guard });
+
+    const kept = [main];
+    const suppressedAux = [];
+    let auxHold = null;
+    for (const aux of list) {
+      if (aux === main) continue;
+      const applicability = assessAuxRowEnvironment(aux, graph);
+      if (applicability.decision === 'SKIP') {
+        suppressedAux.push({ modId: aux.modId, fileId: aux.fileId, name: aux.name, ...applicability });
+        continue;
+      }
+      if (applicability.decision === 'HOLD') {
+        auxHold = { modId: aux.modId, fileId: aux.fileId, name: aux.name, ...applicability };
+        break;
+      }
+      kept.push(aux);
+    }
+    if (auxHold) {
+      excluded.push({
+        tx, modId: main.modId, name: main.name,
+        reason: 'AUX_APPLICABILITY_UNPROVEN', decision: 'HOLD', aux: auxHold,
+      });
+      continue;
+    }
+
+    selected.push({ tx, list: kept, main, guard, suppressedAux });
     if (selected.length >= count) break;
   }
   return { selected, excluded };
@@ -99,7 +127,8 @@ function main(argv = process.argv.slice(2)) {
   if (!browser.ok) throw new Error(`BATCH_BROWSER_NOT_MANAGED: ${browser.stderr || browser.stdout}`);
   runNode([path.join(ROOT, 'scripts', 'mo2-process-manager.js'), 'ensure', '--mods-dir', cfg.modsDir], { cwd: ROOT });
 
-  const choice = chooseTransactions({ groups, count, modsDir: cfg.modsDir, downloadsDir: cfg.downloadsDir });
+  const environmentGraph = buildEnvironmentGraph({ modsDir: cfg.modsDir });
+  const choice = chooseTransactions({ groups, count, modsDir: cfg.modsDir, downloadsDir: cfg.downloadsDir, environmentGraph });
   if (!choice.selected.length) {
     throw new Error(`BATCH_NO_ELIGIBLE_TRANSACTIONS: source=${runDir} excluded=${choice.excluded.length}`);
   }
@@ -120,6 +149,7 @@ function main(argv = process.argv.slice(2)) {
     selectedTransactions: choice.selected.length,
     selectedRows: selectedRows.length,
     concurrency,
+    environmentProfile: environmentGraph.profile?.name || '',
     selected: choice.selected.map(x => ({
       tx: x.tx,
       modId: x.main.modId,
@@ -128,6 +158,7 @@ function main(argv = process.argv.slice(2)) {
       localVersions: x.guard.localVersions || [],
       targetVersion: x.main.ver,
       companionRows: Math.max(0, x.list.length - 1),
+      suppressedAuxNotApplicable: x.suppressedAux || [],
     })),
     excludedBeforeSelection: choice.excluded,
   };
@@ -139,6 +170,7 @@ function main(argv = process.argv.slice(2)) {
   console.log(`selectedTransactions=${choice.selected.length}/${count} rows=${selectedRows.length} concurrency=${concurrency}`);
   for (const item of selectionReport.selected) {
     console.log(`  ✓ ${item.modId}:${item.fileId} | ${item.name} | ${item.localVersions.join(',') || '?'} -> ${item.targetVersion}`);
+    for (const aux of item.suppressedAuxNotApplicable || []) console.log(`    ↳ SKIP aux ${aux.modId}:${aux.fileId} ${aux.name} (${aux.reason})`);
   }
   console.log('========================================================');
 
@@ -160,9 +192,7 @@ function main(argv = process.argv.slice(2)) {
   if (result.stdout) process.stdout.write(result.stdout);
   if (result.stderr) process.stderr.write(result.stderr);
   console.log(`\nBatch artifacts: ${batchDir}`);
-  if (!result.ok) {
-    process.exitCode = Number.isInteger(result.status) ? result.status : 2;
-  }
+  if (!result.ok) process.exitCode = Number.isInteger(result.status) ? result.status : 2;
 }
 
 if (require.main === module) {
