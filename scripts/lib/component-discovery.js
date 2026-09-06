@@ -29,6 +29,8 @@ const CONTEXT_NOISE = new Set([
   'alpha','beta','preview','old','legacy','archive','archived','release','latest','main','loose','optional',
   'file','files','version','update','updated','patch','fix','hotfix','resource','resources','plugin','plugins',
 ]);
+const DIRECT_COMPONENT_WORDS = /(patch|hotfix|physics|bodyslide|body\s*slide|texture|mesh|resource|framework|translation|chinese|mandarin|chs|config|preset|addon|add-on|optional)/i;
+const ZH_LABEL = /(chinese|mandarin|chs|zh[-_ ]?cn|simplified|中文|汉化|简中)/i;
 
 function classifyComponent(text, meta = {}) {
   const raw = String(text || '');
@@ -97,6 +99,7 @@ function normalizeCandidate(raw) {
   const combined = `${raw.name || ''} ${raw.evidence || ''}`;
   const kind = String(raw.kind || classifyComponent(combined, { source })).toUpperCase();
   if (!COMPONENT_KINDS.includes(kind)) return null;
+  if (source === 'DESCRIPTION_LINK' && kind === 'TRANSLATION' && !ZH_LABEL.test(String(raw.name || ''))) return null;
   const family = raw.family || componentFamily(kind, combined, raw.mainName || '');
   return {
     kind,
@@ -216,11 +219,13 @@ function effectiveDecision(candidate, rules) {
 
 function looksLikeHistoricalSibling(candidate, context = {}) {
   if (String(candidate?.source || '') !== 'SAME_PAGE_FILE') return false;
+  const mainName = context.mainName || candidate.mainName || '';
+  const overlap = tokenOverlap(candidate.name || '', mainName);
+  if (!overlap.count) return false;
   const mainVersion = context.mainVersion || '';
-  if (!candidate?.version || !mainVersion) return false;
-  if (compareVersions(candidate.version, mainVersion) >= 0) return false;
-  const overlap = tokenOverlap(candidate.name || '', context.mainName || candidate.mainName || '');
-  return overlap.count >= 1 && overlap.ratio >= 0.5;
+  if (candidate?.version && mainVersion && compareVersions(candidate.version, mainVersion) < 0 && overlap.ratio >= 0.5) return true;
+  if (!DIRECT_COMPONENT_WORDS.test(String(candidate.name || '')) && overlap.ratio >= 0.75) return true;
+  return false;
 }
 
 function candidateRelevance(candidate, context = {}) {
@@ -239,7 +244,7 @@ function candidateRelevance(candidate, context = {}) {
     return { blocking: true, disposition: 'BLOCKING_INSTALLED_CONTEXT', reason: 'EXACT_LOCAL_COMPONENT_EVIDENCE' };
   }
   if (looksLikeHistoricalSibling(c, context)) {
-    return { blocking: false, disposition: 'NON_BLOCKING_HISTORICAL_SIBLING', reason: 'OLDER_SAME_PRODUCT_FILE' };
+    return { blocking: false, disposition: 'NON_BLOCKING_HISTORICAL_SIBLING', reason: 'OLDER_OR_SAME_PRODUCT_FILE' };
   }
   if (c.optionalHint) {
     return { blocking: false, disposition: 'NON_BLOCKING_OPTIONAL', reason: 'EXPLICIT_OPTIONAL_NOT_EXACTLY_INSTALLED' };
@@ -279,8 +284,20 @@ function assessComponentDiscovery({ candidates, rules, coverage, mainVersion = '
   const blockingCandidates = assessed.filter(c => c.relevance?.blocking !== false);
   const nonBlocking = assessed.filter(c => c.relevance?.blocking === false);
   const unresolved = blockingCandidates.filter(c => !c.decision.resolved);
+  const advisoryCoverage = Object.entries(coverage || {})
+    .filter(([source, v]) => {
+      if (!v || v.complete) return false;
+      if (source === 'requirementsReverse') return true;
+      return source === 'requirementsForward' && v.status === 'SECTION_NOT_PROVEN' && coverage?.description?.complete;
+    })
+    .map(([source, v]) => ({ source, status: v.status || 'INCOMPLETE', detail: v.detail || '' }));
   const coverageProblems = Object.entries(coverage || {})
-    .filter(([, v]) => v && v.required && !v.complete)
+    .filter(([source, v]) => {
+      if (!v || !v.required || v.complete) return false;
+      if (source === 'requirementsReverse') return false;
+      if (source === 'requirementsForward' && v.status === 'SECTION_NOT_PROVEN' && coverage?.description?.complete) return false;
+      return true;
+    })
     .map(([source, v]) => ({ source, status: v.status || 'INCOMPLETE', detail: v.detail || '' }));
   return {
     candidates: assessed,
@@ -288,6 +305,7 @@ function assessComponentDiscovery({ candidates, rules, coverage, mainVersion = '
     nonBlocking,
     unresolved,
     coverageProblems,
+    advisoryCoverage,
     coverageComplete: coverageProblems.length === 0,
     complete: coverageProblems.length === 0 && unresolved.length === 0,
   };
