@@ -133,8 +133,6 @@ function compactFile(file) {
 }
 
 function compatibilityProbe({ mine, candidate, localName = '', installationFile = '', profile = null }) {
-  // Author-entered candidate.version is intentionally neutralized for compatibility probing.
-  // Runtime/body/role/category/name-family evidence still applies.
   const probe = { ...candidate, version: mine?.version || candidate?.version || '' };
   return scoreCandidate({ mine, candidate: probe, localName, installationFile, profile });
 }
@@ -186,6 +184,47 @@ function ignoredTarget(meta, target) {
   return compareVersions(target.version, meta.ignoredVersion) <= 0;
 }
 
+function localTargetVersionConflict(meta, mine, target) {
+  const localVersion = meta?.version || meta?.installedVersion || '';
+  if (!validVersion(localVersion) || !validVersion(target?.version)) return null;
+  if (String(mine?.file_id || '') === String(target?.file_id || '')) return null;
+  const cmp = compareVersions(localVersion, target.version);
+  if (cmp === 0) {
+    return {
+      reason: 'LOCAL_VERSION_MATCHES_TARGET_FILE_ID_CONFLICT',
+      localVersion,
+      resolvedFileId: String(mine?.file_id || ''),
+      resolvedVersion: mine?.version || '',
+      targetFileId: String(target?.file_id || ''),
+      targetVersion: target?.version || '',
+    };
+  }
+  if (cmp > 0) {
+    return {
+      reason: 'LOCAL_VERSION_NEWER_THAN_TARGET',
+      localVersion,
+      resolvedFileId: String(mine?.file_id || ''),
+      resolvedVersion: mine?.version || '',
+      targetFileId: String(target?.file_id || ''),
+      targetVersion: target?.version || '',
+    };
+  }
+  return null;
+}
+
+function localConflictHold({ conflict, target, mo2, sourceEvidence }) {
+  return {
+    status: 'HOLD_UPDATE_ELIGIBILITY',
+    reason: conflict.reason,
+    updateNeeded: false,
+    priority: 90,
+    mo2,
+    target: compactFile(target),
+    evidence: [...sourceEvidence, 'LOCAL_INSTALLED_VERSION_CONTRADICTION'],
+    localIdentityConflict: conflict,
+  };
+}
+
 function assessUpdateEligibility({ files = [], fileUpdates = [], mine, meta = {}, localName = '', installationFile = '', profile = null }) {
   const mo2 = mo2UpdateSignal(meta);
   if (!mine) {
@@ -203,6 +242,8 @@ function assessUpdateEligibility({ files = [], fileUpdates = [], mine, meta = {}
   const chain = chainCandidate({ files, fileUpdates, mine, localName, installationFile, profile });
   if (chain.candidate) {
     const target = chain.candidate;
+    const conflict = localTargetVersionConflict(meta, mine, target);
+    if (conflict) return localConflictHold({ conflict, target, mo2, sourceEvidence: ['NEXUS_EXACT_UPDATE_CHAIN'] });
     if (ignoredTarget(meta, target)) {
       return {
         status: 'SKIP_IGNORED_UPDATE',
@@ -242,6 +283,8 @@ function assessUpdateEligibility({ files = [], fileUpdates = [], mine, meta = {}
   const fallback = fallbackNewerCandidate({ files, mine, localName, installationFile, profile });
   if (fallback.candidate) {
     const target = fallback.candidate;
+    const conflict = localTargetVersionConflict(meta, mine, target);
+    if (conflict) return localConflictHold({ conflict, target, mo2, sourceEvidence: ['NEWER_COMPATIBLE_FILE_UPLOAD'] });
     if (ignoredTarget(meta, target)) {
       return {
         status: 'SKIP_IGNORED_UPDATE',
@@ -335,6 +378,7 @@ module.exports = {
   mo2UpdateSignal,
   normalizeUpdateEdge,
   updateChainSuccessors,
+  localTargetVersionConflict,
   assessUpdateEligibility,
   eligibilityCounts,
 };
