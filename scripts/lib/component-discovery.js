@@ -199,14 +199,65 @@ function effectiveDecision(candidate, rules) {
   return resolveCandidate(candidate, rules);
 }
 
+function candidateRelevance(candidate) {
+  const c = candidate || {};
+  const source = String(c.source || 'UNKNOWN').toUpperCase();
+  const decision = c.decision || null;
+  const envReason = String(c.environmentDecision?.reason || '');
+
+  if (decision?.resolved && decision.status === 'REQUIRED') {
+    return { blocking: true, disposition: 'BLOCKING_REQUIRED_RULE', reason: 'REGISTRY_REQUIRED' };
+  }
+  if (c.requiredHint || source === 'REQUIREMENTS_FORWARD') {
+    return { blocking: true, disposition: 'BLOCKING_REQUIRED', reason: 'FORWARD_OR_EXPLICIT_REQUIRED' };
+  }
+  if (c.installed || c.installedContextMatch || ['INSTALLED_COMPONENT', 'LOCAL_FOMOD'].includes(source)) {
+    return { blocking: true, disposition: 'BLOCKING_INSTALLED_CONTEXT', reason: 'ACTIVE_OR_LOCAL_COMPONENT_EVIDENCE' };
+  }
+  if (source === 'RELATION_REGISTRY') {
+    return { blocking: true, disposition: 'BLOCKING_LEARNED_RELATION', reason: 'CURATED_RELATION_EVIDENCE' };
+  }
+  if (envReason === 'COMPAT_COUNTERPART_ENABLED') {
+    return { blocking: true, disposition: 'BLOCKING_ACTIVE_COUNTERPART', reason: envReason };
+  }
+
+  // Nexus "Mods requiring this file" describes downstream consumers of the Main.
+  // An uninstalled downstream mod is useful evidence, but is not itself a required
+  // companion of the Main update and must not create hundreds of false closure tasks.
+  if (source === 'REQUIREMENTS_REVERSE') {
+    return { blocking: false, disposition: 'NON_BLOCKING_REVERSE_UNINSTALLED', reason: 'DOWNSTREAM_MOD_NOT_ACTIVE' };
+  }
+
+  if (c.optionalHint) {
+    return { blocking: false, disposition: 'NON_BLOCKING_OPTIONAL', reason: 'EXPLICIT_OPTIONAL_NOT_ACTIVE' };
+  }
+
+  if (source === 'DESCRIPTION_TEXT') {
+    return { blocking: false, disposition: 'NON_BLOCKING_DESCRIPTION_WEAK', reason: 'TEXT_ONLY_NO_REQUIRED_OR_LOCAL_MATCH' };
+  }
+  if (source === 'DESCRIPTION_LINK') {
+    return { blocking: false, disposition: 'NON_BLOCKING_DESCRIPTION_LINK', reason: 'LINK_ONLY_NO_REQUIRED_OR_LOCAL_MATCH' };
+  }
+
+  return { blocking: true, disposition: 'BLOCKING_DISCOVERED', reason: 'DIRECT_COMPONENT_EVIDENCE' };
+}
+
 function assessComponentDiscovery({ candidates, rules, coverage }) {
-  const assessed = (candidates || []).map(c => ({ ...c, decision: effectiveDecision(c, rules) }));
-  const unresolved = assessed.filter(c => !c.decision.resolved);
+  const assessed = (candidates || []).map(c => {
+    const decision = effectiveDecision(c, rules);
+    const withDecision = { ...c, decision };
+    return { ...withDecision, relevance: candidateRelevance(withDecision) };
+  });
+  const blockingCandidates = assessed.filter(c => c.relevance?.blocking !== false);
+  const nonBlocking = assessed.filter(c => c.relevance?.blocking === false);
+  const unresolved = blockingCandidates.filter(c => !c.decision.resolved);
   const coverageProblems = Object.entries(coverage || {})
     .filter(([, v]) => v && v.required && !v.complete)
     .map(([source, v]) => ({ source, status: v.status || 'INCOMPLETE', detail: v.detail || '' }));
   return {
     candidates: assessed,
+    blockingCandidates,
+    nonBlocking,
     unresolved,
     coverageProblems,
     coverageComplete: coverageProblems.length === 0,
@@ -231,6 +282,7 @@ module.exports = {
   candidateRuleMatches,
   resolveCandidate,
   effectiveDecision,
+  candidateRelevance,
   assessComponentDiscovery,
   countsByKind,
 };
