@@ -6,7 +6,6 @@
 // loopback connections and route them to the shared browser-session endpoint.
 // This lets the pipeline coexist with a user's normal Edge/Chrome owning 9222.
 
-const path = require('path');
 const Module = require('module');
 const { getCdpUrl } = require('./browser-session');
 
@@ -39,7 +38,7 @@ function wrapPuppeteerExports(exportsObject) {
 }
 
 function disableLegacyReconnectArg(argv = process.argv) {
-  const entry = path.basename(String(argv?.[1] || '')).toLowerCase();
+  const entry = String(argv?.[1] || '').split(/[\\/]/).pop().toLowerCase();
   if (!['execute-plan.js', 'nexus-autodl.js'].includes(entry)) return false;
   let removed = false;
   for (let i = argv.length - 1; i >= 2; i--) {
