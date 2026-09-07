@@ -10,9 +10,11 @@ const { saveJson, loadJson } = require('./lib/fs-json');
 const { formatManifest, parseManifestText } = require('./lib/manifest');
 const { findLatestRun, findLatestReviewRun } = require('./lib/runtime');
 const {
+  DEFAULT_CAPTURE_MAX_BUFFER,
   normalizeNodeRequirePath,
   nodeOptionsWithProjectPreload,
   projectNodeEnv,
+  runNode,
 } = require('./lib/process-runner');
 
 const cli = parseStrict(['mods', '--go', '--timeout-sec', '42', '--no-open-review'], {
@@ -44,6 +46,16 @@ assert.strictEqual(winNodeOptions, `--trace-warnings --require "${safeWinPreload
 assert.strictEqual(winNodeOptions.includes('\\'), false);
 assert.strictEqual(nodeOptionsWithProjectPreload(winNodeOptions, winPreload), winNodeOptions);
 assert.strictEqual(projectNodeEnv({ NODE_OPTIONS: '' }, winPreload).NODE_OPTIONS, `--require "${safeWinPreload}"`);
+
+// Regression from the real v4.1.14 full-library closure run: captured child stdout
+// exceeded Node's ~1 MiB spawnSync default. The shared runner now carries a 16 MiB
+// default and exposes a per-call override for genuinely larger reports.
+assert.strictEqual(DEFAULT_CAPTURE_MAX_BUFFER, 16 * 1024 * 1024);
+const largeCapture = runNode(['-e', `process.stdout.write('x'.repeat(${2 * 1024 * 1024}))`], { capture: true });
+assert.strictEqual(largeCapture.ok, true);
+assert.strictEqual(largeCapture.errorCode, null);
+assert.strictEqual(largeCapture.maxBuffer, DEFAULT_CAPTURE_MAX_BUFFER);
+assert.ok(largeCapture.stdout.length >= 2 * 1024 * 1024);
 
 const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'tes5-shared-'));
 try {
