@@ -6,6 +6,7 @@ const path = require('path');
 const { sanitizeString } = require('./diagnostics');
 
 const CDP_PRELOAD = path.join(__dirname, 'cdp-compat-preload.js');
+const DEFAULT_CAPTURE_MAX_BUFFER = 16 * 1024 * 1024;
 
 // Node parses NODE_OPTIONS itself rather than delegating argument parsing to
 // child_process. On Windows, a quoted value containing backslashes can be
@@ -37,23 +38,31 @@ process.env.NODE_OPTIONS = nodeOptionsWithProjectPreload(process.env.NODE_OPTION
 
 function runNode(args, options = {}) {
   const capture = !!options.capture;
+  const maxBuffer = capture
+    ? Math.max(1024 * 1024, Number(options.maxBuffer || DEFAULT_CAPTURE_MAX_BUFFER))
+    : undefined;
   const r = cp.spawnSync(process.execPath, args, {
     cwd: options.cwd,
     env: projectNodeEnv(options.env || process.env),
     encoding: capture ? 'utf8' : undefined,
     windowsHide: true,
     stdio: capture ? ['ignore', 'pipe', 'pipe'] : 'inherit',
+    ...(capture ? { maxBuffer } : {}),
   });
+  const spawnError = r.error || null;
   const result = {
-    ok: r.status === 0,
+    ok: !spawnError && r.status === 0,
     status: r.status,
     signal: r.signal || null,
+    errorCode: spawnError?.code || null,
     stdout: capture ? sanitizeString(String(r.stdout || '')) : '',
     stderr: capture ? sanitizeString(String(r.stderr || '')) : '',
+    maxBuffer: capture ? maxBuffer : null,
   };
   if (!result.ok && !options.allowFailure) {
-    const detail = String(result.stderr || result.stdout || '').trim();
-    throw new Error(`命令失败: node ${args.join(' ')}${detail ? `\n${detail}` : ''}`);
+    const detail = String(result.stderr || result.stdout || spawnError?.message || '').trim();
+    const code = spawnError?.code === 'ENOBUFS' ? `PROCESS_CAPTURE_MAX_BUFFER_EXCEEDED:${maxBuffer}` : (spawnError?.code || 'CHILD_PROCESS_FAILED');
+    throw new Error(`${code}: 命令失败: node ${args.join(' ')}${detail ? `\n${detail}` : ''}`);
   }
   return result;
 }
@@ -91,6 +100,7 @@ function openDefault(target) {
 
 module.exports = {
   CDP_PRELOAD,
+  DEFAULT_CAPTURE_MAX_BUFFER,
   normalizeNodeRequirePath,
   nodeOptionsWithProjectPreload,
   projectNodeEnv,
