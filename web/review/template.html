@@ -3,7 +3,7 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width,initial-scale=1">
-  <title>TES5 MO2 自动更新 · 人工决策中心</title>
+  <title>TES5 MO2 自动更新 · 文件选择器</title>
   <style>/*__STYLE__*/</style>
 </head>
 <body>
@@ -11,8 +11,8 @@
   <div class="hero" __AUTO_MARKER__>
     <div class="hero-top">
       <div>
-        <h1>🎛️ MO2 更新决策中心</h1>
-        <div class="muted">默认只显示真正需要你做选择的 MOD。机器证据收进“技术详情”，不再整页铺开。</div>
+        <h1>📦 MO2 更新文件选择器</h1>
+        <div class="muted">直接从 Nexus 最近文件里勾选你要下载的项目。一个 MOD 可以多选；未勾选就不会下载。</div>
       </div>
       <div class="run-meta" id="run-meta"></div>
     </div>
@@ -24,20 +24,26 @@
   <div class="toolbar">
     <div class="filters" id="filters"></div>
     <div class="toolbar-right">
-      <input id="search" class="search" type="search" autocomplete="off" placeholder="搜索 MOD 名称 / modId…">
+      <input id="search" class="search" type="search" autocomplete="off" placeholder="搜索 MOD / 文件名 / modId…">
       <span class="visible-status" id="visible-status"></span>
     </div>
   </div>
 
-  <div id="root"></div>
+  <main id="root"></main>
   <div class="more-wrap"><button class="btn secondary" id="more" hidden>显示更多</button></div>
+</div>
 
-  <div class="actions">
-    <button class="btn secondary" id="save">保存已做选择</button>
-    <button class="btn primary" id="download">下载已确认项</button>
+<div class="selection-bar">
+  <div class="selection-left">
+    <div class="selection-summary" id="selection-summary">已选择 0 个文件 / 0 个 MOD</div>
     <span class="status" id="status"></span>
   </div>
+  <div class="selection-actions">
+    <button class="btn secondary" id="clear-selection" disabled>清空选择</button>
+    <button class="btn primary" id="download" disabled>下载所选文件</button>
+  </div>
 </div>
+
 <script>window.REVIEW_DATA=__REVIEW_DATA__;</script>
 <script>/*__APP__*/</script>
 </body>
