@@ -70,7 +70,59 @@ const review = {
   assert.ok(x.errors.some(e => e.code === 'REVIEW_COMPONENT_DECISION_REQUIRED'));
 }
 
-// If Main was already high-confidence and only component closure held it, reviewed download must restore Main + selected components.
+// New file-picker mode: one Nexus mod may stage multiple exact files in a single click.
+{
+  const multi = { items: [{
+    id: 'mod:73381', modId: '73381', action: 'HOLD_VARIANT_REVIEW', localFileId: '754427', blockers: [],
+    mainOptions: [
+      { modId:'73381', fileId:'801268', name:'Icy Mesh Remaster - Meshes', version:'3.40', selectable:true, branchKey:'GENERIC' },
+      { modId:'73381', fileId:'801266', name:'Icy Mesh Remaster - IcyFixes', version:'3.40', selectable:true, branchKey:'GENERIC' },
+    ],
+    recentNexusFiles: [
+      { modId:'73381', fileId:'801268', name:'Icy Mesh Remaster - Meshes', version:'3.40', category:'MAIN', active:true, selectable:true },
+      { modId:'73381', fileId:'801266', name:'Icy Mesh Remaster - IcyFixes', version:'3.40', category:'MAIN', active:true, selectable:true },
+      { modId:'73381', fileId:'754427', name:'Installed old file', version:'3.30', category:'MAIN', active:true, current:true, selectable:false },
+    ],
+    componentFamilies: [], patchFamilies: [],
+  }] };
+  const x = validateAndBuild(multi, { 'mod:73381': { selectedFiles: [
+    { modId:'73381', fileId:'801268' },
+    { modId:'73381', fileId:'801266' },
+  ] } });
+  assert.deepStrictEqual(x.errors, []);
+  assert.strictEqual(x.rows.length, 2);
+  assert.deepStrictEqual(x.rows.map(r => r.fileId).sort(), ['801266', '801268']);
+  assert.strictEqual(x.accepted[0].mode, 'MULTI_FILE_PICKER');
+  assert.strictEqual(x.accepted[0].selectedFiles.length, 2);
+  assert.ok(x.rows.every(r => /user-selected-nexus-file/.test(r.note)));
+}
+
+// File-picker selections are exact allow-listed targets; arbitrary fileIds are rejected.
+{
+  const guarded = { items: [{
+    id:'mod:42', modId:'42', action:'HOLD_VARIANT_REVIEW', localFileId:'1', blockers:[], mainOptions:[], componentFamilies:[],
+    recentNexusFiles:[{modId:'42',fileId:'2',name:'Allowed',version:'2',active:true,selectable:true}],
+  }]};
+  const x = validateAndBuild(guarded, { 'mod:42': { selectedFiles:[{modId:'42',fileId:'999'}] } });
+  assert.strictEqual(x.rows.length, 0);
+  assert.ok(x.errors.some(e => e.code === 'REVIEW_SELECTION_INVALID'));
+}
+
+// Explicit file picking stages files even when component closure is still pending; it does not claim closure.
+{
+  const closurePending = { items: [{
+    id:'mod:55', modId:'55', action:'HOLD_COMPONENT_DISCOVERY', localFileId:'10', blockers:['Component discovery 覆盖不完整：requirements / FAILED'],
+    mainOptions:[], componentFamilies:[{key:'PATCH:GENERAL',kind:'PATCH',family:'GENERAL',candidates:[]}],
+    recentNexusFiles:[{modId:'55',fileId:'11',name:'Exact Main',version:'2',category:'MAIN',active:true,selectable:true}],
+  }]};
+  const x = validateAndBuild(closurePending, { 'mod:55': { selectedFiles:[{modId:'55',fileId:'11'}] } });
+  assert.deepStrictEqual(x.errors, []);
+  assert.strictEqual(x.rows.length, 1);
+  assert.strictEqual(x.accepted[0].closurePending, true);
+  assert.match(x.rows[0].note, /closure=NOT_ASSERTED/);
+}
+
+// If Main was already high-confidence and only component closure held it, legacy reviewed download must restore Main + selected components.
 {
   const componentOnly = { items: [{
     id: 'mod:42', modId: '42', localFileId: '400', targetMainFileId: '500', targetMainVersion: '2.0', targetMainName: 'Example Main 2.0', blockers: [],
@@ -105,17 +157,21 @@ const review = {
   assert.match(x.rows[1].note,/closure:PATCH/);
 }
 
-// Update eligibility is upstream of Component Closure. A review click must never generate a direct Main download.
+// Update eligibility remains upstream. Even an exact checkbox selection cannot bypass it.
 {
   const eligibilityHold = { items: [{
     id:'mod:88',modId:'88',action:'HOLD_UPDATE_ELIGIBILITY',localFileId:'800',blockers:[],
     updateEligibility:{status:'HOLD_UPDATE_ELIGIBILITY',reason:'SAME_VERSION_NEWER_FILE_REPLACEMENT'},
     mainOptions:[{modId:'88',fileId:'801',name:'Replacement Main',version:'1.0',current:false,selectable:true,recommended:true}],
+    recentNexusFiles:[{modId:'88',fileId:'801',name:'Replacement Main',version:'1.0',active:true,selectable:true}],
     componentFamilies:[],patchFamilies:[],
   }]};
-  const x=validateAndBuild(eligibilityHold,{'mod:88':{mainFileId:'801'}});
-  assert.strictEqual(x.rows.length,0);
-  assert.ok(x.errors.some(e=>e.code==='REVIEW_UPDATE_ELIGIBILITY_REAUDIT_REQUIRED'));
+  const legacy = validateAndBuild(eligibilityHold,{'mod:88':{mainFileId:'801'}});
+  assert.strictEqual(legacy.rows.length,0);
+  assert.ok(legacy.errors.some(e=>e.code==='REVIEW_UPDATE_ELIGIBILITY_REAUDIT_REQUIRED'));
+  const picker = validateAndBuild(eligibilityHold,{'mod:88':{selectedFiles:[{modId:'88',fileId:'801'}]}});
+  assert.strictEqual(picker.rows.length,0);
+  assert.ok(picker.errors.some(e=>e.code==='REVIEW_UPDATE_ELIGIBILITY_REAUDIT_REQUIRED'));
 }
 
 console.log('review download tests: OK');

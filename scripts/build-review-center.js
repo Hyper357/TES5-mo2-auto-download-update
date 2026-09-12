@@ -5,9 +5,11 @@ const fs = require('fs');
 const path = require('path');
 const { argValue } = require('./lib/cli');
 const { loadJson, saveJson, writeText } = require('./lib/fs-json');
+const { isActive, categoryRole } = require('./lib/file-selector');
 const { buildReviewPayload } = require('./lib/review-center-model');
 
 const assetDir = path.resolve(__dirname, '..', 'web', 'review');
+const apiCacheDir = path.resolve(__dirname, '.api_cache');
 
 function summarizeAutoReport(report) {
   if (!report) return null;
@@ -20,6 +22,119 @@ function summarizeAutoReport(report) {
     failed: Number(report.failed ?? Math.max(0, requested - verified)) || 0,
     humanReview: Number(report.humanReview ?? 0) || 0,
   };
+}
+
+function cleanDescription(value) {
+  return String(value || '')
+    .replace(/<[^>]*>/g, ' ')
+    .replace(/&nbsp;/gi, ' ')
+    .replace(/&amp;/gi, '&')
+    .replace(/\s+/g, ' ')
+    .trim()
+    .slice(0, 700);
+}
+
+function uploadedAt(file) {
+  return Date.parse(file?.uploaded_time || file?.uploadedTime || '') || 0;
+}
+
+function compactNexusFile(file, item, recommendedIds = new Set()) {
+  const fileId = String(file?.file_id ?? file?.fileId ?? '');
+  const current = fileId && String(item.localFileId || '') === fileId;
+  const active = file?.active === undefined ? isActive(file) : file.active !== false;
+  return {
+    modId: String(item.modId),
+    fileId,
+    name: file?.name || file?.file_name || file?.fileName || `File ${fileId}`,
+    fileName: file?.file_name || file?.fileName || '',
+    version: file?.version || '',
+    category: file?.category_name || file?.category || categoryRole(file),
+    role: file?.role || categoryRole(file),
+    uploadedTime: file?.uploaded_time || file?.uploadedTime || '',
+    description: cleanDescription(file?.description),
+    current,
+    recommended: recommendedIds.has(fileId),
+    active,
+    selectable: !!fileId && active && !current,
+  };
+}
+
+function fallbackRecentFiles(item) {
+  const out = [];
+  const seen = new Set();
+  const add = raw => {
+    const modId = String(raw?.modId || item.modId || '');
+    const fileId = String(raw?.fileId || '');
+    if (!fileId || modId !== String(item.modId) || seen.has(fileId)) return;
+    seen.add(fileId);
+    out.push({
+      modId,
+      fileId,
+      name: raw.name || raw.fileName || `File ${fileId}`,
+      fileName: raw.fileName || '',
+      version: raw.version || '',
+      category: raw.category || raw.kind || 'Nexus file',
+      role: raw.role || raw.kind || '',
+      uploadedTime: raw.uploadedTime || '',
+      description: cleanDescription(raw.description),
+      current: !!raw.current || String(item.localFileId || '') === fileId,
+      recommended: !!raw.recommended || String(item.targetMainFileId || '') === fileId,
+      active: raw.active !== false,
+      selectable: raw.selectable !== false && String(item.localFileId || '') !== fileId,
+    });
+  };
+
+  for (const x of item.mainOptions || []) add(x);
+  for (const family of item.componentFamilies || item.patchFamilies || []) {
+    for (const x of family.candidates || []) add(x);
+  }
+  return out;
+}
+
+function recentNexusFilesForItem(item, { cacheDir = apiCacheDir, limit = 8 } = {}) {
+  const recommendedIds = new Set([
+    String(item.targetMainFileId || ''),
+    ...(item.mainOptions || []).filter(x => x.recommended).map(x => String(x.fileId || '')),
+  ].filter(Boolean));
+  const forcedIds = new Set([String(item.localFileId || ''), ...recommendedIds].filter(Boolean));
+  const cacheFile = path.join(cacheDir, `${item.modId}.json`);
+  const data = loadJson(cacheFile, null);
+  const files = Array.isArray(data?.files) ? data.files : [];
+
+  if (!files.length) {
+    return { source: 'REVIEW_CANDIDATES', files: fallbackRecentFiles(item) };
+  }
+
+  const active = files
+    .filter(isActive)
+    .sort((a, b) => uploadedAt(b) - uploadedAt(a) || Number(b.file_id || 0) - Number(a.file_id || 0));
+  const chosen = active.slice(0, Math.max(1, Number(limit) || 8));
+  const seen = new Set(chosen.map(x => String(x.file_id || '')));
+
+  for (const id of forcedIds) {
+    if (seen.has(id)) continue;
+    const forced = files.find(x => String(x.file_id || '') === id);
+    if (forced) {
+      chosen.push(forced);
+      seen.add(id);
+    }
+  }
+
+  return {
+    source: 'NEXUS_API_CACHE',
+    files: chosen
+      .map(x => compactNexusFile(x, item, recommendedIds))
+      .filter(x => x.fileId),
+  };
+}
+
+function enrichRecentNexusFiles(payload, options = {}) {
+  for (const item of payload.items || []) {
+    const recent = recentNexusFilesForItem(item, options);
+    item.recentNexusFiles = recent.files;
+    item.recentNexusFilesSource = recent.source;
+  }
+  return payload;
 }
 
 function renderHtml(payload) {
@@ -48,7 +163,7 @@ function main() {
 
   const plan = loadJson(planFile, { items: [] });
   const discovery = loadJson(patchFile, { items: [] });
-  const payload = buildReviewPayload(
+  const payload = enrichRecentNexusFiles(buildReviewPayload(
     plan,
     discovery,
     loadJson(closureFile, { items: [] }),
@@ -61,7 +176,7 @@ function main() {
       environmentGraphFile: plan.environmentGraphFile || discovery.environmentFile || null,
       autoReport: autoReport || null,
       autoSummary: summarizeAutoReport(loadJson(autoReport, null)),
-    });
+    }));
 
   saveJson(outJson, payload, { atomic: false });
   writeText(outHtml, renderHtml(payload));
@@ -70,4 +185,9 @@ function main() {
 
 if (require.main === module) main();
 
-module.exports = { renderHtml, summarizeAutoReport };
+module.exports = {
+  renderHtml,
+  summarizeAutoReport,
+  recentNexusFilesForItem,
+  enrichRecentNexusFiles,
+};
