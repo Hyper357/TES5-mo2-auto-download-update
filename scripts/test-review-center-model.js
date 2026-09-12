@@ -2,8 +2,11 @@
 'use strict';
 
 const assert = require('assert');
+const fs = require('fs');
+const os = require('os');
+const path = require('path');
 const { buildReviewPayload } = require('./lib/review-center-model');
-const { renderHtml, summarizeAutoReport } = require('./build-review-center');
+const { renderHtml, summarizeAutoReport, recentNexusFilesForItem } = require('./build-review-center');
 
 const environment = {
   version: 1,
@@ -64,6 +67,30 @@ assert.strictEqual(resourceCandidate.environmentDecision.reason, 'REQUIRED_DEPEN
 assert.strictEqual(resourceCandidate.environmentDecision.resolved, false);
 assert.strictEqual(payload.autoSummary.verified, 40);
 
+// Review Center must show the author's recent active Nexus files by upload time,
+// while always retaining current/recommended files for context even if they fall outside the limit.
+const cacheDir = fs.mkdtempSync(path.join(os.tmpdir(), 'tes5-review-cache-'));
+try {
+  fs.writeFileSync(path.join(cacheDir, '160675.json'), JSON.stringify({ files: [
+    { file_id: 100, name: 'Installed Vanilla', file_name: 'vanilla.zip', version: '1', category_id: 1, category_name: 'MAIN', uploaded_time: '2026-01-01T00:00:00Z' },
+    { file_id: 200, name: 'Optional Hair Pack', file_name: 'optional.zip', version: '2.1', category_id: 3, category_name: 'OPTIONAL', uploaded_time: '2026-09-10T00:00:00Z' },
+    { file_id: 300, name: 'KS Hairdos HDT', file_name: 'main.zip', version: '2', category_id: 1, category_name: 'MAIN', uploaded_time: '2026-09-09T00:00:00Z' },
+    { file_id: 400, name: 'Older Active File', file_name: 'older.zip', version: '1.9', category_id: 5, category_name: 'MISC', uploaded_time: '2026-09-08T00:00:00Z' },
+    { file_id: 999, name: 'Archived Newer File', file_name: 'archived.zip', version: '9', category_id: 7, category_name: 'OLD', uploaded_time: '2026-09-12T00:00:00Z' },
+  ] }), 'utf8');
+  const recent = recentNexusFilesForItem(payload.items[0], { cacheDir, limit: 2 });
+  assert.strictEqual(recent.source, 'NEXUS_API_CACHE');
+  assert.deepStrictEqual(recent.files.map(x => x.fileId), ['200', '300', '100']);
+  assert.strictEqual(recent.files.find(x => x.fileId === '100').current, true);
+  assert.strictEqual(recent.files.find(x => x.fileId === '100').selectable, false);
+  assert.strictEqual(recent.files.find(x => x.fileId === '300').recommended, true);
+  assert.ok(!recent.files.some(x => x.fileId === '999'));
+  payload.items[0].recentNexusFiles = recent.files;
+  payload.items[0].recentNexusFilesSource = recent.source;
+} finally {
+  fs.rmSync(cacheDir, { recursive: true, force: true });
+}
+
 const html = renderHtml(payload);
 assert.match(html, /window\.REVIEW_DATA=/);
 assert.match(html, /KS Hairdos HDT/);
@@ -71,9 +98,12 @@ assert.match(html, /Required Framework/);
 assert.match(html, /REQUIRED_DEPENDENCY_DISABLED/);
 assert.match(html, /Default/);
 assert.match(html, /HDT Hotfix/);
-assert.match(html, /下载已确认项/);
-assert.match(html, /更新决策中心/);
-assert.match(html, /需要我决定/);
+assert.match(html, /下载所选文件/);
+assert.match(html, /更新文件选择器/);
+assert.match(html, /选择下载/);
+assert.match(html, /file-checkbox/);
+assert.ok(!html.includes('data-main-choice'));
+assert.ok(!html.includes('data-component-decision'));
 assert.match(html, /data-auto-summary="embedded"/);
 assert.ok(!html.includes('/*__STYLE__*/'));
 assert.ok(!html.includes('/*__APP__*/'));
