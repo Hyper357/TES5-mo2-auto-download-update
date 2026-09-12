@@ -25,6 +25,58 @@ function componentDecision(decisionDoc, group) {
   return null;
 }
 
+function selectableFileMap(item) {
+  const map = new Map();
+  const add = raw => {
+    const modId = String(raw?.modId || item.modId || '');
+    const fileId = String(raw?.fileId || '');
+    if (!modId || !fileId || raw?.selectable === false || raw?.active === false || raw?.current) return;
+    const key = `${modId}:${fileId}`;
+    if (!map.has(key)) map.set(key, {
+      modId,
+      fileId,
+      name: raw.name || raw.fileName || `File ${fileId}`,
+      fileName: raw.fileName || '',
+      version: raw.version || '',
+      category: raw.category || raw.role || raw.kind || '',
+      role: raw.role || raw.kind || '',
+      branchKey: raw.branchKey || '',
+      tags: raw.tags || [],
+      recommended: !!raw.recommended,
+      current: !!raw.current,
+    });
+  };
+
+  if (Array.isArray(item.recentNexusFiles) && item.recentNexusFiles.length) {
+    for (const f of item.recentNexusFiles) add(f);
+  } else {
+    for (const f of item.mainOptions || []) add({ modId: item.modId, ...f });
+    for (const group of componentGroups(item)) {
+      for (const f of group.candidates || []) add(f);
+    }
+  }
+  return map;
+}
+
+function selectedFilesDecision(item, d) {
+  const selected = Array.isArray(d?.selectedFiles) ? d.selectedFiles : [];
+  if (!selected.length) return null;
+  const allowed = selectableFileMap(item);
+  const picked = [];
+  const invalid = [];
+  const seen = new Set();
+
+  for (const raw of selected) {
+    const key = `${String(raw?.modId || item.modId || '')}:${String(raw?.fileId || '')}`;
+    if (seen.has(key)) continue;
+    seen.add(key);
+    const file = allowed.get(key);
+    if (!file) invalid.push(key);
+    else picked.push(file);
+  }
+  return { picked, invalid };
+}
+
 function validateAndBuild(review, decisions) {
   const rows = [];
   const accepted = [];
@@ -37,21 +89,73 @@ function validateAndBuild(review, decisions) {
     if (d.skip) { ignored.push({ itemId: item.id, reason: 'USER_SKIP' }); continue; }
 
     const groups = componentGroups(item);
-    const hasAny = !!d.mainFileId || groups.some(g => componentDecision(d, g)?.decision);
-    if (!hasAny) continue;
+    const multi = selectedFilesDecision(item, d);
+    const hasMultiSelection = !!multi && (multi.picked.length > 0 || multi.invalid.length > 0);
+    const hasLegacyDecision = !!d.mainFileId || groups.some(g => componentDecision(d, g)?.decision);
+    if (!hasMultiSelection && !hasLegacyDecision) continue;
 
-    // v4.1 safety invariant: update eligibility is an upstream gate. A human click here may
-    // acknowledge evidence, but it must never bypass Main -> Component Discovery -> Closure.
-    // Ambiguous eligibility therefore cannot produce a reviewed-download manifest directly.
+    // Update eligibility stays upstream of manual selection. The file picker is a staging UI,
+    // not a way to turn an unproven update into a trusted update transaction.
     if (item.action === 'HOLD_UPDATE_ELIGIBILITY') {
       errors.push({
         itemId: item.id,
         code: 'REVIEW_UPDATE_ELIGIBILITY_REAUDIT_REQUIRED',
-        detail: '更新资格尚未由确定性证据确认。不得从 Review Center 直接下载 Main；先重新审计/补充更新证据，使其进入 UPDATE_CONFIRMED，再走 Main/Component Closure。',
+        detail: '更新资格尚未由确定性证据确认。该项目的 Nexus 文件仅供对照，不能从 Review Center 直接提交下载。',
       });
       continue;
     }
 
+    if (hasMultiSelection) {
+      if (multi.invalid.length) {
+        errors.push({
+          itemId: item.id,
+          code: 'REVIEW_SELECTION_INVALID',
+          detail: `所选 exact modId:fileId 不在当前 Review Center 允许列表中：${multi.invalid.join(', ')}`,
+        });
+        continue;
+      }
+
+      const tx = `review:${item.modId}:selected-files`;
+      for (const f of multi.picked) {
+        rows.push({
+          modId: String(f.modId),
+          name: f.name,
+          ver: f.version,
+          note: `tx=${tx}; user-selected-nexus-file${f.category ? `; category=${f.category}` : ''}; closure=NOT_ASSERTED`,
+          fileId: String(f.fileId),
+          action: 'DOWNLOAD',
+        });
+      }
+
+      const selectedMainOptions = multi.picked
+        .map(f => (item.mainOptions || []).find(o => String(o.fileId) === String(f.fileId) && String(item.modId) === String(f.modId)))
+        .filter(Boolean);
+      const rememberedMain = selectedMainOptions.length === 1 && selectedMainOptions[0].branchKey && selectedMainOptions[0].branchKey !== 'GENERIC'
+        ? selectedMainOptions[0]
+        : null;
+
+      accepted.push({
+        itemId: item.id,
+        tx,
+        mode: 'MULTI_FILE_PICKER',
+        selectedFiles: multi.picked.map(f => ({ exact: `${f.modId}:${f.fileId}`, name: f.name, version: f.version, category: f.category })),
+        closurePending: groups.length > 0 || (item.blockers || []).some(x => /覆盖不完整|coverage|closure/i.test(x)),
+        rememberMain: !!rememberedMain,
+        mainSelection: rememberedMain ? {
+          modId: String(item.modId),
+          fileId: String(rememberedMain.fileId),
+          name: rememberedMain.name || '',
+          version: rememberedMain.version || '',
+          branchKey: rememberedMain.branchKey || '',
+          tags: rememberedMain.tags || [],
+        } : null,
+        components: [],
+        patches: [],
+      });
+      continue;
+    }
+
+    // Legacy review decisions remain supported for old generated pages / saved decision files.
     const hardCoverageBlocker = (item.blockers || []).find(x => /覆盖不完整|coverage/i.test(x));
     if (hardCoverageBlocker) {
       errors.push({ itemId: item.id, code: 'REVIEW_BLOCKED_BY_DISCOVERY_COVERAGE', detail: hardCoverageBlocker });
@@ -238,4 +342,11 @@ if (require.main === module) {
   catch (err) { console.error(`review-download failed: ${err.message}`); process.exit(1); }
 }
 
-module.exports = { componentGroups, componentDecision, validateAndBuild, persistRememberedPolicies };
+module.exports = {
+  componentGroups,
+  componentDecision,
+  selectableFileMap,
+  selectedFilesDecision,
+  validateAndBuild,
+  persistRememberedPolicies,
+};
