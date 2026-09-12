@@ -1,4 +1,4 @@
-# Task Entry — Low-Token Mode
+# Task Entry — Low-Token / Low-Quota Mode
 
 Use this file as the default task entry point. Do **not** preload full historical reports into agent context.
 
@@ -22,11 +22,24 @@ Only read `docs/AGENT_HANDOFF.md` when changing architecture/safety rules. Only 
 - **FIX**: inspect only files implicated by the defect; run targeted tests while editing; run full `npm test` once before PR/merge.
 - **INVESTIGATE**: read-only; use compact commands and bounded excerpts; do not mutate or run a full suite unless needed to reproduce the defect.
 
+## Nexus freshness policy
+
+Normal runs are **cache-first**. The Nexus files cache already has a bounded TTL, so repeated runs should not bypass it and re-query every installed MOD.
+
+```bash
+npm run update          # normal cache-first update
+npm run update:fresh    # deliberate hard refresh; bypass cache
+npm run audit           # cache-first audit
+npm run audit:fresh     # deliberate hard-refresh audit
+```
+
+Use `*:fresh` only when stale cache is actually suspected or the user explicitly requests a full fresh scan.
+
 ## Hard limits
 
 - Never print full `plan.json`, `review-center.json`, ledger, or large JSONL logs into chat.
 - Same probe/command maximum twice. Same result twice = conclude and move on.
 - One missing path = resolve latest run/path once; never loop over guessed `reports/plan*.json` locations.
-- Normal `npm run update` is non-debug. Add `-- --debug` only for a focused diagnosis.
+- Normal `npm run update` is non-debug and cache-first. Add `-- --debug` only for a focused diagnosis.
 - One Task = one objective. No spontaneous new Phase/audit/redesign.
 - Put bulky evidence under `.runtime/`; final chat output should be counts, exact IDs, concise errors, and artifact paths.

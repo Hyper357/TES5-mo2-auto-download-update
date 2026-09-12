@@ -9,8 +9,8 @@ const updateArgs = buildIndexArgs(MODE.UPDATE, ['E:\\SkyrimAE\\mo2\\mods', 'E:\\
 assert.ok(updateArgs[0].endsWith(path.join('', 'index.js')));
 assert.ok(updateArgs.includes('--go'));
 assert.ok(!updateArgs.includes('--debug'), 'normal update runs must not enable verbose debug output by default');
+assert.ok(!updateArgs.includes('--force-refresh'), 'normal update runs must reuse valid Nexus API cache');
 assert.ok(updateArgs.includes('--continue-on-error'));
-assert.ok(updateArgs.includes('--force-refresh'));
 assert.ok(updateArgs.includes('--no-reconnect'));
 assert.ok(updateArgs.includes('E:\\SkyrimAE\\mo2\\mods'));
 assert.strictEqual(positionalModsDir(['E:\\SkyrimAE\\mo2\\mods', 'E:\\SkyrimAE\\tools\\.nexus_api_key']), 'E:\\SkyrimAE\\mo2\\mods');
@@ -18,10 +18,15 @@ assert.strictEqual(positionalModsDir(['E:\\SkyrimAE\\mo2\\mods', 'E:\\SkyrimAE\\
 const debugArgs = buildIndexArgs(MODE.UPDATE, ['--debug']);
 assert.ok(debugArgs.includes('--debug'), 'debug remains available when explicitly requested');
 
+const freshArgs = buildIndexArgs(MODE.UPDATE, ['--force-refresh']);
+assert.ok(freshArgs.includes('--force-refresh'), 'hard refresh remains available when explicitly requested');
+
 const auditArgs = buildIndexArgs(MODE.AUDIT, []);
 assert.ok(!auditArgs.includes('--go'));
 assert.ok(!auditArgs.includes('--no-reconnect'));
-assert.ok(auditArgs.includes('--force-refresh'));
+assert.ok(!auditArgs.includes('--force-refresh'), 'audit is cache-first by default too');
+const freshAuditArgs = buildIndexArgs(MODE.AUDIT, ['--force-refresh']);
+assert.ok(freshAuditArgs.includes('--force-refresh'));
 assert.throws(() => buildIndexArgs(MODE.AUDIT, ['--go']), /禁止 --go/);
 assert.throws(() => buildIndexArgs('wat', []), /未知 workflow mode/);
 
