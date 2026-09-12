@@ -21,10 +21,13 @@ function buildIndexArgs(mode, extraArgs = []) {
     throw new Error('audit 模式禁止 --go；需要真实下载请运行 npm run update');
   }
 
+  // Normal RUN tasks intentionally do NOT enable --debug. Debug output is expensive for
+  // agent context and is only useful for a focused FIX/INVESTIGATE task. Pass --debug
+  // explicitly when needed.
   // Managed-browser workflow owns reconnect/recovery. Do not let the historical
   // nexus-autodl Edge reconnect path silently spawn a second browser on port 9222.
   const fixed = mode === MODE.UPDATE
-    ? ['--go', '--debug', '--continue-on-error', '--force-refresh', '--no-reconnect']
+    ? ['--go', '--continue-on-error', '--force-refresh', '--no-reconnect']
     : ['--force-refresh'];
 
   return [path.join(rootDir, 'index.js'), ...fixed, ...extras];
@@ -70,6 +73,7 @@ function main(argv = process.argv.slice(2)) {
   if (desc.realDownload) {
     console.log('授权语义：本命令本身即代表真实下载授权；通过全部安全门禁的项目无需再次询问。');
     console.log('复杂/不确定项目自动延期到 Review Center；单项失败不会中断其余安全项。');
+    if (!extraArgs.includes('--debug')) console.log('输出模式：NORMAL（默认关闭 --debug，减少日志与 Agent 上下文消耗）。');
   } else {
     console.log('只审计，不提交真实 NXM 下载。');
   }
@@ -99,7 +103,7 @@ function main(argv = process.argv.slice(2)) {
   });
 
   if (!result.ok) {
-    console.error(`\n⚠️ ${desc.title} 已结束，exit=${result.status ?? 'unknown'}。请先看 npm run agent:status；不要把已 VERIFIED 项整批重跑。`);
+    console.error(`\n⚠️ ${desc.title} 已结束，exit=${result.status ?? 'unknown'}。请先看 npm run agent:brief；只有 brief 指向具体故障时再用 agent:status / agent:mod。`);
     process.exitCode = Number.isInteger(result.status) ? result.status : 2;
     return;
   }
@@ -107,6 +111,7 @@ function main(argv = process.argv.slice(2)) {
   console.log(`\n✅ ${desc.title} 流水线已执行到终点。`);
   if (mode === MODE.UPDATE) {
     console.log('高置信项目已自动处理；需要人工选择的项目已由 Review Center 接管。');
+    console.log('Agent 摘要：npm run agent:brief');
   }
 }
 
