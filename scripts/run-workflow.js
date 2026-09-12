@@ -21,14 +21,15 @@ function buildIndexArgs(mode, extraArgs = []) {
     throw new Error('audit 模式禁止 --go；需要真实下载请运行 npm run update');
   }
 
-  // Normal RUN tasks intentionally do NOT enable --debug. Debug output is expensive for
-  // agent context and is only useful for a focused FIX/INVESTIGATE task. Pass --debug
-  // explicitly when needed.
+  // Normal RUN tasks intentionally do NOT enable --debug or --force-refresh.
+  // The Nexus files client already has a bounded cache TTL; bypassing it on every run
+  // needlessly re-queries thousands of installed mods and burns API/task quota.
+  // Pass --debug / --force-refresh explicitly for a focused diagnosis or deliberate hard refresh.
   // Managed-browser workflow owns reconnect/recovery. Do not let the historical
   // nexus-autodl Edge reconnect path silently spawn a second browser on port 9222.
   const fixed = mode === MODE.UPDATE
-    ? ['--go', '--continue-on-error', '--force-refresh', '--no-reconnect']
-    : ['--force-refresh'];
+    ? ['--go', '--continue-on-error', '--no-reconnect']
+    : [];
 
   return [path.join(rootDir, 'index.js'), ...fixed, ...extras];
 }
@@ -37,7 +38,7 @@ function workflowDescription(mode) {
   if (mode === MODE.UPDATE) {
     return {
       title: 'FULL UPDATE',
-      summary: '管理浏览器 + MO2 → 全量扫描 → Update Eligibility → Main/Variant → Component Closure → 自动下载安全项 → VERIFIED → Review Center',
+      summary: '管理浏览器 + MO2 → 缓存优先扫描 → Update Eligibility → Main/Variant → Component Closure → 自动下载安全项 → VERIFIED → Review Center',
       noMidstreamConfirmation: true,
       continueOnItemError: true,
       realDownload: true,
@@ -45,7 +46,7 @@ function workflowDescription(mode) {
   }
   return {
     title: 'AUDIT ONLY',
-    summary: '管理浏览器 → 全量扫描 → Update Eligibility → Main/Variant → Component Closure → 生成报告；不真实下载',
+    summary: '管理浏览器 → 缓存优先扫描 → Update Eligibility → Main/Variant → Component Closure → 生成报告；不真实下载',
     noMidstreamConfirmation: true,
     continueOnItemError: false,
     realDownload: false,
@@ -77,6 +78,8 @@ function main(argv = process.argv.slice(2)) {
   } else {
     console.log('只审计，不提交真实 NXM 下载。');
   }
+  if (extraArgs.includes('--force-refresh')) console.log('Nexus 数据模式：HARD REFRESH（显式绕过本地 API cache）。');
+  else console.log('Nexus 数据模式：CACHE-FIRST（命中有效 cache 时不重复请求 API）。');
   console.log('========================================================');
 
   console.log('\n[Workflow] 确保项目管理浏览器已启动...');
