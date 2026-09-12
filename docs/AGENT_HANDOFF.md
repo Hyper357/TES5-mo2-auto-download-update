@@ -85,17 +85,22 @@ This repository (`skyrim-mo2-safe-update`) provides deterministic, safe, automat
 ## 5. Standard Agent Operational Commands
 
 ```bash
-# Run unit & integration test suite
+# Compact entry point for normal tasks. Use this FIRST.
+npm run agent:brief
+
+# Query one MOD without loading plan.json into context.
+npm run agent:mod -- 73381
+
+# Detailed status only when the brief identifies a real operational failure.
+npm run agent:status -- --compact
+
+# Run unit & integration test suite (FIX tasks only; do not run on every normal RUN task)
 npm test
 
-# Check agent status and operational metrics
-node scripts/agent-status.js
-npm run status
-
-# Inspect update eligibility & review holds
+# Inspect update eligibility & review holds when specifically required
 npm run updates:status
 
-# Open / Inspect Review Center for variant & component resolution
+# Open Review Center for human file selection
 npm run review
 
 # Managed browser lifecycle
@@ -103,3 +108,33 @@ npm run browser:status
 npm run browser:start
 npm run browser:stop
 ```
+
+---
+
+## 6. Agent Token Budget Protocol
+
+The repository, not the chat transcript, is the source of operational state. Normal tasks must minimize model context and shell output.
+
+1. **Status-first, bounded by default**
+   - Start every RUN/INVESTIGATE task with `npm run agent:brief`.
+   - Do not open or print full `plan.json`, `review-center.json`, execution ledgers, or JSONL logs unless a specific field is unavailable from the compact tools.
+   - For one MOD, use `npm run agent:mod -- <modId>` instead of ad-hoc Python/PowerShell JSON parsing.
+2. **Debug is opt-in**
+   - `npm run update` runs without `--debug` by default.
+   - Use `npm run update -- --debug` only in a focused FIX/INVESTIGATE task for a confirmed bug.
+3. **No repeated probes**
+   - The same command or factual question may be probed at most twice.
+   - If two probes return the same result, record the conclusion and return to the stated task objective.
+4. **Missing paths are resolved once**
+   - After one `FileNotFoundError`, stop guessing historical report paths. Use the latest run directory and repository runtime helpers/compact commands.
+   - Never retry the same nonexistent `reports/plan*.json` path in a loop.
+5. **Tests are proportional to task type**
+   - RUN: do not run the full regression suite unless code changed.
+   - FIX: run targeted tests while editing, then run the full suite once before merge/PR.
+   - INVESTIGATE: read-only; no full test run unless required to reproduce the reported defect.
+6. **Task termination rule**
+   - A task performs one objective: inspect → execute/fix → verify → report → stop.
+   - Do not start a new audit, phase, redesign, or side investigation after the objective is satisfied.
+7. **Output budget**
+   - Normal task summaries should stay under ~100 lines.
+   - Large machine artifacts remain under `.runtime/`; report counts, exact IDs, and paths rather than pasting whole files.
