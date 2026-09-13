@@ -4,6 +4,7 @@
 const cp = require('child_process');
 const fs = require('fs');
 const path = require('path');
+const { writeFailureArtifacts } = require('./lib/review-failure-log');
 
 function readExplicitRows(manifest) {
   if (!manifest || !fs.existsSync(manifest)) return [];
@@ -53,6 +54,18 @@ function rewriteInstalledDir(args) {
   return { args: forwarded, changed: true, contextDir };
 }
 
+function argPath(args, flag, fallback = '') {
+  const i = args.indexOf(flag);
+  return i >= 0 && i + 1 < args.length ? path.resolve(args[i + 1]) : fallback;
+}
+
+function persistFailureLog(args, exitCode) {
+  const stateFile = argPath(args, '--state');
+  const jobDir = argPath(args, '--run-dir', stateFile ? path.dirname(stateFile) : '');
+  if (!stateFile || !jobDir) return null;
+  return writeFailureArtifacts({ stateFile, jobDir, exitCode });
+}
+
 function main() {
   const forwarded = process.argv.slice(2);
   const rewritten = rewriteInstalledDir(forwarded);
@@ -63,7 +76,17 @@ function main() {
     stdio: 'inherit',
   });
   if (r.error) throw r.error;
-  process.exitCode = Number.isInteger(r.status) ? r.status : 1;
+  const exitCode = Number.isInteger(r.status) ? r.status : 1;
+  try {
+    const artifacts = persistFailureLog(rewritten.args, exitCode);
+    if (artifacts?.report?.failures?.length) {
+      console.error(`REVIEW_FAILURE_LOG ${artifacts.logFile}`);
+    }
+  } catch (err) {
+    // Failure logging must never hide or replace the real executor result.
+    console.error(`REVIEW_FAILURE_LOG_WRITE_FAILED ${String(err.message || err)}`);
+  }
+  process.exitCode = exitCode;
 }
 
 if (require.main === module) {
@@ -78,4 +101,6 @@ module.exports = {
   readExplicitRows,
   isExplicitReviewManifest,
   rewriteInstalledDir,
+  argPath,
+  persistFailureLog,
 };
