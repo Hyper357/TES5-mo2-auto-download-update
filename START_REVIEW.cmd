@@ -1,5 +1,5 @@
 @echo off
-setlocal
+setlocal EnableExtensions EnableDelayedExpansion
 title TES5 MO2 Review Center
 cd /d "%~dp0"
 
@@ -20,7 +20,6 @@ if not exist package.json (
 where git >nul 2>&1
 if errorlevel 1 (
   echo [ERROR] Git not found.
-  echo Install Git for Windows first.
   echo.
   pause
   exit /b 1
@@ -29,7 +28,6 @@ if errorlevel 1 (
 where node >nul 2>&1
 if errorlevel 1 (
   echo [ERROR] Node.js not found.
-  echo Install Node.js first.
   echo.
   pause
   exit /b 1
@@ -38,7 +36,6 @@ if errorlevel 1 (
 where npm >nul 2>&1
 if errorlevel 1 (
   echo [ERROR] npm not found.
-  echo Install Node.js/npm first.
   echo.
   pause
   exit /b 1
@@ -48,9 +45,7 @@ echo [1/3] Updating repository...
 git pull --ff-only origin main
 if errorlevel 1 (
   echo.
-  echo [ERROR] Git update failed.
-  echo No local files were overwritten.
-  echo Send a screenshot of this window to ChatGPT.
+  echo [ERROR] Git update failed. No local files were overwritten.
   echo.
   pause
   exit /b 1
@@ -63,7 +58,6 @@ if not exist node_modules\puppeteer-core\package.json (
   if errorlevel 1 (
     echo.
     echo [ERROR] npm install failed.
-    echo Send a screenshot of this window to ChatGPT.
     echo.
     pause
     exit /b 1
@@ -73,10 +67,52 @@ if not exist node_modules\puppeteer-core\package.json (
 )
 
 echo.
-echo [3/3] Opening Review Center...
-echo Keep this window open while using the browser.
+echo [3/3] Locating and opening Review Center...
+set "RUN_DIR="
+
+rem First prefer a run in this repository.
+if exist ".runtime\runs" (
+  for /f "delims=" %%R in ('dir /b /ad /o-n ".runtime\runs" 2^>nul') do (
+    if not defined RUN_DIR if exist ".runtime\runs\%%R\review-center.json" set "RUN_DIR=%CD%\.runtime\runs\%%R"
+  )
+)
+
+rem Fresh/push clones do not contain .runtime. Search the Skyrim workspace two levels up.
+if not defined RUN_DIR (
+  for %%W in ("%~dp0..\..") do set "SEARCH_ROOT=%%~fW"
+  echo No local run found. Searching !SEARCH_ROOT! for an existing project runtime...
+
+  for /d %%A in ("!SEARCH_ROOT!\*") do (
+    if exist "%%~fA\.runtime\runs" (
+      for /f "delims=" %%R in ('dir /b /ad /o-n "%%~fA\.runtime\runs" 2^>nul') do (
+        if not defined RUN_DIR if exist "%%~fA\.runtime\runs\%%R\review-center.json" set "RUN_DIR=%%~fA\.runtime\runs\%%R"
+      )
+    )
+    for /d %%B in ("%%~fA\*") do (
+      if exist "%%~fB\.runtime\runs" (
+        for /f "delims=" %%R in ('dir /b /ad /o-n "%%~fB\.runtime\runs" 2^>nul') do (
+          if not defined RUN_DIR if exist "%%~fB\.runtime\runs\%%R\review-center.json" set "RUN_DIR=%%~fB\.runtime\runs\%%R"
+        )
+      )
+    )
+  )
+)
+
+if not defined RUN_DIR (
+  echo.
+  echo [ERROR] No existing Review Center run was found under the Skyrim workspace.
+  echo The old runtime may have been deleted or stored outside this workspace.
+  echo Send this window to ChatGPT; do not run a full rescan yet.
+  echo.
+  pause
+  exit /b 1
+)
+
+echo Found Review Center run:
+echo !RUN_DIR!
 echo.
-call npm run review
+echo Opening current Review Center UI. Keep this window open.
+node scripts\review-server.js --run "!RUN_DIR!"
 
 echo.
 echo Review Center stopped.
