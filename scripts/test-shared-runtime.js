@@ -8,7 +8,7 @@ const path = require('path');
 const { parseStrict } = require('./lib/cli');
 const { saveJson, loadJson } = require('./lib/fs-json');
 const { formatManifest, parseManifestText } = require('./lib/manifest');
-const { findLatestRun, findLatestReviewRun } = require('./lib/runtime');
+const { findLatestRun, findLatestReviewRun, findNearbyReviewRuns } = require('./lib/runtime');
 const {
   DEFAULT_CAPTURE_MAX_BUFFER,
   normalizeNodeRequirePath,
@@ -72,6 +72,41 @@ try {
   assert.ok(findLatestReviewRun(tmp).endsWith('2026-01-01'));
 } finally {
   fs.rmSync(tmp, { recursive: true, force: true });
+}
+
+// A git clone does not carry .runtime because it is intentionally ignored. When a
+// freshly updated repo copy has no local runs, Review Center should recover the newest
+// sibling repo run instead of forcing a full rescan. review-center.json is sufficient
+// because the current UI is rendered from JSON; an archived HTML snapshot is optional.
+const workspace = fs.mkdtempSync(path.join(os.tmpdir(), 'tes5-nearby-review-'));
+try {
+  const currentRepo = path.join(workspace, 'repo-current');
+  const oldRepo = path.join(workspace, 'repo-old');
+  const olderRepo = path.join(workspace, 'repo-older');
+  fs.mkdirSync(currentRepo, { recursive: true });
+
+  const oldRun = path.join(oldRepo, '.runtime', 'runs', '2026-09-12T120000');
+  const olderRun = path.join(olderRepo, '.runtime', 'runs', '2026-09-11T120000');
+  fs.mkdirSync(oldRun, { recursive: true });
+  fs.mkdirSync(olderRun, { recursive: true });
+  fs.writeFileSync(path.join(oldRun, 'review-center.json'), '{"items":[]}');
+  fs.writeFileSync(path.join(olderRun, 'review-center.json'), '{"items":[]}');
+  const now = new Date();
+  const before = new Date(now.getTime() - 60_000);
+  fs.utimesSync(path.join(oldRun, 'review-center.json'), now, now);
+  fs.utimesSync(path.join(olderRun, 'review-center.json'), before, before);
+
+  const nearby = findNearbyReviewRuns(currentRepo);
+  assert.strictEqual(nearby[0], oldRun);
+  assert.strictEqual(findLatestReviewRun(currentRepo), oldRun);
+
+  // A local run always wins; nearby recovery is fallback-only.
+  const localRun = path.join(currentRepo, '.runtime', 'runs', '2026-09-13T000000');
+  fs.mkdirSync(localRun, { recursive: true });
+  fs.writeFileSync(path.join(localRun, 'review-center.json'), '{"items":[]}');
+  assert.strictEqual(findLatestReviewRun(currentRepo), localRun);
+} finally {
+  fs.rmSync(workspace, { recursive: true, force: true });
 }
 
 console.log('shared-runtime tests: OK');
