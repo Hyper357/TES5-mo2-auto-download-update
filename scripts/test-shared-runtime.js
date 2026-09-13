@@ -8,7 +8,14 @@ const path = require('path');
 const { parseStrict } = require('./lib/cli');
 const { saveJson, loadJson } = require('./lib/fs-json');
 const { formatManifest, parseManifestText } = require('./lib/manifest');
-const { findLatestRun, findLatestReviewRun, findNearbyReviewRuns } = require('./lib/runtime');
+const {
+  findLatestRun,
+  findLatestReviewRun,
+  findNearbyReviewRuns,
+  latestReviewJob,
+  executorFailureSummary,
+  formatExecutorFailure,
+} = require('./lib/runtime');
 const {
   DEFAULT_CAPTURE_MAX_BUFFER,
   normalizeNodeRequirePath,
@@ -107,6 +114,43 @@ try {
   assert.strictEqual(findLatestReviewRun(currentRepo), localRun);
 } finally {
   fs.rmSync(workspace, { recursive: true, force: true });
+}
+
+// FAILED Review Center jobs must expose the exact executor failure from execution-state
+// instead of reducing it to only "N failed items". This also works for an already-failed
+// historical job after the server is restarted; no download retry is required.
+const failedRun = fs.mkdtempSync(path.join(os.tmpdir(), 'tes5-review-failure-'));
+try {
+  const jobDir = path.join(failedRun, 'review-jobs', '2026-09-13T030000');
+  fs.mkdirSync(jobDir, { recursive: true });
+  const stateFile = path.join(jobDir, 'execution-state.json');
+  saveJson(stateFile, {
+    items: {
+      '129928:5001': {
+        modId: '129928', fileId: '5001', name: 'Example Mod', status: 'DIRECT_DOWNLOAD_FAILED',
+        attempts: [{ attempt: 1, ok: false, errorCode: 'NXM_DOWNLOAD_CONTROL_MISSING' }],
+        error: { code: 'UNKNOWN_FAILURE' },
+      },
+      '129928:5002': {
+        modId: '129928', fileId: '5002', name: 'Dependent file', status: 'BLOCKED_BY_TX_FAILURE',
+      },
+    },
+  });
+  saveJson(path.join(jobDir, 'job.json'), { status: 'FAILED', jobDir, state: stateFile });
+
+  const rawSummary = executorFailureSummary({ status: 'FAILED', jobDir, state: stateFile });
+  assert.strictEqual(rawSummary.count, 2);
+  assert.strictEqual(rawSummary.primary.errorCode, 'NXM_DOWNLOAD_CONTROL_MISSING');
+  assert.strictEqual(rawSummary.primary.modId, '129928');
+  assert.match(formatExecutorFailure(rawSummary), /NXM_DOWNLOAD_CONTROL_MISSING/);
+  assert.match(formatExecutorFailure(rawSummary), /129928:5001/);
+
+  const latest = latestReviewJob(failedRun);
+  assert.strictEqual(latest.executorFailure.primary.errorCode, 'NXM_DOWNLOAD_CONTROL_MISSING');
+  assert.match(latest.stderr, /执行器错误 NXM_DOWNLOAD_CONTROL_MISSING/);
+  assert.match(latest.stderr, /129928:5001/);
+} finally {
+  fs.rmSync(failedRun, { recursive: true, force: true });
 }
 
 console.log('shared-runtime tests: OK');
