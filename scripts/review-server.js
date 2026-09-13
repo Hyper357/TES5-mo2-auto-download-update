@@ -11,6 +11,7 @@ const { argValue } = require('./lib/cli');
 const { loadJson, saveJson } = require('./lib/fs-json');
 const { openDefault } = require('./lib/process-runner');
 const { findLatestReviewRun, latestReviewJob } = require('./lib/runtime');
+const { renderHtml } = require('./build-review-center');
 
 function json(res, status, value) {
   const body = Buffer.from(JSON.stringify(value, null, 2));
@@ -48,7 +49,21 @@ function decorateHtml(html, runDir) {
   const review = Number(r.humanReview ?? 0) || 0;
   const mode = esc(r.mode || 'AUDIT');
   const banner = `<div style="background:#171d24;border:1px solid #2b3541;border-radius:16px;padding:18px 20px;margin:0 0 18px"><div style="font-weight:700;margin-bottom:10px">📊 本轮自动阶段汇报 <span style="color:#9caaba;font-weight:400">${mode}</span></div><div style="display:flex;gap:10px;flex-wrap:wrap"><span class="pill">自动请求 ${requested}</span><span class="pill" style="color:#9be7a6">VERIFIED ${verified}</span><span class="pill" style="color:${failed ? '#ffb4ab' : '#9be7a6'}">失败/未验证 ${failed}</span><span class="pill">延后人工复核 ${review}</span></div></div>`;
-  return html.replace('<div id="root"></div>', `${banner}<div id="root"></div>`);
+  for (const root of ['<main id="root"></main>', '<div id="root"></div>']) {
+    if (html.includes(root)) return html.replace(root, `${banner}${root}`);
+  }
+  return html;
+}
+
+function renderCurrentReviewHtml(runDir, htmlFile, reviewFile) {
+  const review = loadJson(reviewFile, null);
+  if (review && typeof review === 'object' && Array.isArray(review.items)) {
+    return decorateHtml(renderHtml(review), runDir);
+  }
+  if (fs.existsSync(htmlFile)) {
+    return decorateHtml(fs.readFileSync(htmlFile, 'utf8'), runDir);
+  }
+  throw new Error('runDir 中的 review-center.json 无效，且没有可回退的 review-center.html');
 }
 
 async function main() {
@@ -59,7 +74,7 @@ async function main() {
   const htmlFile = path.join(runDir, 'review-center.html');
   const reviewFile = path.join(runDir, 'review-center.json');
   const decisionsFile = path.join(runDir, 'review-decisions.json');
-  if (!fs.existsSync(htmlFile) || !fs.existsSync(reviewFile)) throw new Error('runDir 中没有 review-center.html/json，请先运行 pipeline/build-review-center');
+  if (!fs.existsSync(reviewFile)) throw new Error('runDir 中没有 review-center.json，请先运行 pipeline/build-review-center');
 
   const token = crypto.randomBytes(24).toString('hex');
   let activeChild = null;
@@ -74,7 +89,7 @@ async function main() {
     if (supplied !== token) return json(res, 403, { error: 'BAD_REVIEW_TOKEN' });
 
     if (req.method === 'GET' && parsed.pathname === '/') {
-      const body = Buffer.from(decorateHtml(fs.readFileSync(htmlFile, 'utf8'), runDir));
+      const body = Buffer.from(renderCurrentReviewHtml(runDir, htmlFile, reviewFile));
       res.writeHead(200, {
         'content-type': 'text/html; charset=utf-8', 'content-length': body.length, 'cache-control': 'no-store',
         'content-security-policy': "default-src 'self' 'unsafe-inline'; img-src 'self' data:; connect-src 'self'; frame-ancestors 'none'",
@@ -142,4 +157,4 @@ if (require.main === module) {
   main().catch(err => { console.error(`review-server failed: ${err.message}`); process.exit(1); });
 }
 
-module.exports = { findLatestReviewRun, decorateHtml };
+module.exports = { findLatestReviewRun, decorateHtml, renderCurrentReviewHtml };
