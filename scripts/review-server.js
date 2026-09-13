@@ -9,9 +9,11 @@ const path = require('path');
 const url = require('url');
 const { argValue } = require('./lib/cli');
 const { loadJson, saveJson } = require('./lib/fs-json');
-const { openDefault } = require('./lib/process-runner');
+const { openDefault, runNode } = require('./lib/process-runner');
 const { findLatestReviewRun, latestReviewJob } = require('./lib/runtime');
 const { renderHtml } = require('./build-review-center');
+
+const ROOT_DIR = path.resolve(__dirname, '..');
 
 function json(res, status, value) {
   const body = Buffer.from(JSON.stringify(value, null, 2));
@@ -66,20 +68,99 @@ function renderCurrentReviewHtml(runDir, htmlFile, reviewFile) {
   throw new Error('runDir 中的 review-center.json 无效，且没有可回退的 review-center.html');
 }
 
+function reviewRuntimeOwner(runDir) {
+  const resolved = path.resolve(runDir || '.');
+  const runsDir = path.dirname(resolved);
+  const runtimeDir = path.dirname(runsDir);
+  if (path.basename(runsDir).toLowerCase() !== 'runs') return '';
+  if (path.basename(runtimeDir).toLowerCase() !== '.runtime') return '';
+  return path.dirname(runtimeDir);
+}
+
+function reviewExecutionEnv(runDir, baseEnv = process.env) {
+  const env = { ...baseEnv };
+  const owner = reviewRuntimeOwner(runDir);
+  if (!owner) return env;
+
+  if (!env.MO2_BROWSER_ROOT) env.MO2_BROWSER_ROOT = path.join(owner, '.runtime', 'browser');
+  if (!env.MO2_CDP_PORT) {
+    const portState = loadJson(path.join(owner, '.runtime', 'state', 'browser-port.json'), {});
+    const port = Number(portState?.port);
+    if (Number.isInteger(port) && port > 0 && port < 65536) env.MO2_CDP_PORT = String(port);
+  }
+  return env;
+}
+
+function compactProcessError(result) {
+  const text = String(result?.stderr || result?.stdout || result?.errorCode || `exit=${result?.status ?? 'unknown'}`).trim();
+  return text.split(/\r?\n/).filter(Boolean).slice(-8).join(' ').slice(-1400) || 'unknown prerequisite failure';
+}
+
+function ensureDownloadPrerequisites(config, runDir, runner = runNode) {
+  if (!config?.modsDir) return { ok: false, stage: 'CONFIG', error: 'review-center-config 缺少 modsDir' };
+  const env = reviewExecutionEnv(runDir);
+  const steps = [
+    { stage: 'BROWSER_START', args: [path.join(__dirname, 'browser-manager.js'), 'start'] },
+    { stage: 'BROWSER_ASSERT', args: [path.join(__dirname, 'browser-manager.js'), 'assert'] },
+    { stage: 'MO2_ENSURE', args: [path.join(__dirname, 'mo2-process-manager.js'), 'ensure', '--mods-dir', config.modsDir] },
+  ];
+  const completed = [];
+  for (const step of steps) {
+    const result = runner(step.args, { cwd: ROOT_DIR, capture: true, allowFailure: true, env });
+    if (!result?.ok) {
+      return {
+        ok: false,
+        stage: step.stage,
+        status: result?.status ?? null,
+        error: compactProcessError(result),
+        completed,
+        env,
+      };
+    }
+    completed.push(step.stage);
+  }
+  return { ok: true, completed, env };
+}
+
+function tailFile(file, maxBytes = 5000) {
+  try {
+    const stat = fs.statSync(file);
+    const start = Math.max(0, stat.size - maxBytes);
+    const size = stat.size - start;
+    const fd = fs.openSync(file, 'r');
+    const buffer = Buffer.alloc(size);
+    fs.readSync(fd, buffer, 0, size, start);
+    fs.closeSync(fd);
+    return buffer.toString('utf8').slice(-maxBytes);
+  } catch (_) {
+    return '';
+  }
+}
+
 async function main() {
-  const rootDir = path.resolve(__dirname, '..');
+  const rootDir = ROOT_DIR;
   const requested = argValue(process.argv, '--run', process.argv[2] || '');
   const runDir = requested ? path.resolve(requested) : findLatestReviewRun(rootDir);
   if (!runDir || !fs.existsSync(runDir)) throw new Error('找不到 Review Center 运行目录。先运行 pipeline，或使用 --run <runDir>。');
   const htmlFile = path.join(runDir, 'review-center.html');
   const reviewFile = path.join(runDir, 'review-center.json');
   const decisionsFile = path.join(runDir, 'review-decisions.json');
+  const configFile = path.join(runDir, 'review-center-config.json');
+  const logFile = path.join(runDir, 'review-download-launch.log');
   if (!fs.existsSync(reviewFile)) throw new Error('runDir 中没有 review-center.json，请先运行 pipeline/build-review-center');
 
   const token = crypto.randomBytes(24).toString('hex');
   let activeChild = null;
+  let lastExit = null;
   const basePort = Math.max(1024, Number(argValue(process.argv, '--port', '3217')) || 3217);
   const shouldOpen = !process.argv.includes('--no-open');
+
+  const jobSnapshot = () => ({
+    activePid: activeChild && activeChild.exitCode === null ? activeChild.pid : null,
+    latestJob: latestReviewJob(runDir),
+    lastExit,
+    launchLogTail: tailFile(logFile),
+  });
 
   const server = http.createServer(async (req, res) => {
     const parsed = url.parse(req.url, true);
@@ -99,7 +180,7 @@ async function main() {
     }
     if (req.method === 'GET' && parsed.pathname === '/api/state') {
       const decisions = loadJson(decisionsFile, { decisions: {} });
-      return json(res, 200, { decisions, activePid: activeChild && activeChild.exitCode === null ? activeChild.pid : null, latestJob: latestReviewJob(runDir) });
+      return json(res, 200, { decisions, ...jobSnapshot() });
     }
     if (req.method === 'POST' && parsed.pathname === '/api/save') {
       try {
@@ -115,17 +196,31 @@ async function main() {
         const body = await readBody(req);
         const decisions = body.decisions && typeof body.decisions === 'object' ? body.decisions : {};
         saveJson(decisionsFile, { savedAt: new Date().toISOString(), decisions });
-        const logFile = path.join(runDir, 'review-download-launch.log');
+
+        const config = loadJson(configFile, {});
+        const prerequisites = ensureDownloadPrerequisites(config, runDir);
+        if (!prerequisites.ok) {
+          const error = `${prerequisites.stage}: ${prerequisites.error}`;
+          lastExit = { at: new Date().toISOString(), code: null, stage: prerequisites.stage, error };
+          return json(res, 503, { error, stage: prerequisites.stage });
+        }
+
         const fd = fs.openSync(logFile, 'a');
+        const childEnv = prerequisites.env || reviewExecutionEnv(runDir);
         activeChild = cp.spawn(process.execPath, [path.join(__dirname, 'review-download.js'), '--run', runDir, '--decisions', decisionsFile], {
-          cwd: rootDir, windowsHide: true, detached: false, stdio: ['ignore', fd, fd],
+          cwd: rootDir, env: childEnv, windowsHide: true, detached: false, stdio: ['ignore', fd, fd],
         });
-        activeChild.on('exit', () => { try { fs.closeSync(fd); } catch (_) {} });
-        return json(res, 202, { ok: true, jobId: `pid-${activeChild.pid}`, pid: activeChild.pid, logFile });
+        const launchedPid = activeChild.pid;
+        lastExit = null;
+        activeChild.on('exit', (code, signal) => {
+          lastExit = { at: new Date().toISOString(), pid: launchedPid, code, signal: signal || null };
+          try { fs.closeSync(fd); } catch (_) {}
+        });
+        return json(res, 202, { ok: true, jobId: `pid-${activeChild.pid}`, pid: activeChild.pid, prerequisites: prerequisites.completed });
       } catch (e) { return json(res, 400, { error: e.message }); }
     }
     if (req.method === 'GET' && parsed.pathname === '/api/job') {
-      return json(res, 200, { activePid: activeChild && activeChild.exitCode === null ? activeChild.pid : null, latestJob: latestReviewJob(runDir) });
+      return json(res, 200, jobSnapshot());
     }
     return json(res, 404, { error: 'NOT_FOUND' });
   });
@@ -157,4 +252,13 @@ if (require.main === module) {
   main().catch(err => { console.error(`review-server failed: ${err.message}`); process.exit(1); });
 }
 
-module.exports = { findLatestReviewRun, decorateHtml, renderCurrentReviewHtml };
+module.exports = {
+  findLatestReviewRun,
+  decorateHtml,
+  renderCurrentReviewHtml,
+  reviewRuntimeOwner,
+  reviewExecutionEnv,
+  ensureDownloadPrerequisites,
+  compactProcessError,
+  tailFile,
+};
