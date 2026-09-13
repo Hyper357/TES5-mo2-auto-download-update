@@ -4,6 +4,7 @@ const assert = require('assert');
 const fs = require('fs');
 const os = require('os');
 const path = require('path');
+const vm = require('vm');
 const {
   decorateHtml,
   renderCurrentReviewHtml,
@@ -43,6 +44,12 @@ assert.match(current, /下载所选文件/);
 assert.match(current, /window\.REVIEW_DATA=/);
 assert.match(current, /本轮自动阶段汇报/);
 assert.match(current, /pollReviewJob/);
+assert.match(current, /repairSavedReviewState/);
+assert.match(current, /已清理 .* 个无效旧选择/);
+assert.ok(current.indexOf('repairSavedReviewState') < current.indexOf('const D = window.REVIEW_DATA'), 'saved-state repair must install before app restore runs');
+for (const match of current.matchAll(/<script>([\s\S]*?)<\/script>/g)) {
+  new vm.Script(match[1]);
+}
 
 // A Review Center run recovered from another repo copy must keep using the runtime
 // owner's managed browser binary/port instead of silently switching to the fresh clone.
