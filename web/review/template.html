@@ -45,6 +45,127 @@
 </div>
 
 <script>window.REVIEW_DATA=__REVIEW_DATA__;</script>
+<script>
+(() => {
+  if (location.protocol === 'file:') return;
+  const nativeFetch = window.fetch.bind(window);
+
+  function badId(value) {
+    const s = String(value ?? '').trim();
+    return !s || /^(undefined|null)$/i.test(s);
+  }
+
+  function componentGroups(item) {
+    if (item?.componentFamilies?.length) return item.componentFamilies;
+    return (item?.patchFamilies || []).map(f => ({ kind: 'PATCH', ...f }));
+  }
+
+  function itemIsActionable(item) {
+    if (!item) return false;
+    if (item.reviewClass) return item.reviewClass === 'actionable';
+    if (item.action === 'HOLD_UPDATE_ELIGIBILITY') return false;
+    return (item.mainOptions || []).length > 1 || componentGroups(item).length > 0;
+  }
+
+  function allowedExactKeys(item) {
+    const source = Array.isArray(item?.recentNexusFiles) && item.recentNexusFiles.length
+      ? item.recentNexusFiles
+      : [
+          ...(item?.mainOptions || []),
+          ...componentGroups(item).flatMap(g => (g.candidates || []).filter(x => String(x.modId || item.modId) === String(item.modId))),
+        ];
+    const out = new Set();
+    for (const f of source) {
+      const modId = String(f?.modId || item?.modId || '').trim();
+      const fileId = String(f?.fileId ?? f?.file_id ?? '').trim();
+      const current = !!f?.current || fileId === String(item?.localFileId || '');
+      if (badId(modId) || badId(fileId) || current || f?.active === false || f?.selectable === false) continue;
+      out.add(`${modId}:${fileId}`);
+    }
+    return out;
+  }
+
+  function normalizeSavedFile(raw, item, allowed) {
+    const primitive = typeof raw === 'string' || typeof raw === 'number';
+    const rawFileId = primitive ? raw : (raw?.fileId ?? raw?.file_id ?? '');
+    const rawModId = primitive ? '' : (raw?.modId ?? raw?.mod_id ?? '');
+    const fileId = String(rawFileId ?? '').trim();
+    const modId = String(badId(rawModId) ? (item?.modId || '') : rawModId).trim();
+    if (badId(modId) || badId(fileId)) return null;
+    const key = `${modId}:${fileId}`;
+    return allowed.has(key) ? { modId, fileId } : null;
+  }
+
+  function repairSavedReviewState(payload) {
+    const envelope = payload?.decisions;
+    const source = envelope?.decisions && typeof envelope.decisions === 'object'
+      ? envelope.decisions
+      : (envelope && typeof envelope === 'object' ? envelope : {});
+    const items = new Map((window.REVIEW_DATA?.items || []).map(item => [String(item.id), item]));
+    const repaired = {};
+    let kept = 0;
+    let dropped = 0;
+    let migrated = 0;
+
+    for (const [id, decision] of Object.entries(source)) {
+      const item = items.get(String(id));
+      const selected = Array.isArray(decision?.selectedFiles) ? decision.selectedFiles : [];
+      if (!item || !itemIsActionable(item) || !selected.length) {
+        dropped += selected.length;
+        continue;
+      }
+      const allowed = allowedExactKeys(item);
+      const clean = [];
+      const seen = new Set();
+      for (const raw of selected) {
+        const normalized = normalizeSavedFile(raw, item, allowed);
+        if (!normalized) {
+          dropped++;
+          continue;
+        }
+        if (typeof raw !== 'object' || badId(raw?.modId)) migrated++;
+        const key = `${normalized.modId}:${normalized.fileId}`;
+        if (seen.has(key)) continue;
+        seen.add(key);
+        clean.push(normalized);
+        kept++;
+      }
+      if (clean.length) repaired[id] = { selectedFiles: clean };
+    }
+
+    if (envelope?.decisions && typeof envelope.decisions === 'object') {
+      payload.decisions = { ...envelope, decisions: repaired };
+    } else {
+      payload.decisions = repaired;
+    }
+    window.__REVIEW_STATE_REPAIR__ = { kept, dropped, migrated };
+    if (dropped > 0) {
+      setTimeout(() => {
+        const status = document.getElementById('status');
+        if (status) status.textContent = `已清理 ${dropped} 个无效旧选择；请重新勾选需要下载的文件。`;
+      }, 0);
+    }
+    return payload;
+  }
+
+  window.fetch = async function patchedReviewFetch(input, init) {
+    const response = await nativeFetch(input, init);
+    try {
+      const method = String(init?.method || (input instanceof Request ? input.method : 'GET')).toUpperCase();
+      const rawUrl = typeof input === 'string' ? input : input?.url;
+      if (method === 'GET' && rawUrl && new URL(rawUrl, location.href).pathname === '/api/state' && response.ok) {
+        const payload = repairSavedReviewState(await response.clone().json());
+        const headers = new Headers(response.headers);
+        headers.delete('content-length');
+        return new Response(JSON.stringify(payload), { status: response.status, statusText: response.statusText, headers });
+      }
+    } catch (_) {
+      // If migration itself fails, return the original response and keep the UI usable.
+    }
+    return response;
+  };
+})();
+</script>
 <script>/*__APP__*/</script>
 <script>
 (() => {
