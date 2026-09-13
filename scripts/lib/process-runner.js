@@ -7,6 +7,7 @@ const { sanitizeString } = require('./diagnostics');
 
 const CDP_PRELOAD = path.join(__dirname, 'cdp-compat-preload.js');
 const DEFAULT_CAPTURE_MAX_BUFFER = 16 * 1024 * 1024;
+const REVIEW_EXACT_EXECUTOR = path.join(__dirname, '..', 'review-exact-execute.js');
 
 // Node parses NODE_OPTIONS itself rather than delegating argument parsing to
 // child_process. On Windows, a quoted value containing backslashes can be
@@ -31,17 +32,47 @@ function projectNodeEnv(base = process.env, preloadPath = CDP_PRELOAD) {
   return { ...base, NODE_OPTIONS: nodeOptionsWithProjectPreload(base?.NODE_OPTIONS || '', preloadPath) };
 }
 
+function isExplicitReviewManifest(file) {
+  if (!file || path.basename(String(file)).toLowerCase() !== 'review-run.tsv') return false;
+  try {
+    const rows = fs.readFileSync(file, 'utf8')
+      .split(/\r?\n/)
+      .filter(line => line.trim() && !line.startsWith('#'));
+    if (!rows.length) return false;
+    return rows.every(line => {
+      const cols = line.split('\t');
+      const note = String(cols[3] || '');
+      const action = String(cols[5] || '').trim().toUpperCase();
+      return action === 'DOWNLOAD' && /(?:^|;\s*)user-selected-nexus-file(?:;|$)/i.test(note);
+    });
+  } catch (_) {
+    return false;
+  }
+}
+
+function routedNodeArgs(args) {
+  const list = Array.isArray(args) ? [...args] : [];
+  if (list.length < 2) return list;
+  const entry = path.resolve(String(list[0] || ''));
+  const directExecutor = path.resolve(__dirname, '..', 'execute-plan.js');
+  if (entry === directExecutor && isExplicitReviewManifest(list[1])) {
+    list[0] = REVIEW_EXACT_EXECUTOR;
+  }
+  return list;
+}
+
 // Also update the current process environment so raw child_process calls made by
 // legacy wrappers inherit the same shared-CDP preload. This does not patch the
 // current process; it only guarantees that subsequently spawned Node children do.
 process.env.NODE_OPTIONS = nodeOptionsWithProjectPreload(process.env.NODE_OPTIONS || '');
 
 function runNode(args, options = {}) {
+  const routedArgs = routedNodeArgs(args);
   const capture = !!options.capture;
   const maxBuffer = capture
     ? Math.max(1024 * 1024, Number(options.maxBuffer || DEFAULT_CAPTURE_MAX_BUFFER))
     : undefined;
-  const r = cp.spawnSync(process.execPath, args, {
+  const r = cp.spawnSync(process.execPath, routedArgs, {
     cwd: options.cwd,
     env: projectNodeEnv(options.env || process.env),
     encoding: capture ? 'utf8' : undefined,
@@ -62,7 +93,7 @@ function runNode(args, options = {}) {
   if (!result.ok && !options.allowFailure) {
     const detail = String(result.stderr || result.stdout || spawnError?.message || '').trim();
     const code = spawnError?.code === 'ENOBUFS' ? `PROCESS_CAPTURE_MAX_BUFFER_EXCEEDED:${maxBuffer}` : (spawnError?.code || 'CHILD_PROCESS_FAILED');
-    throw new Error(`${code}: 命令失败: node ${args.join(' ')}${detail ? `\n${detail}` : ''}`);
+    throw new Error(`${code}: 命令失败: node ${routedArgs.join(' ')}${detail ? `\n${detail}` : ''}`);
   }
   return result;
 }
@@ -101,9 +132,12 @@ function openDefault(target) {
 module.exports = {
   CDP_PRELOAD,
   DEFAULT_CAPTURE_MAX_BUFFER,
+  REVIEW_EXACT_EXECUTOR,
   normalizeNodeRequirePath,
   nodeOptionsWithProjectPreload,
   projectNodeEnv,
+  isExplicitReviewManifest,
+  routedNodeArgs,
   runNode,
   spawnNodeDetached,
   openDefault,
