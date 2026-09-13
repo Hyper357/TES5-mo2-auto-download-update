@@ -149,11 +149,27 @@
   }
 
   window.fetch = async function patchedReviewFetch(input, init) {
-    const response = await nativeFetch(input, init);
+    let nextInit = init;
+    let method = String(init?.method || (input instanceof Request ? input.method : 'GET')).toUpperCase();
+    const rawUrl = typeof input === 'string' ? input : input?.url;
+    const pathname = rawUrl ? new URL(rawUrl, location.href).pathname : '';
+
     try {
-      const method = String(init?.method || (input instanceof Request ? input.method : 'GET')).toUpperCase();
-      const rawUrl = typeof input === 'string' ? input : input?.url;
-      if (method === 'GET' && rawUrl && new URL(rawUrl, location.href).pathname === '/api/state' && response.ok) {
+      if (method === 'POST' && (pathname === '/api/download' || pathname === '/api/save') && typeof init?.body === 'string') {
+        const body = JSON.parse(init.body || '{}');
+        if (body && body.decisions && typeof body.decisions === 'object') {
+          repairSavedReviewState(body);
+          nextInit = { ...init, body: JSON.stringify(body) };
+        }
+      }
+    } catch (_) {
+      // Backend allow-list remains authoritative if client-side cleanup cannot run.
+    }
+
+    const response = await nativeFetch(input, nextInit);
+    try {
+      method = String(nextInit?.method || (input instanceof Request ? input.method : 'GET')).toUpperCase();
+      if (method === 'GET' && pathname === '/api/state' && response.ok) {
         const payload = repairSavedReviewState(await response.clone().json());
         const headers = new Headers(response.headers);
         headers.delete('content-length');
@@ -203,6 +219,28 @@
     }
   }
 
+  function currentExecutorTail(job, payload) {
+    const tail = String(payload?.launchLogTail || '');
+    if (!tail) return '';
+    if (String(job?.status || '').toUpperCase() !== 'FAILED') return shortText(tail, 260);
+
+    const executor = [...tail.matchAll(/EXECUTOR_FAILED\s+([A-Z0-9_]+)/gi)].at(-1);
+    const direct = [...tail.matchAll(/DIRECT_DOWNLOAD_FAILED\s+([A-Z0-9_]+)/gi)].at(-1);
+    const errorCode = [...tail.matchAll(/errorCode["']?\s*[:=]\s*["']([A-Z0-9_]+)["']/gi)].at(-1);
+    const code = executor?.[1] || direct?.[1] || errorCode?.[1] || '';
+    if (code) return `执行器错误 ${code}`;
+
+    const failed = [...tail.matchAll(/["']failed["']\s*:\s*(\d+)/gi)].at(-1);
+    if (failed && Number(failed[1]) > 0) return `执行器报告 ${failed[1]} 个失败项`;
+
+    // REVIEW_SELECTION_INVALID is emitted by the BLOCKED phase. If the current job is
+    // FAILED, seeing it only in the shared append log means it belongs to an older run.
+    if (/REVIEW_SELECTION_INVALID|undefined:undefined/i.test(tail)) {
+      return '执行器失败；已忽略上一轮遗留的选择校验日志。';
+    }
+    return shortText(tail, 260);
+  }
+
   function failureDetail(job, payload) {
     if (Array.isArray(job?.errors) && job.errors.length) {
       const e = job.errors[0] || {};
@@ -211,8 +249,7 @@
     const checks = failedCheckDetail(job);
     if (checks) return checks;
     if (job?.stderr) return shortText(job.stderr);
-    const tail = shortText(payload?.launchLogTail || '', 260);
-    return tail;
+    return currentExecutorTail(job, payload);
   }
 
   async function pollReviewJob() {
