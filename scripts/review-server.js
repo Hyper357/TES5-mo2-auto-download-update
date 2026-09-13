@@ -49,7 +49,10 @@ function decorateHtml(html, runDir) {
   const review = Number(r.humanReview ?? 0) || 0;
   const mode = esc(r.mode || 'AUDIT');
   const banner = `<div style="background:#171d24;border:1px solid #2b3541;border-radius:16px;padding:18px 20px;margin:0 0 18px"><div style="font-weight:700;margin-bottom:10px">📊 本轮自动阶段汇报 <span style="color:#9caaba;font-weight:400">${mode}</span></div><div style="display:flex;gap:10px;flex-wrap:wrap"><span class="pill">自动请求 ${requested}</span><span class="pill" style="color:#9be7a6">VERIFIED ${verified}</span><span class="pill" style="color:${failed ? '#ffb4ab' : '#9be7a6'}">失败/未验证 ${failed}</span><span class="pill">延后人工复核 ${review}</span></div></div>`;
-  return html.replace('<div id="root"></div>', `${banner}<div id="root"></div>`);
+  for (const root of ['<main id="root"></main>', '<div id="root"></div>']) {
+    if (html.includes(root)) return html.replace(root, `${banner}${root}`);
+  }
+  return html;
 }
 
 function renderCurrentReviewHtml(runDir, htmlFile, reviewFile) {
