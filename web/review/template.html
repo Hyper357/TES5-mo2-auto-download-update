@@ -176,11 +176,28 @@
     return text.length > max ? text.slice(0, max) + '…' : text;
   }
 
-  function failedChecks(job) {
+  function failedCheckDetail(job) {
     try {
       const doc = JSON.parse(String(job?.stdout || ''));
-      const failed = (doc.checks || []).filter(x => x && x.ok === false).map(x => x.name).filter(Boolean);
-      return failed.length ? failed.slice(0, 4).join(', ') : '';
+      const failed = (doc.checks || []).filter(x => x && x.ok === false);
+      if (!failed.length) return '';
+      return failed.slice(0, 4).map(check => {
+        const name = String(check?.name || 'CHECK');
+        const detail = check?.detail || {};
+        if (name === 'API_KEY_FILE') return 'API_KEY_FILE：未读取到 Nexus API Key';
+        if (name === 'NEXUS_API') {
+          if (detail?.status === 'NO_KEY') return 'NEXUS_API：未读取到 API Key';
+          if (detail?.httpStatus) {
+            const code = Number(detail.httpStatus);
+            if (code === 401 || code === 403) return `NEXUS_API：HTTP ${code}（API Key 被拒绝）`;
+            if (code === 429) return 'NEXUS_API：HTTP 429（API 请求额度或频率受限）';
+            if (code >= 500) return `NEXUS_API：HTTP ${code}（Nexus 服务端异常）`;
+            return `NEXUS_API：HTTP ${code}`;
+          }
+          if (detail?.error) return `NEXUS_API：${shortText(detail.error, 120)}`;
+        }
+        return name;
+      }).join('；');
     } catch (_) {
       return '';
     }
@@ -191,8 +208,8 @@
       const e = job.errors[0] || {};
       return shortText([e.code, e.detail].filter(Boolean).join(': '));
     }
-    const checks = failedChecks(job);
-    if (checks) return '未通过检查：' + checks;
+    const checks = failedCheckDetail(job);
+    if (checks) return checks;
     if (job?.stderr) return shortText(job.stderr);
     const tail = shortText(payload?.launchLogTail || '', 260);
     return tail;
