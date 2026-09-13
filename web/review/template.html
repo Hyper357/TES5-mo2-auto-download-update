@@ -46,5 +46,70 @@
 
 <script>window.REVIEW_DATA=__REVIEW_DATA__;</script>
 <script>/*__APP__*/</script>
+<script>
+(() => {
+  if (location.protocol === 'file:') return;
+
+  function shortText(value, max = 220) {
+    const text = String(value || '').replace(/\s+/g, ' ').trim();
+    return text.length > max ? text.slice(0, max) + '…' : text;
+  }
+
+  function failedChecks(job) {
+    try {
+      const doc = JSON.parse(String(job?.stdout || ''));
+      const failed = (doc.checks || []).filter(x => x && x.ok === false).map(x => x.name).filter(Boolean);
+      return failed.length ? failed.slice(0, 4).join(', ') : '';
+    } catch (_) {
+      return '';
+    }
+  }
+
+  function failureDetail(job, payload) {
+    if (Array.isArray(job?.errors) && job.errors.length) {
+      const e = job.errors[0] || {};
+      return shortText([e.code, e.detail].filter(Boolean).join(': '));
+    }
+    const checks = failedChecks(job);
+    if (checks) return '未通过检查：' + checks;
+    if (job?.stderr) return shortText(job.stderr);
+    const tail = shortText(payload?.launchLogTail || '', 260);
+    return tail;
+  }
+
+  async function pollReviewJob() {
+    try {
+      const payload = await get('/api/job');
+      const job = payload?.latestJob || null;
+      if (payload?.activePid) {
+        const phase = job?.status && job.status !== 'COMPLETED' ? job.status : 'STARTING';
+        statusEl.textContent = `下载任务运行中 · ${phase} · pid=${payload.activePid}`;
+        downloadBtn.disabled = true;
+        return;
+      }
+
+      if (!payload?.lastExit) return;
+      const status = String(job?.status || '').toUpperCase();
+      if (status === 'COMPLETED') {
+        statusEl.textContent = '下载任务已完成。';
+      } else if (status === 'NO_DOWNLOADS') {
+        statusEl.textContent = '任务已结束：没有需要下载的文件。';
+      } else if (status) {
+        const detail = failureDetail(job, payload);
+        statusEl.textContent = `下载任务 ${status}${detail ? '：' + detail : ''}`;
+      } else {
+        const detail = shortText(payload?.lastExit?.error || payload?.launchLogTail || '', 260);
+        statusEl.textContent = `下载进程已退出${detail ? '：' + detail : ''}`;
+      }
+      updateSelectionBar();
+    } catch (_) {
+      // Keep the picker usable if the transient status endpoint is unavailable.
+    }
+  }
+
+  setInterval(pollReviewJob, 900);
+  setTimeout(pollReviewJob, 250);
+})();
+</script>
 </body>
 </html>
