@@ -46,6 +46,8 @@ assert.match(current, /本轮自动阶段汇报/);
 assert.match(current, /pollReviewJob/);
 assert.match(current, /repairSavedReviewState/);
 assert.match(current, /已清理 .* 个无效旧选择/);
+assert.match(current, /NEXUS_API：HTTP 429/);
+assert.match(current, /API Key 被拒绝/);
 assert.ok(current.indexOf('repairSavedReviewState') < current.indexOf('const D = window.REVIEW_DATA'), 'saved-state repair must install before app restore runs');
 for (const match of current.matchAll(/<script>([\s\S]*?)<\/script>/g)) {
   new vm.Script(match[1]);
