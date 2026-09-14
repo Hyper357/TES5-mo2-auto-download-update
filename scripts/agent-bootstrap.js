@@ -7,9 +7,10 @@ const path = require('path');
 
 const ROOT = path.resolve(__dirname, '..');
 
-function run(command, args = [], { capture = false, allowFailure = false, cwd = ROOT } = {}) {
+function run(command, args = [], { capture = false, allowFailure = false, cwd = ROOT, env = process.env } = {}) {
   const r = cp.spawnSync(command, args, {
     cwd,
+    env,
     encoding: 'utf8',
     windowsHide: true,
     stdio: capture ? ['ignore', 'pipe', 'pipe'] : 'inherit',
@@ -56,21 +57,23 @@ function currentIdentity() {
 }
 
 function syncLatestMain() {
-  const id = currentIdentity();
-  if (id.branch !== 'main') {
+  const before = currentIdentity();
+  if (before.branch !== 'main') {
     return {
       ok: false,
       code: 'AGENT_BOOTSTRAP_NOT_MAIN',
-      detail: `当前分支是 ${id.branch || '(detached)'}；bootstrap 不会自动切分支或覆盖工作。请确认任务分支后手动同步 main。`,
-      identity: id,
+      detail: `当前分支是 ${before.branch || '(detached)'}；bootstrap 不会自动切分支或覆盖工作。请确认任务分支后手动同步 main。`,
+      before,
+      identity: before,
     };
   }
-  if (!id.clean) {
+  if (!before.clean) {
     return {
       ok: false,
       code: 'AGENT_BOOTSTRAP_DIRTY_WORKTREE',
       detail: '工作区存在未提交修改；为避免覆盖本地工作，bootstrap 拒绝自动 pull。',
-      identity: id,
+      before,
+      identity: before,
     };
   }
 
@@ -80,15 +83,26 @@ function syncLatestMain() {
       ok: false,
       code: 'AGENT_BOOTSTRAP_PULL_FAILED',
       detail: pull.stderr || pull.stdout || 'git pull --ff-only failed',
-      identity: id,
+      before,
+      identity: before,
     };
   }
-  return { ok: true, pull: pull.stdout || 'Already up to date.', identity: currentIdentity() };
+  return { ok: true, pull: pull.stdout || 'Already up to date.', before, identity: currentIdentity() };
+}
+
+function reexecIfUpdated(synced) {
+  const changed = synced?.before?.head && synced?.identity?.head && synced.before.head !== synced.identity.head;
+  if (!changed || process.env.AGENT_BOOTSTRAP_REEXEC === '1') return false;
+  console.log(`Updated ${synced.before.head.slice(0, 12)} -> ${synced.identity.head.slice(0, 12)}; restarting bootstrap from the new checkout...`);
+  const r = run(process.execPath, [__filename], {
+    allowFailure: true,
+    env: { ...process.env, AGENT_BOOTSTRAP_REEXEC: '1' },
+  });
+  process.exit(Number.isInteger(r.status) ? r.status : 1);
 }
 
 function main() {
-  const pkg = JSON.parse(fs.readFileSync(path.join(ROOT, 'package.json'), 'utf8'));
-  console.log(`TES5 MO2 agent bootstrap · package ${pkg.version}`);
+  console.log('TES5 MO2 agent bootstrap');
   console.log('1/4 Syncing repository to origin/main (fast-forward only)...');
   const synced = syncLatestMain();
   if (!synced.ok) {
@@ -96,6 +110,10 @@ function main() {
     process.exit(2);
   }
   console.log(synced.pull);
+  reexecIfUpdated(synced);
+
+  const pkg = JSON.parse(fs.readFileSync(path.join(ROOT, 'package.json'), 'utf8'));
+  console.log(`Using package ${pkg.version} at ${synced.identity.head}`);
 
   console.log('2/4 Checking dependencies...');
   const deps = dependencyHealth();
@@ -130,4 +148,5 @@ module.exports = {
   dependencyHealth,
   currentIdentity,
   syncLatestMain,
+  reexecIfUpdated,
 };
