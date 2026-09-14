@@ -1,45 +1,108 @@
-# Task Entry — Low-Token / Low-Quota Mode
+# Task Entry — current low-context operating mode
 
-Use this file as the default task entry point. Do **not** preload full historical reports into agent context.
+Use this file after root `AGENTS.md`. Do not preload historical reports or large runtime JSON into model context.
 
-## First command
+## First takeover command
+
+From a clean `main` checkout:
+
+```bash
+node scripts/agent-bootstrap.js
+```
+
+This synchronizes to `origin/main` with fast-forward-only semantics, checks dependencies/syntax, and prints compact live state. It refuses dirty/non-main worktrees rather than resetting them.
+
+After bootstrap, the normal compact state command is:
 
 ```bash
 npm run agent:brief
 ```
 
-If one MOD needs inspection:
+For one MOD:
 
 ```bash
 npm run agent:mod -- <modId>
 ```
 
-Only read `docs/AGENT_HANDOFF.md` when changing architecture/safety rules. Only read `docs/CURRENT_STATE.md` when a task explicitly needs historical handoff context.
-
 ## Task types
 
-- **RUN**: `git status` → `npm run agent:brief` → `npm run update` → `npm run agent:brief` → report → stop. Do not run `npm test` when code did not change.
-- **FIX**: inspect only files implicated by the defect; run targeted tests while editing; run full `npm test` once before PR/merge.
-- **INVESTIGATE**: read-only; use compact commands and bounded excerpts; do not mutate or run a full suite unless needed to reproduce the defect.
-
-## Nexus freshness policy
-
-Normal runs are **cache-first**. The Nexus files cache already has a bounded TTL, so repeated runs should not bypass it and re-query every installed MOD.
+### RUN — real update already authorized
 
 ```bash
-npm run update          # normal cache-first update
-npm run update:fresh    # deliberate hard refresh; bypass cache
-npm run audit           # cache-first audit
-npm run audit:fresh     # deliberate hard-refresh audit
+npm run agent:brief
+npm run update
+npm run agent:brief
 ```
 
-Use `*:fresh` only when stale cache is actually suspected or the user explicitly requests a full fresh scan.
+Report results and stop. Do not run the full regression suite when code did not change.
+
+### AUDIT — explicit no-download inspection
+
+```bash
+npm run agent:brief
+npm run audit
+npm run agent:brief
+```
+
+### REVIEW — resolve held/ambiguous exact targets
+
+```bash
+npm run review
+```
+
+The current HTML shows live exact progress/failures and final disk-persisted failure evidence.
+
+### FIX — code defect
+
+1. identify exact error/status and implicated module;
+2. inspect only relevant code/evidence;
+3. run targeted tests while editing;
+4. run full `npm test` once before PR/merge;
+5. preserve safety gates unless new evidence proves the gate itself is wrong.
+
+### INVESTIGATE — read-only
+
+Use compact commands and bounded evidence. Do not mutate runtime or run the full suite unless reproduction truly requires it.
+
+## Cache policy
+
+Normal runs are cache-first:
+
+```bash
+npm run update
+npm run audit
+```
+
+Hard refresh is deliberate:
+
+```bash
+npm run update:fresh
+npm run audit:fresh
+```
+
+Use `*:fresh` only when stale cache is suspected or explicitly requested.
+
+## Failure evidence order
+
+For Review Center download problems, prefer:
+
+```text
+HTML live log panel
+review-jobs/<job>/review-failures.json
+review-jobs/<job>/review-failures.log
+review-jobs/<job>/execution-state.json
+review-failure-history.jsonl
+logs/errors.jsonl
+```
+
+Use exact `tx + modId:fileId`. Never blindly rerun a whole batch because one target failed.
 
 ## Hard limits
 
 - Never print full `plan.json`, `review-center.json`, ledger, or large JSONL logs into chat.
 - Same probe/command maximum twice. Same result twice = conclude and move on.
-- One missing path = resolve latest run/path once; never loop over guessed `reports/plan*.json` locations.
-- Normal `npm run update` is non-debug and cache-first. Add `-- --debug` only for a focused diagnosis.
-- One Task = one objective. No spontaneous new Phase/audit/redesign.
-- Put bulky evidence under `.runtime/`; final chat output should be counts, exact IDs, concise errors, and artifact paths.
+- One missing path = resolve latest runtime path once; do not loop over guesses.
+- Debug is opt-in and targeted.
+- One task = one objective.
+- Bulky evidence stays under `.runtime/`; report counts, exact IDs, error codes, and artifact paths.
+- Never `git reset --hard`, delete `.runtime`, or clear ledgers to make a run pass.
