@@ -1,8 +1,8 @@
 interface:
   display_name: "Skyrim MO2 安全更新"
-  short_description: "核对 AE1170 版本、补丁与汉化并安全交给 MO2 下载"
+  short_description: "精确审计、Review Center 复核并安全下载 Skyrim AE/MO2 更新"
   brand_color: "#6B4F2A"
-  default_prompt: "Use $skyrim-mo2-safe-update to audit and stage Skyrim AE 1.6.1170 mod updates through MO2, including compatible patches, resources, and Chinese translations, and report anything that needs manual download."
+  default_prompt: "Read root AGENTS.md first. On a clean main checkout run node scripts/agent-bootstrap.js to fast-forward to origin/main, repair dependencies if needed, run syntax checks, and read compact live state. Then follow docs/TASK_ENTRY.md. Preserve all exact-identity, eligibility, component-closure, browser/API, idempotency and VERIFIED safety gates; use Review Center live/persistent failure logs for exact per-mod debugging."
 
 policy:
   allow_implicit_invocation: true
