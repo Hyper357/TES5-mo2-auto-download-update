@@ -21,6 +21,26 @@
     <div class="summary" id="summary"></div>
   </div>
 
+  <section class="download-log" id="download-log" hidden>
+    <div class="download-log-head">
+      <div>
+        <div class="download-log-title">🧾 下载实时日志</div>
+        <div class="muted">任务运行时实时显示当前下载与失败 MOD；失败项会保留 exact modId:fileId 和 errorCode。</div>
+      </div>
+      <span class="download-log-state" id="download-log-state">IDLE</span>
+    </div>
+    <div class="summary" id="download-log-summary"></div>
+    <div class="download-log-block" id="download-log-active-block" hidden>
+      <div class="download-log-label">当前处理中</div>
+      <div class="download-log-list" id="download-log-active"></div>
+    </div>
+    <div class="download-log-block">
+      <div class="download-log-label">失败 / 阻断</div>
+      <div class="download-log-list" id="download-log-failures"></div>
+    </div>
+    <div class="download-log-foot" id="download-log-foot"></div>
+  </section>
+
   <div class="toolbar">
     <div class="filters" id="filters"></div>
     <div class="toolbar-right">
@@ -187,6 +207,14 @@
 (() => {
   if (location.protocol === 'file:') return;
 
+  const logPanel = document.getElementById('download-log');
+  const logState = document.getElementById('download-log-state');
+  const logSummary = document.getElementById('download-log-summary');
+  const logActiveBlock = document.getElementById('download-log-active-block');
+  const logActive = document.getElementById('download-log-active');
+  const logFailures = document.getElementById('download-log-failures');
+  const logFoot = document.getElementById('download-log-foot');
+
   function shortText(value, max = 220) {
     const text = String(value || '').replace(/\s+/g, ' ').trim();
     return text.length > max ? text.slice(0, max) + '…' : text;
@@ -233,8 +261,6 @@
     const failed = [...tail.matchAll(/["']failed["']\s*:\s*(\d+)/gi)].at(-1);
     if (failed && Number(failed[1]) > 0) return `执行器报告 ${failed[1]} 个失败项`;
 
-    // REVIEW_SELECTION_INVALID is emitted by the BLOCKED phase. If the current job is
-    // FAILED, seeing it only in the shared append log means it belongs to an older run.
     if (/REVIEW_SELECTION_INVALID|undefined:undefined/i.test(tail)) {
       return '执行器失败；已忽略上一轮遗留的选择校验日志。';
     }
@@ -252,10 +278,103 @@
     return currentExecutorTail(job, payload);
   }
 
+  function setSummaryPills(live) {
+    logSummary.replaceChildren();
+    const values = [
+      ['计划', live?.planned ?? 0, ''],
+      ['VERIFIED', live?.verified ?? 0, 'good'],
+      ['失败/阻断', live?.failedOrBlocked ?? 0, live?.failedOrBlocked ? 'danger' : 'good'],
+      ['处理中', Array.isArray(live?.active) ? live.active.length : 0, ''],
+      ['待处理', live?.pending ?? 0, ''],
+    ];
+    for (const [label, value, cls] of values) {
+      const span = document.createElement('span');
+      span.className = `pill${cls ? ' ' + cls : ''}`;
+      span.textContent = `${label} ${value}`;
+      logSummary.appendChild(span);
+    }
+  }
+
+  function addLogRow(container, item, kind) {
+    const row = document.createElement('div');
+    row.className = `download-log-row ${kind}`;
+    const top = document.createElement('div');
+    top.className = 'download-log-row-top';
+    const exact = document.createElement('code');
+    exact.textContent = item?.exact || [item?.modId, item?.fileId].filter(Boolean).join(':') || 'unknown';
+    const name = document.createElement('span');
+    name.className = 'download-log-name';
+    name.textContent = item?.name || '未命名文件';
+    top.append(exact, name);
+
+    const meta = document.createElement('div');
+    meta.className = 'download-log-meta';
+    const parts = [];
+    if (item?.status) parts.push(`status=${item.status}`);
+    if (item?.errorCode) parts.push(`error=${item.errorCode}`);
+    if (item?.attempt) parts.push(`attempt=${item.attempt}`);
+    if (Array.isArray(item?.attempts) && item.attempts.length) {
+      const last = item.attempts[item.attempts.length - 1];
+      parts.push(`attempts=${item.attempts.length}`);
+      if (last?.errorCode) parts.push(`last=${last.errorCode}`);
+    }
+    if (item?.localIdentity?.reason) parts.push(`local=${item.localIdentity.reason}`);
+    if (item?.verify?.status) parts.push(`verify=${item.verify.status}`);
+    meta.textContent = parts.join(' · ');
+    row.append(top, meta);
+    container.appendChild(row);
+  }
+
+  function renderLiveLog(job, payload) {
+    const live = job?.liveProgress || null;
+    const jobStatus = String(job?.status || (payload?.activePid ? 'STARTING' : '')).toUpperCase();
+    if (!job && !payload?.activePid) {
+      logPanel.hidden = true;
+      return;
+    }
+    logPanel.hidden = false;
+    logState.textContent = payload?.activePid ? (jobStatus || 'RUNNING') : (jobStatus || 'STOPPED');
+    logState.classList.toggle('failed', /FAILED|BLOCKED|PREFLIGHT_FAILED/.test(jobStatus));
+    logState.classList.toggle('running', !!payload?.activePid);
+
+    setSummaryPills(live || {});
+
+    logActive.replaceChildren();
+    const active = Array.isArray(live?.active) ? live.active : [];
+    logActiveBlock.hidden = active.length === 0;
+    for (const item of active.slice(0, 6)) addLogRow(logActive, item, 'active');
+
+    logFailures.replaceChildren();
+    const failures = Array.isArray(live?.failures) ? live.failures : [];
+    if (!failures.length) {
+      const empty = document.createElement('div');
+      empty.className = 'download-log-empty';
+      empty.textContent = payload?.activePid ? '暂未发现失败项。' : '本次任务没有记录到失败/阻断项。';
+      logFailures.appendChild(empty);
+    } else {
+      for (const item of failures.slice(0, 30)) addLogRow(logFailures, item, 'failure');
+      if (failures.length > 30) {
+        const more = document.createElement('div');
+        more.className = 'download-log-empty';
+        more.textContent = `另有 ${failures.length - 30} 个失败项已写入持久日志。`;
+        logFailures.appendChild(more);
+      }
+    }
+
+    if (payload?.activePid) {
+      logFoot.textContent = `实时刷新中 · pid=${payload.activePid} · 约每 0.9 秒刷新一次`;
+    } else if (jobStatus) {
+      logFoot.textContent = '任务结束后失败详情会保存在 review-failures.json / review-failures.log，并累计到 review-failure-history.jsonl。';
+    } else {
+      logFoot.textContent = '';
+    }
+  }
+
   async function pollReviewJob() {
     try {
       const payload = await get('/api/job');
       const job = payload?.latestJob || null;
+      renderLiveLog(job, payload);
       if (payload?.activePid) {
         const phase = job?.status && job.status !== 'COMPLETED' ? job.status : 'STARTING';
         statusEl.textContent = `下载任务运行中 · ${phase} · pid=${payload.activePid}`;
