@@ -3,6 +3,7 @@
 const fs = require('fs');
 const path = require('path');
 const { loadJson } = require('./fs-json');
+const { failureEntry } = require('./review-failure-log');
 
 function listRunDirs(rootDir) {
   const runsDir = path.join(rootDir, '.runtime', 'runs');
@@ -64,36 +65,70 @@ function findLatestReviewRun(rootDir) {
   return findNearbyReviewRuns(rootDir)[0] || '';
 }
 
+function stateFileForJob(job) {
+  if (!job) return '';
+  return job.state || (job.jobDir ? path.join(job.jobDir, 'execution-state.json') : '');
+}
+
+function executorLiveSnapshot(job) {
+  if (!job) return null;
+  const stateFile = stateFileForJob(job);
+  const state = stateFile && fs.existsSync(stateFile) ? loadJson(stateFile, null) : null;
+  const planned = Array.isArray(job.rows) ? job.rows.length : 0;
+  if (!state || typeof state.items !== 'object') {
+    if (!planned) return null;
+    return {
+      planned,
+      seen: 0,
+      verified: 0,
+      skipped: 0,
+      failedOrBlocked: 0,
+      active: [],
+      pending: planned,
+      failures: [],
+      updatedAt: '',
+    };
+  }
+
+  const entries = Object.entries(state.items || {});
+  const failures = entries
+    .filter(([, item]) => /FAILED|HOLD|BLOCKED/.test(String(item?.status || '')))
+    .map(([key, item]) => failureEntry(key, item));
+  const verified = entries.filter(([, item]) => String(item?.status || '') === 'VERIFIED').length;
+  const skipped = entries.filter(([, item]) => /^(SKIP|ALREADY_PRESENT)/.test(String(item?.status || ''))).length;
+  const active = entries
+    .filter(([, item]) => /DIRECT_DOWNLOADING|PUBLISHED|VERIFYING|SUBMITTING|RUNNING/.test(String(item?.status || '')))
+    .map(([key, item]) => ({
+      exact: item?.modId && item?.fileId ? `${item.modId}:${item.fileId}` : key,
+      modId: String(item?.modId || ''),
+      fileId: String(item?.fileId || ''),
+      name: String(item?.name || ''),
+      status: String(item?.status || ''),
+      attempt: Number(item?.attempt || 0) || null,
+      workerId: item?.workerId ?? null,
+      updatedAt: String(item?.updatedAt || ''),
+    }));
+  const totalPlanned = Math.max(planned, entries.length);
+  const terminalSeen = verified + skipped + failures.length;
+  const pending = Math.max(0, totalPlanned - terminalSeen - active.length);
+
+  return {
+    planned: totalPlanned,
+    seen: entries.length,
+    verified,
+    skipped,
+    failedOrBlocked: failures.length,
+    active,
+    pending,
+    failures,
+    updatedAt: String(state.updatedAt || ''),
+  };
+}
+
 function executorFailureSummary(job) {
   if (!job || String(job.status || '').toUpperCase() !== 'FAILED') return null;
-  const stateFile = job.state || (job.jobDir ? path.join(job.jobDir, 'execution-state.json') : '');
-  if (!stateFile || !fs.existsSync(stateFile)) return null;
-  const state = loadJson(stateFile, null);
-  if (!state || typeof state.items !== 'object') return null;
-
-  const failed = Object.entries(state.items)
-    .filter(([, item]) => /FAILED|HOLD|BLOCKED/.test(String(item?.status || '')))
-    .map(([key, item]) => {
-      const attempts = Array.isArray(item?.attempts) ? item.attempts : [];
-      const lastFailedAttempt = [...attempts].reverse().find(x => x && x.ok === false && x.errorCode);
-      const errorCode = String(
-        lastFailedAttempt?.errorCode ||
-        item?.localExecutionGuard?.reason ||
-        item?.verify?.status ||
-        item?.error?.code ||
-        item?.status ||
-        'UNKNOWN_FAILURE'
-      );
-      return {
-        key,
-        modId: String(item?.modId || ''),
-        fileId: String(item?.fileId || ''),
-        name: String(item?.name || ''),
-        status: String(item?.status || ''),
-        errorCode,
-      };
-    });
-
+  const live = executorLiveSnapshot(job);
+  const failed = live?.failures || [];
   if (!failed.length) return null;
   const primary = failed.find(x => x.status !== 'BLOCKED_BY_TX_FAILURE') || failed[0];
   return { count: failed.length, primary };
@@ -102,7 +137,7 @@ function executorFailureSummary(job) {
 function formatExecutorFailure(summary) {
   if (!summary?.primary) return '';
   const x = summary.primary;
-  const exact = x.modId && x.fileId ? `${x.modId}:${x.fileId}` : (x.key || 'unknown exact target');
+  const exact = x.modId && x.fileId ? `${x.modId}:${x.fileId}` : (x.exact || 'unknown exact target');
   const code = x.errorCode || x.status || 'UNKNOWN_FAILURE';
   const name = x.name ? ` · ${x.name}` : '';
   const more = summary.count > 1 ? ` · 共 ${summary.count} 个失败/阻断项` : '';
@@ -117,6 +152,8 @@ function latestReviewJob(runDir) {
     if (!fs.existsSync(file)) continue;
     const doc = loadJson(file, null);
     if (!doc) continue;
+    const liveProgress = executorLiveSnapshot(doc);
+    if (liveProgress) doc.liveProgress = liveProgress;
     const executorFailure = executorFailureSummary(doc);
     if (executorFailure) {
       doc.executorFailure = executorFailure;
@@ -133,6 +170,8 @@ module.exports = {
   findLatestReviewRun,
   findNearbyReviewRuns,
   latestReviewJob,
+  stateFileForJob,
+  executorLiveSnapshot,
   executorFailureSummary,
   formatExecutorFailure,
 };
