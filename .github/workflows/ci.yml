@@ -28,7 +28,13 @@ jobs:
         run: npm ci
 
       - name: Syntax checks
-        run: npm run check
+        run: |
+          node --check scripts/agent-bootstrap.js
+          node --check scripts/test-agent-bootstrap.js
+          npm run check
+
+      - name: Agent bootstrap helper tests
+        run: node scripts/test-agent-bootstrap.js
 
       - name: PowerShell syntax checks
         shell: pwsh
