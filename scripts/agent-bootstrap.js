@@ -13,6 +13,8 @@ function run(command, args = [], { capture = false, allowFailure = false, cwd = 
     env,
     encoding: 'utf8',
     windowsHide: true,
+    // Node >= 18.20.2 rejects spawning .cmd/.bat without a shell (EINVAL).
+    shell: process.platform === 'win32',
     stdio: capture ? ['ignore', 'pipe', 'pipe'] : 'inherit',
   });
   const ok = !r.error && r.status === 0;
