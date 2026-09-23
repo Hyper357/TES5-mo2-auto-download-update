@@ -304,7 +304,7 @@ async function start() {
   // this project's automation profile or the historical nexus-autodl-edge profile.
   const terminated = terminateProjectOwnedBrowsers(getProfileDir());
   if (terminated.length) await new Promise(r => setTimeout(r, 900));
-  const removedLocks = removeStaleProfileLocks(getProfileDir());
+  const removedStaleLocks = removeStaleProfileLocks(getProfileDir());
 
   if (!(await portIsFree(getCdpPort()))) {
     if (explicitCdpPort()) {
