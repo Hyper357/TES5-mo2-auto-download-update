@@ -45,7 +45,15 @@ function parseRequiredRuntimes(text) {
   const runtimeVersions = [];
   const reRt = /\b(1\.[5-9](?:\.\d{1,4})?)\b/g;
   while ((m = reRt.exec(t))) runtimeVersions.push(m[1]);
-  return { skseVersions, runtimeVersions };
+  // Hard requirement: phrases like "Updated for compatibility with Skyrim
+  // v1.7.104" state the runtime THIS build targets. They override the
+  // min-mentioned heuristic, because such texts often ALSO mention older
+  // runtimes only as port suggestions ("Last Compatible 1.6 version: 2.0",
+  // "for 1.5.97 use one of the ports").
+  const hardRuntimeVersions = [];
+  const reHard = /updated\s+for\s+(?:compatibility\s+with\s+)?(?:skyrim|sse|the\s+)?\s*(?:v|ver(?:sion)?)?\s*[:=]?\s*(\d\.\d+(?:\.\d+)*)/gi;
+  while ((m = reHard.exec(t))) hardRuntimeVersions.push(m[1]);
+  return { skseVersions, runtimeVersions, hardRuntimeVersions };
 }
 
 function minVersion(list) {
@@ -59,12 +67,18 @@ function minVersion(list) {
 // Reject reasons when the candidate text states a minimum requirement newer
 // than the local installation. Empty text -> no reject (no evidence).
 function runtimeCompatRejects(candidateText, local = defaultLocalRuntime()) {
-  const { skseVersions, runtimeVersions } = parseRequiredRuntimes(candidateText);
+  const { skseVersions, runtimeVersions, hardRuntimeVersions } = parseRequiredRuntimes(candidateText);
   const out = [];
   const minSkse = minVersion(skseVersions);
   if (minSkse && compareNumericVersions(minSkse, local.skse) > 0) {
     out.push({ reason: 'TARGET_REQUIRES_NEWER_SKSE', required: minSkse, local: local.skse });
   }
+  for (const hard of hardRuntimeVersions) {
+    if (compareNumericVersions(hard, local.runtime) > 0) {
+      out.push({ reason: 'TARGET_REQUIRES_NEWER_RUNTIME', required: hard, local: local.runtime, evidence: 'UPDATED_FOR_PHRASE' });
+    }
+  }
+  if (out.some(x => x.reason === 'TARGET_REQUIRES_NEWER_RUNTIME')) return out;
   const minRuntime = minVersion(runtimeVersions);
   if (minRuntime && compareNumericVersions(minRuntime, local.runtime) > 0) {
     out.push({ reason: 'TARGET_REQUIRES_NEWER_RUNTIME', required: minRuntime, local: local.runtime });

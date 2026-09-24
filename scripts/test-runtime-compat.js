@@ -56,6 +56,19 @@ function f(id, name, version, uploaded, categoryId = 1) {
   assert.ok(rejects.some(x => x.reason === 'TARGET_REQUIRES_NEWER_SKSE'));
 }
 
+// "Updated for compatibility with Skyrim v1.7.104 ... Last Compatible 1.6
+// version: 2.0" (LeveledList Crash Fix 2.0.1): the hard-requirement phrase
+// wins even though 1.5.97 is mentioned as a port suggestion.
+{
+  const desc = 'Download and install with your mod manager. Updated for compatibility with Skyrim v1.7.104. No new features added. Last Compatible 1.6 version: 2.0.';
+  const rejects = runtimeCompatRejects(desc);
+  assert.ok(rejects.some(x => x.reason === 'TARGET_REQUIRES_NEWER_RUNTIME' && x.required === '1.7.104'));
+}
+// A build updated FOR 1.6.1170 itself is fine.
+{
+  assert.deepStrictEqual(runtimeCompatRejects('Updated for compatibility with Skyrim v1.6.1170.'), []);
+}
+
 // Edition tags.
 {
   assert.deepStrictEqual(editionTags('Enhanced Combat AI SE'), ['SE']);
