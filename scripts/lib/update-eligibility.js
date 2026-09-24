@@ -165,7 +165,7 @@ function candidateCompatRejects({ file, mine, localName = '', installationFile =
   return [...runtimeCompatRejects(candText), ...branchCompatRejects(localText, candText)];
 }
 
-function chainCandidate({ files, fileUpdates, mine, localName = '', installationFile = '', profile = null }) {
+function chainCandidate({ files, fileUpdates, mine, localName = '', installationFile = '', profile = null, meta = null }) {
   const filesById = new Map((files || []).map(f => [String(f.file_id || ''), f]));
   const successors = updateChainSuccessors(mine?.file_id, fileUpdates);
   const reachable = [];
@@ -181,6 +181,13 @@ function chainCandidate({ files, fileUpdates, mine, localName = '', installation
   const compatRejects = [];
   for (const x of reachable) {
     if (!x.scored.accepted) continue;
+    // A user-ignored version keeps its IGNORE semantics even when the same
+    // file would fail the runtime/edition gate: silence wins, SKIP_IGNORED
+    // is emitted downstream instead of compat noise.
+    if (meta && ignoredTarget(meta, x.file)) {
+      accepted.push(x);
+      continue;
+    }
     const rejects = candidateCompatRejects({ file: x.file, mine, localName, installationFile });
     if (rejects.length) {
       compatRejects.push(...rejects);
@@ -197,7 +204,7 @@ function chainCandidate({ files, fileUpdates, mine, localName = '', installation
   return { candidate: accepted[0].file, successors, conflicts: [], compatRejects };
 }
 
-function fallbackNewerCandidate({ files, mine, localName = '', installationFile = '', profile = null }) {
+function fallbackNewerCandidate({ files, mine, localName = '', installationFile = '', profile = null, meta = null }) {
   const mineTime = uploadedMs(mine);
   const candidates = [];
   const compatRejects = [];
@@ -206,7 +213,7 @@ function fallbackNewerCandidate({ files, mine, localName = '', installationFile 
     const scored = compatibilityProbe({ mine, candidate: f, localName, installationFile, profile });
     if (!scored.accepted || scored.score < 58) continue;
     const rejects = candidateCompatRejects({ file: f, mine, localName, installationFile });
-    if (rejects.length) {
+    if (rejects.length && !(meta && ignoredTarget(meta, f))) {
       compatRejects.push(...rejects);
       continue;
     }
@@ -309,7 +316,7 @@ function assessUpdateEligibility({ files = [], fileUpdates = [], mine, meta = {}
     };
   }
 
-  const chain = chainCandidate({ files, fileUpdates, mine, localName, installationFile, profile });
+  const chain = chainCandidate({ files, fileUpdates, mine, localName, installationFile, profile, meta });
   if (chain.candidate) {
     const target = chain.candidate;
     const conflict = localTargetVersionConflict(meta, mine, target);
@@ -363,7 +370,7 @@ function assessUpdateEligibility({ files = [], fileUpdates = [], mine, meta = {}
     };
   }
 
-  const fallback = fallbackNewerCandidate({ files, mine, localName, installationFile, profile });
+  const fallback = fallbackNewerCandidate({ files, mine, localName, installationFile, profile, meta });
   if (fallback.candidate) {
     const target = fallback.candidate;
     const conflict = localTargetVersionConflict(meta, mine, target);
