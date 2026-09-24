@@ -5,17 +5,18 @@ const cp = require('child_process');
 const fs = require('fs');
 const os = require('os');
 const path = require('path');
+const { runNode } = require('./lib/process-runner');
 const script = path.join(__dirname,'closure-gate.js');
 const today = new Date().toISOString().slice(0,10);
 
-function runCase({registry,plan,discovery,audit={rules:{}}}){
+function runCase({registry,plan,discovery,audit={rules:{}}}) {
   const dir=fs.mkdtempSync(path.join(os.tmpdir(),'closure-test-'));
   const manifest=path.join(dir,'manifest.tsv'); const registryFile=path.join(dir,'registry.tsv');
   const planFile=path.join(dir,'plan.json'); const discoveryFile=path.join(dir,'discovery.json');
   const auditFile=path.join(dir,'audit.json'); const outFile=path.join(dir,'out.tsv'); const reportFile=path.join(dir,'report.json');
   fs.writeFileSync(manifest,'123\tExample Main\t2.0\tdecision=DOWNLOAD\t456\tDOWNLOAD\n');
   fs.writeFileSync(registryFile,registry); fs.writeFileSync(planFile,JSON.stringify(plan)); fs.writeFileSync(discoveryFile,JSON.stringify(discovery)); fs.writeFileSync(auditFile,JSON.stringify(audit));
-  const r=cp.spawnSync(process.execPath,[script,manifest,registryFile,'--plan',planFile,'--component-discovery',discoveryFile,'--registry-audit',auditFile,'--out',outFile,'--report',reportFile],{encoding:'utf8'});
+  const r=runNode([script,manifest,registryFile,'--plan',planFile,'--component-discovery',discoveryFile,'--registry-audit',auditFile,'--out',outFile,'--report',reportFile],{capture:true,cwd:__dirname,allowFailure:true});
   assert.strictEqual(r.status,0,r.stderr);
   const result={out:fs.readFileSync(outFile,'utf8'),report:JSON.parse(fs.readFileSync(reportFile,'utf8'))};
   fs.rmSync(dir,{recursive:true,force:true});

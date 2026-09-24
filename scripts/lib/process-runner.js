@@ -2,12 +2,70 @@
 
 const cp = require('child_process');
 const fs = require('fs');
+const os = require('os');
 const path = require('path');
 const { sanitizeString } = require('./diagnostics');
 
 const CDP_PRELOAD = path.join(__dirname, 'cdp-compat-preload.js');
 const DEFAULT_CAPTURE_MAX_BUFFER = 16 * 1024 * 1024;
 const REVIEW_EXACT_EXECUTOR = path.join(__dirname, '..', 'review-exact-execute.js');
+const ASYNC_FALLBACK_TIMEOUT_MS = 30 * 60 * 1000;
+
+// Some sandboxed / guarded environments break the synchronous spawn transport
+// entirely (spawnSync of ANY executable fails with EBUSY) while async spawn
+// keeps working. When that happens, fall back to an async child whose result
+// is handed back through a file, with the parent synchronously polling for it.
+// This keeps update runs alive instead of dying with CHILD_PROCESS_FAILED.
+const ASYNC_WRAPPER = `
+const cp = require('child_process');
+const fs = require('fs');
+const args = process.argv.slice(1);
+const outF = process.env.RN_OUT, errF = process.env.RN_ERR, resF = process.env.RN_RES, cwdF = process.env.RN_CWD;
+const inherit = process.env.RN_INHERIT === '1';
+const o = inherit ? 'inherit' : fs.openSync(outF, 'w');
+const e = inherit ? 'inherit' : fs.openSync(errF, 'w');
+const child = cp.spawn(process.execPath, args, { cwd: cwdF || undefined, env: process.env, windowsHide: true, stdio: ['ignore', o, e] });
+child.on('error', () => { try { fs.writeFileSync(resF, JSON.stringify({ status: null, signal: null, spawnError: true })); } catch (_) {} });
+child.on('close', (code, signal) => { try { fs.writeFileSync(resF, JSON.stringify({ status: code, signal: signal || null })); } catch (_) {} });
+`;
+
+function sleepSync(ms) {
+  try { Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms); } catch (_) { /* fallback: busy wait */ const end = Date.now() + ms; while (Date.now() < end) { /* spin */ } }
+}
+
+function runNodeAsyncFallback(routedArgs, { cwd, env, capture = false, timeoutMs = ASYNC_FALLBACK_TIMEOUT_MS } = {}) {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'runnode-async-'));
+  const outF = path.join(dir, 'out.log');
+  const errF = path.join(dir, 'err.log');
+  const resF = path.join(dir, 'res.json');
+  const child = cp.spawn(process.execPath, ['-e', ASYNC_WRAPPER, ...routedArgs], {
+    cwd,
+    env: { ...projectNodeEnv(env || process.env), RN_OUT: outF, RN_ERR: errF, RN_RES: resF, RN_CWD: cwd || '', RN_INHERIT: capture ? '' : '1' },
+    windowsHide: true,
+    stdio: 'ignore',
+  });
+  const deadline = Date.now() + timeoutMs;
+  let res = null;
+  while (Date.now() < deadline) {
+    sleepSync(250);
+    try {
+      res = JSON.parse(fs.readFileSync(resF, 'utf8'));
+      break;
+    } catch (_) { /* result not written yet */ }
+  }
+  if (!res) {
+    try { child.kill(); } catch (_) { /* already gone */ }
+    try { fs.rmSync(dir, { recursive: true, force: true }); } catch (_) { /* best effort */ }
+    return { status: null, signal: null, stdout: '', stderr: '', error: Object.assign(new Error('async fallback timed out'), { code: 'ETIMEDOUT' }) };
+  }
+  let stdout = '';
+  let stderr = '';
+  try { stdout = fs.readFileSync(outF, 'utf8'); } catch (_) {}
+  try { stderr = fs.readFileSync(errF, 'utf8'); } catch (_) {}
+  try { fs.rmSync(dir, { recursive: true, force: true }); } catch (_) { /* best effort */ }
+  const error = res.spawnError ? Object.assign(new Error('async spawn failed'), { code: 'EBUSY' }) : null;
+  return { status: res.status, signal: res.signal, stdout, stderr, error };
+}
 
 // Node parses NODE_OPTIONS itself rather than delegating argument parsing to
 // child_process. On Windows, a quoted value containing backslashes can be
@@ -72,7 +130,7 @@ function runNode(args, options = {}) {
   const maxBuffer = capture
     ? Math.max(1024 * 1024, Number(options.maxBuffer || DEFAULT_CAPTURE_MAX_BUFFER))
     : undefined;
-  const r = cp.spawnSync(process.execPath, routedArgs, {
+  let r = cp.spawnSync(process.execPath, routedArgs, {
     cwd: options.cwd,
     env: projectNodeEnv(options.env || process.env),
     encoding: capture ? 'utf8' : undefined,
@@ -80,6 +138,16 @@ function runNode(args, options = {}) {
     stdio: capture ? ['ignore', 'pipe', 'pipe'] : 'inherit',
     ...(capture ? { maxBuffer } : {}),
   });
+  if (r.error && ['EBUSY', 'ETIMEDOUT', 'EAGAIN'].includes(r.error.code)) {
+    const fb = runNodeAsyncFallback(routedArgs, { cwd: options.cwd, env: options.env || process.env, capture });
+    r = {
+      status: fb.status,
+      signal: fb.signal,
+      error: fb.error,
+      stdout: capture ? fb.stdout : '',
+      stderr: capture ? fb.stderr : '',
+    };
+  }
   const spawnError = r.error || null;
   const result = {
     ok: !spawnError && r.status === 0,
