@@ -2,6 +2,7 @@
 
 const { compareVersions, normalizeVer } = require('./semver');
 const { categoryRole, isActive, scoreCandidate } = require('./file-selector');
+const { runtimeCompatRejects, branchCompatRejects, versionCore, compareNumericVersions } = require('./runtime-compat');
 
 const MO2_ACTIVE_FILE_STATUSES = new Set([1, 2, 3, 5]);
 
@@ -155,6 +156,15 @@ function compatibilityProbe({ mine, candidate, localName = '', installationFile 
   return scoreCandidate({ mine, candidate: probe, localName, installationFile, profile });
 }
 
+// Compatibility gate on top of name scoring: a candidate must not require a
+// newer SKSE/runtime than the local installation, and must not switch AE/SE
+// edition branches. Uses the full Nexus file (description included).
+function candidateCompatRejects({ file, mine, localName = '', installationFile = '' }) {
+  const localText = [localName, installationFile, mine?.name, mine?.file_name, mine?.version].join(' ');
+  const candText = [file?.description, file?.file_name, file?.name, file?.version].join(' ');
+  return [...runtimeCompatRejects(candText), ...branchCompatRejects(localText, candText)];
+}
+
 function chainCandidate({ files, fileUpdates, mine, localName = '', installationFile = '', profile = null }) {
   const filesById = new Map((files || []).map(f => [String(f.file_id || ''), f]));
   const successors = updateChainSuccessors(mine?.file_id, fileUpdates);
@@ -165,35 +175,52 @@ function chainCandidate({ files, fileUpdates, mine, localName = '', installation
     const scored = compatibilityProbe({ mine, candidate: f, localName, installationFile, profile });
     reachable.push({ edge, file: f, scored });
   }
-  if (!reachable.length) return { candidate: null, successors, conflicts: [] };
+  if (!reachable.length) return { candidate: null, successors, conflicts: [], compatRejects: [] };
 
-  const accepted = reachable.filter(x => x.scored.accepted);
+  const accepted = [];
+  const compatRejects = [];
+  for (const x of reachable) {
+    if (!x.scored.accepted) continue;
+    const rejects = candidateCompatRejects({ file: x.file, mine, localName, installationFile });
+    if (rejects.length) {
+      compatRejects.push(...rejects);
+      continue;
+    }
+    accepted.push(x);
+  }
   if (!accepted.length) {
     const conflicts = [...new Set(reachable.flatMap(x => x.scored.rejects || []))];
-    return { candidate: null, successors, conflicts };
+    return { candidate: null, successors, conflicts, compatRejects };
   }
+
   accepted.sort((a, b) => b.edge.depth - a.edge.depth || uploadedMs(b.file) - uploadedMs(a.file) || Number(b.file.file_id || 0) - Number(a.file.file_id || 0));
-  return { candidate: accepted[0].file, successors, conflicts: [] };
+  return { candidate: accepted[0].file, successors, conflicts: [], compatRejects };
 }
 
 function fallbackNewerCandidate({ files, mine, localName = '', installationFile = '', profile = null }) {
   const mineTime = uploadedMs(mine);
   const candidates = [];
+  const compatRejects = [];
   for (const f of files || []) {
     if (!f || String(f.file_id || '') === String(mine?.file_id || '') || !isActive(f)) continue;
     const scored = compatibilityProbe({ mine, candidate: f, localName, installationFile, profile });
     if (!scored.accepted || scored.score < 58) continue;
+    const rejects = candidateCompatRejects({ file: f, mine, localName, installationFile });
+    if (rejects.length) {
+      compatRejects.push(...rejects);
+      continue;
+    }
     const t = uploadedMs(f);
     if (!(t > mineTime && t > 0)) continue;
     candidates.push({ file: f, ...scored, uploadedMs: t });
   }
   candidates.sort((a, b) => b.score - a.score || b.uploadedMs - a.uploadedMs || Number(b.file.file_id || 0) - Number(a.file.file_id || 0));
-  if (!candidates.length) return { candidate: null, ranked: [] };
+  if (!candidates.length) return { candidate: null, ranked: [], compatRejects };
   const best = candidates[0];
   const second = candidates[1];
   const margin = second ? best.score - second.score : best.score;
-  if (second && margin < 10) return { candidate: null, ranked: candidates.slice(0, 8), ambiguous: true, margin };
-  return { candidate: best.file, ranked: candidates.slice(0, 8), ambiguous: false, margin };
+  if (second && margin < 10) return { candidate: null, ranked: candidates.slice(0, 8), ambiguous: true, margin, compatRejects };
+  return { candidate: best.file, ranked: candidates.slice(0, 8), ambiguous: false, margin, compatRejects };
 }
 
 function ignoredTarget(meta, target) {
@@ -310,6 +337,19 @@ function assessUpdateEligibility({ files = [], fileUpdates = [], mine, meta = {}
     };
   }
 
+  if (chain.compatRejects && chain.compatRejects.length) {
+    return {
+      status: 'HOLD_UPDATE_ELIGIBILITY',
+      reason: chain.compatRejects[0].reason,
+      updateNeeded: false,
+      priority: 85,
+      mo2,
+      target: null,
+      evidence: ['NEXUS_EXACT_UPDATE_CHAIN', 'RUNTIME_COMPAT_GATE'],
+      compatRejects: chain.compatRejects,
+    };
+  }
+
   if (chain.conflicts.length) {
     return {
       status: 'HOLD_UPDATE_ELIGIBILITY',
@@ -358,6 +398,27 @@ function assessUpdateEligibility({ files = [], fileUpdates = [], mine, meta = {}
       };
     }
 
+    // Numeric-core equality ("2.2light" vs "2.2.0.0", "v1.9.1-SE" vs
+    // "1.9.1.0-AE"): the version strings may compare as "newer" only because
+    // of suffix parsing; the actual release number did not move. Replacement,
+    // not an update -> HOLD.
+    {
+      const coreT = versionCore(target.version);
+      const coreM = versionCore(mine.version);
+      if (coreT && coreM && compareNumericVersions(coreT, coreM) === 0) {
+        return {
+          status: 'HOLD_UPDATE_ELIGIBILITY',
+          reason: 'SAME_VERSION_NEWER_FILE_REPLACEMENT',
+          updateNeeded: false,
+          priority: mo2.signal ? 80 : 55,
+          mo2,
+          target: compactFile(target),
+          evidence: ['NEWER_COMPATIBLE_FILE_UPLOAD', 'VERSION_CORE_UNCHANGED', ...(mo2.signal ? ['MO2_UPDATE_SIGNAL'] : [])],
+          margin: fallback.margin,
+        };
+      }
+    }
+
     return {
       status: 'UPDATE_CONFIRMED',
       reason: 'NEWER_COMPATIBLE_FILE_UPLOAD',
@@ -380,6 +441,19 @@ function assessUpdateEligibility({ files = [], fileUpdates = [], mine, meta = {}
       target: null,
       evidence: ['NEWER_FILE_UPLOADS_AMBIGUOUS', ...(mo2.signal ? ['MO2_UPDATE_SIGNAL'] : [])],
       candidates: fallback.ranked.map(x => compactFile(x.file)),
+    };
+  }
+
+  if (fallback.compatRejects && fallback.compatRejects.length) {
+    return {
+      status: 'HOLD_UPDATE_ELIGIBILITY',
+      reason: fallback.compatRejects[0].reason,
+      updateNeeded: false,
+      priority: mo2.signal ? 85 : 55,
+      mo2,
+      target: null,
+      evidence: ['NEWER_COMPATIBLE_FILE_UPLOAD', 'RUNTIME_COMPAT_GATE'],
+      compatRejects: fallback.compatRejects,
     };
   }
 

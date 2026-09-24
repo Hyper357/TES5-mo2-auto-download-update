@@ -1,0 +1,105 @@
+#!/usr/bin/env node
+'use strict';
+
+// Runtime / SKSE / edition compatibility gate.
+//
+// Nexus file descriptions frequently state the exact runtime the build was
+// compiled for, e.g. "SKSE 2.3.1 / SSE (SAE) 1.7.104" or "SKSE 2.2.6, Skyrim
+// 1.6.1170". A candidate whose minimum stated requirement is NEWER than the
+// local installation must never be auto-downloaded: it would crash or refuse
+// to load. Only the MINIMUM mentioned version is checked, so files that
+// explicitly support older runtimes ("1.6.1170 and 1.7.104") still pass.
+
+function defaultLocalRuntime() {
+  return {
+    skse: process.env.LOCAL_SKSE_VERSION || '2.2.6',
+    runtime: process.env.LOCAL_RUNTIME_VERSION || '1.6.1170',
+  };
+}
+
+function compareNumericVersions(a, b) {
+  const pa = String(a || '').split('.').map(x => parseInt(x, 10) || 0);
+  const pb = String(b || '').split('.').map(x => parseInt(x, 10) || 0);
+  for (let i = 0; i < Math.max(pa.length, pb.length); i++) {
+    const x = pa[i] || 0;
+    const y = pb[i] || 0;
+    if (x > y) return 1;
+    if (x < y) return -1;
+  }
+  return 0;
+}
+
+// First numeric run of a version-ish string: "2.2light" -> "2.2",
+// "1.9.1.0-AE" -> "1.9.1.0", "v1.9.1-SE" -> "1.9.1".
+function versionCore(v) {
+  const m = String(v || '').match(/\d+(?:\.\d+)*/);
+  return m ? m[0] : '';
+}
+
+function parseRequiredRuntimes(text) {
+  const t = String(text || '');
+  const skseVersions = [];
+  const reSkse = /SKSE\s*(?:v|ver(?:sion)?)?\s*[:=]?\s*(\d+\.\d+(?:\.\d+)?)/gi;
+  let m;
+  while ((m = reSkse.exec(t))) skseVersions.push(m[1]);
+  const runtimeVersions = [];
+  const reRt = /\b(1\.[5-9](?:\.\d{1,4})?)\b/g;
+  while ((m = reRt.exec(t))) runtimeVersions.push(m[1]);
+  return { skseVersions, runtimeVersions };
+}
+
+function minVersion(list) {
+  let min = null;
+  for (const v of list) {
+    if (min === null || compareNumericVersions(v, min) < 0) min = v;
+  }
+  return min;
+}
+
+// Reject reasons when the candidate text states a minimum requirement newer
+// than the local installation. Empty text -> no reject (no evidence).
+function runtimeCompatRejects(candidateText, local = defaultLocalRuntime()) {
+  const { skseVersions, runtimeVersions } = parseRequiredRuntimes(candidateText);
+  const out = [];
+  const minSkse = minVersion(skseVersions);
+  if (minSkse && compareNumericVersions(minSkse, local.skse) > 0) {
+    out.push({ reason: 'TARGET_REQUIRES_NEWER_SKSE', required: minSkse, local: local.skse });
+  }
+  const minRuntime = minVersion(runtimeVersions);
+  if (minRuntime && compareNumericVersions(minRuntime, local.runtime) > 0) {
+    out.push({ reason: 'TARGET_REQUIRES_NEWER_RUNTIME', required: minRuntime, local: local.runtime });
+  }
+  return out;
+}
+
+// Edition tags: AE vs SE. Both-listed ("AE SE") counts as either, never a
+// mismatch. Missing tags on either side -> no evidence -> no reject.
+function editionTags(text) {
+  const t = String(text || '');
+  const tags = [];
+  if (/(^|[^A-Za-z])AE([^A-Za-z]|$)/.test(t) || /\bSAE\b/.test(t) || /anniversary edition/i.test(t)) tags.push('AE');
+  if (/(^|[^A-Za-z])SE([^A-Za-z]|$)/.test(t) || /\bSSE\b/.test(t) || /special edition/i.test(t)) tags.push('SE');
+  return tags;
+}
+
+function branchCompatRejects(localText, candidateText) {
+  const local = editionTags(localText);
+  const cand = editionTags(candidateText);
+  if (!local.length || !cand.length) return [];
+  const localOnly = local.filter(x => !cand.includes(x));
+  const candOnly = cand.filter(x => !local.includes(x));
+  if (localOnly.length && candOnly.length) {
+    return [{ reason: 'TARGET_EDITION_MISMATCH', localEditions: local, candidateEditions: cand }];
+  }
+  return [];
+}
+
+module.exports = {
+  defaultLocalRuntime,
+  compareNumericVersions,
+  versionCore,
+  parseRequiredRuntimes,
+  runtimeCompatRejects,
+  editionTags,
+  branchCompatRejects,
+};
