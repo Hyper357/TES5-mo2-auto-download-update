@@ -57,6 +57,38 @@ function processRunning(name) {
   } catch (e) { return { supported: true, running: null, error: e.message }; }
 }
 
+// Sandboxed environments may fail every spawnSync/execFileSync of system
+// executables with EBUSY. Async spawn still works there; fall back to it so
+// MO2_PROCESS preflight reflects real process state instead of a transport
+// error. Detection semantics unchanged.
+function processRunningViaAsyncSpawn(name) {
+  return new Promise(resolve => {
+    let out = '';
+    let settled = false;
+    const finish = result => { if (!settled) { settled = true; resolve(result); } };
+    try {
+      const child = cp.spawn('tasklist.exe', ['/FI', `IMAGENAME eq ${name}`, '/FO', 'CSV', '/NH'], {
+        windowsHide: true, stdio: ['ignore', 'pipe', 'ignore'],
+      });
+      child.stdout.on('data', d => { out += d; });
+      child.on('error', err => finish({ supported: true, running: null, error: `async spawn failed: ${err.message}` }));
+      child.on('close', () => finish({
+        supported: true,
+        running: new RegExp(`"${name.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}"`, 'i').test(out),
+      }));
+      setTimeout(() => { try { child.kill(); } catch { /* already dead */ } finish({ supported: true, running: null, error: 'async tasklist probe timed out' }); }, 10000);
+    } catch (err) {
+      finish({ supported: true, running: null, error: `async spawn threw: ${err.message}` });
+    }
+  });
+}
+
+async function processRunningAsync(name) {
+  const sync = processRunning(name);
+  if (sync.running !== null) return sync;
+  return processRunningViaAsyncSpawn(name);
+}
+
 function findSevenZip(explicit) {
   const candidates = [explicit, process.env.MO2_7Z, process.env.SEVENZIP, 'C:\\Program Files\\7-Zip\\7z.exe', 'C:\\Program Files (x86)\\7-Zip\\7z.exe'].filter(Boolean);
   return candidates.find(existsFile) || '';
@@ -93,7 +125,7 @@ async function main() {
   const sevenzip = findSevenZip(argValue('--sevenzip'));
   const browserSession = await managedSessionStatus();
   const nexusApi = await nexusValidate(apiKey);
-  const mo2Proc = processRunning('ModOrganizer.exe');
+  const mo2Proc = await processRunningAsync('ModOrganizer.exe');
 
   const browserDetail = {
     state: browserSession.state,

@@ -39,13 +39,52 @@ function isRunning() {
   }
 }
 
+// Some sandboxed environments fail every spawnSync of system executables with
+// EBUSY (tasklist.exe, cmd.exe, ...). Async spawn still works there, so fall
+// back to it when the synchronous probe cannot run. Detection semantics are
+// unchanged; only the transport differs.
+function isRunningViaAsyncSpawn() {
+  return new Promise(resolve => {
+    let out = '';
+    let settled = false;
+    const finish = result => { if (!settled) { settled = true; resolve(result); } };
+    try {
+      const child = cp.spawn('tasklist.exe', ['/FI', 'IMAGENAME eq ModOrganizer.exe', '/FO', 'CSV', '/NH'], {
+        windowsHide: true, stdio: ['ignore', 'pipe', 'ignore'],
+      });
+      child.stdout.on('data', d => { out += d; });
+      child.on('error', err => finish({ supported: true, running: null, error: `async spawn failed: ${err.message}` }));
+      child.on('close', () => finish({
+        supported: true,
+        running: /"ModOrganizer\.exe"/i.test(out),
+        sample: String(out || '').trim().slice(0, 500),
+      }));
+      setTimeout(() => { try { child.kill(); } catch { /* already dead */ } finish({ supported: true, running: null, error: 'async tasklist probe timed out' }); }, 10000);
+    } catch (err) {
+      finish({ supported: true, running: null, error: `async spawn threw: ${err.message}` });
+    }
+  });
+}
+
+async function isRunningAsync() {
+  const sync = isRunning();
+  if (sync.running !== null) return sync;
+  return isRunningViaAsyncSpawn();
+}
+
 function sleep(ms) {
   return new Promise(resolve => setTimeout(resolve, ms));
 }
 
 async function ensureRunning(options = {}) {
   const modsDir = options.modsDir || defaultModsDir();
-  const before = isRunning();
+  let before = await isRunningAsync();
+  if (before.running !== true) {
+    // One retry: transient spawn failures should not immediately escalate to
+    // launching a duplicate MO2 instance.
+    await sleep(500);
+    before = await isRunningAsync();
+  }
   if (before.running === true) return { action: 'ensure', changed: false, running: true, status: before };
   if (process.platform !== 'win32') {
     const e = new Error('MO2_PROCESS_UNSUPPORTED: automatic MO2 launch is currently Windows-only');
@@ -66,6 +105,8 @@ async function ensureRunning(options = {}) {
     stdio: 'ignore',
     windowsHide: false,
   });
+  let spawnError = null;
+  child.on('error', err => { spawnError = err; });
   child.unref();
 
   const timeoutMs = Number(options.timeoutMs || 20000) || 20000;
@@ -73,9 +114,16 @@ async function ensureRunning(options = {}) {
   let last = before;
   while (Date.now() < deadline) {
     await sleep(500);
-    last = isRunning();
+    last = await isRunningAsync();
     if (last.running === true) {
       return { action: 'ensure', changed: true, running: true, pid: child.pid, executable, modsDir, status: last };
+    }
+    if (spawnError) {
+      const e = new Error(`MO2_START_FAILED: spawn of ${executable} failed: ${spawnError.code || spawnError.message}`);
+      e.code = 'MO2_START_FAILED';
+      e.executable = executable;
+      e.lastStatus = last;
+      throw e;
     }
     if (child.exitCode !== null) break;
   }
@@ -92,7 +140,7 @@ async function main() {
   const modsDir = argValue(process.argv, '--mods-dir', defaultModsDir());
   let result;
   if (cmd === 'status') {
-    result = { action: 'status', modsDir, executable: findExecutable(modsDir), status: isRunning() };
+    result = { action: 'status', modsDir, executable: findExecutable(modsDir), status: await isRunningAsync() };
   } else if (cmd === 'ensure') {
     result = await ensureRunning({
       modsDir,
