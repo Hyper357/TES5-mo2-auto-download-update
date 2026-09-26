@@ -166,6 +166,23 @@ function f(id, name, version, uploaded, categoryId = 1) {
   assert.strictEqual(x.reason, 'NEXUS_UPDATE_CHAIN_VARIANT_CONFLICT');
 }
 
+// Ignored target whose raw version string only looks 'newer' due to a
+// suffix ("2.2light" vs normalized "2.2.0.0light"): numeric-core equality
+// must keep the IGNORE semantics instead of surfacing compat-gate noise.
+{
+  const mine = f(65, 'Suffix Ignored Main', '2.2', '2026-01-01T00:00:00Z');
+  const next = f(66, 'Suffix Ignored Main', '2.2light', '2026-02-01T00:00:00Z');
+  const x = assessUpdateEligibility({
+    files: [mine, next],
+    fileUpdates: [{ old_file_id: 65, new_file_id: 66 }],
+    mine,
+    meta: { version: '2.2.0.0', newestVersion: '2.2.0.0light', ignoredVersion: '2.2.0.0light', nexusFileStatus: 1 },
+    localName: 'Suffix Ignored Main',
+    installationFile: mine.file_name,
+  });
+  assert.strictEqual(x.status, 'SKIP_IGNORED_UPDATE');
+}
+
 // Respect Ignore Update.
 {
   const mine = f(60, 'Ignored Main', '1.0', '2026-01-01T00:00:00Z');

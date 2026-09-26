@@ -233,7 +233,15 @@ function fallbackNewerCandidate({ files, mine, localName = '', installationFile 
 function ignoredTarget(meta, target) {
   if (!versionEqual(meta?.ignoredVersion, meta?.newestVersion)) return false;
   if (!validVersion(target?.version)) return true;
-  return compareVersions(target.version, meta.ignoredVersion) <= 0;
+  if (compareVersions(target.version, meta.ignoredVersion) <= 0) return true;
+  // Suffix noise ("2.2light" vs ignored "2.2.0.0light", "v1.9.1-SE" vs
+  // "1.9.1.0-SE"): raw compareVersions may rank the suffixed string as
+  // "newer" even though the release number did not move. Numeric-core
+  // equality still counts as "not newer than the ignored version".
+  const coreT = versionCore(target.version);
+  const coreI = versionCore(meta.ignoredVersion);
+  if (coreT && coreI) return compareNumericVersions(coreT, coreI) <= 0;
+  return false;
 }
 
 function localTargetVersionConflict(meta, mine, target) {
