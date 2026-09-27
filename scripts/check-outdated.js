@@ -3,7 +3,7 @@
 
 const fs = require('fs');
 const path = require('path');
-const { scanModsDirectory } = require('./lib/mo2-reader');
+const { scanModsDirectory, scanUnscannedMods } = require('./lib/mo2-reader');
 const ModProfile = require('./lib/profile');
 const { categoryRole, isActive, hardVariantConflicts, groupLatestAuxFiles, selectUpdateTarget, tokenSimilarity } = require('./lib/file-selector');
 const { detectVariantReview, branchKey } = require('./lib/variant-review');
@@ -471,6 +471,20 @@ async function main() {
     counts,
     items: results,
   };
+
+  // Blind-spot report: mods with no usable modid bypass every gate. Surface
+  // them every run so "not visible" never becomes "not known".
+  const unscanned = scanUnscannedMods(modsDir);
+  payload.unscannedMods = { count: unscanned.length, items: unscanned };
+  if (reportFile && unscanned.length) {
+    const unscannedFile = path.join(path.dirname(reportFile), 'unscanned-mods.tsv');
+    const lines = ['folderName\treason\tversion\tinstallationFile'];
+    for (const x of unscanned) lines.push([x.folderName, x.reason, x.version, x.installationFile].join('\t'));
+    fs.writeFileSync(unscannedFile, lines.join('\n') + '\n', 'utf8');
+    payload.unscannedMods.file = unscannedFile;
+    console.error(`[盲区] ${unscanned.length} 个 mod 无有效 Nexus modid，未参与审计 -> ${unscannedFile}`);
+  }
+
   if (reportFile) saveJson(reportFile, payload, { atomic: false });
   if (asJson) console.log(JSON.stringify(payload, null, 2));
 }

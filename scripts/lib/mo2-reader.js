@@ -113,7 +113,28 @@ function scanModsDirectory(modsDir) {
   return rows;
 }
 
+// Mods the audit pipeline cannot see: missing meta.ini or no usable Nexus
+// modid. These silently bypass every gate, so each run must surface them.
+function scanUnscannedMods(modsDir) {
+  if (!fs.existsSync(modsDir)) return [];
+  const out = [];
+  for (const ent of fs.readdirSync(modsDir, { withFileTypes: true })) {
+    if (!ent.isDirectory()) continue;
+    const meta = parseMetaIni(path.join(modsDir, ent.name, 'meta.ini'));
+    if (!meta || !meta.modid || meta.modid <= 0) {
+      out.push({
+        folderName: ent.name,
+        reason: !meta ? 'NO_META_INI' : 'NO_NEXUS_MODID',
+        version: meta?.version || '',
+        installationFile: meta?.installationFile || '',
+      });
+    }
+  }
+  return out;
+}
+
 module.exports = {
   parseMetaIni,
-  scanModsDirectory
+  scanModsDirectory,
+  scanUnscannedMods
 };

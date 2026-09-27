@@ -153,6 +153,14 @@ async function run() {
   for (const [action, count] of [...byAction.entries()].sort()) console.log(`  ${action}: ${count}`);
   console.log(`  自动可下载=${downloadRows.length} | 延后人工复核=${centerSummary.items || 0}`);
   if (holdRows.length) for (const r of holdRows.slice(0, 20)) console.log(`  - ${r.action} | ${r.modId}:${r.fileId} | ${r.name}`);
+  try {
+    const planData = JSON.parse(fs.readFileSync(files.plan, 'utf8'));
+    const un = planData.unscannedMods;
+    if (un && un.count) {
+      console.log(`  ⚠️ 盲区: ${un.count} 个 mod 无有效 Nexus modid，未参与审计${un.file ? ` -> ${un.file}` : ''}`);
+      for (const x of un.items.slice(0, 10)) console.log(`    · [${x.reason}] ${x.folderName}`);
+    }
+  } catch (_) {}
 
   const rebuildCenter = () => runNode([
     path.join(rootDir, 'scripts', 'build-review-center.js'), files.plan, files.patchDiscovery, files.closure,
