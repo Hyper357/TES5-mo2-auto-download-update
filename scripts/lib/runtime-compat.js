@@ -93,6 +93,16 @@ function minVersion(list) {
   return min;
 }
 
+// Human-checkable quote: the sentence-ish fragment around the FIRST occurrence
+// of the version string in the source text, so every automatic reject carries
+// the Nexus evidence a person can verify.
+function quoteAround(text, ver) {
+  const t = String(text || '');
+  const i = t.indexOf(String(ver || ''));
+  if (i === -1) return '';
+  return t.slice(Math.max(0, i - 60), Math.min(t.length, i + String(ver).length + 60)).trim();
+}
+
 // Reject reasons when the candidate text states a minimum requirement newer
 // than the local installation. Empty text -> no reject (no evidence).
 function runtimeCompatRejects(candidateText, local = defaultLocalRuntime()) {
@@ -100,22 +110,22 @@ function runtimeCompatRejects(candidateText, local = defaultLocalRuntime()) {
   const out = [];
   const minSkse = minVersion(skseVersions);
   if (minSkse && compareNumericVersions(minSkse, local.skse) > 0) {
-    out.push({ reason: 'TARGET_REQUIRES_NEWER_SKSE', required: minSkse, local: local.skse });
+    out.push({ reason: 'TARGET_REQUIRES_NEWER_SKSE', required: minSkse, local: local.skse, quote: quoteAround(candidateText, minSkse) });
   }
   for (const hard of hardRuntimeVersions) {
     if (compareNumericVersions(hard, local.runtime) > 0) {
-      out.push({ reason: 'TARGET_REQUIRES_NEWER_RUNTIME', required: hard, local: local.runtime, evidence: 'UPDATED_FOR_PHRASE' });
+      out.push({ reason: 'TARGET_REQUIRES_NEWER_RUNTIME', required: hard, local: local.runtime, evidence: 'UPDATED_FOR_PHRASE', quote: quoteAround(candidateText, hard) });
     }
   }
   if (out.some(x => x.reason === 'TARGET_REQUIRES_NEWER_RUNTIME')) return out;
   const minAdapted = minVersion(adaptedRuntimeVersions);
   if (minAdapted && compareNumericVersions(minAdapted, local.runtime) > 0) {
-    out.push({ reason: 'TARGET_REQUIRES_NEWER_RUNTIME', required: minAdapted, local: local.runtime, evidence: 'ADAPTED_FOR_PHRASE' });
+    out.push({ reason: 'TARGET_REQUIRES_NEWER_RUNTIME', required: minAdapted, local: local.runtime, evidence: 'ADAPTED_FOR_PHRASE', quote: quoteAround(candidateText, minAdapted) });
     return out;
   }
   const minRuntime = minVersion(runtimeVersions);
   if (minRuntime && compareNumericVersions(minRuntime, local.runtime) > 0) {
-    out.push({ reason: 'TARGET_REQUIRES_NEWER_RUNTIME', required: minRuntime, local: local.runtime });
+    out.push({ reason: 'TARGET_REQUIRES_NEWER_RUNTIME', required: minRuntime, local: local.runtime, quote: quoteAround(candidateText, minRuntime) });
   }
   return out;
 }
