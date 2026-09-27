@@ -162,7 +162,13 @@ function compatibilityProbe({ mine, candidate, localName = '', installationFile 
 function candidateCompatRejects({ file, mine, localName = '', installationFile = '' }) {
   const localText = [localName, installationFile, mine?.name, mine?.file_name, mine?.version].join(' ');
   const candText = [file?.description, file?.file_name, file?.name, file?.version].join(' ');
-  return [...runtimeCompatRejects(candText), ...branchCompatRejects(localText, candText)];
+  // Runtime evidence comes from the DESCRIPTION only. The version field and
+  // version-suffixed file names are full of MOD version numbers (1.5-1.9
+  // range) that are not runtime requirements — scanning them produced mass
+  // false TARGET_REQUIRES_NEWER_RUNTIME positives (e.g. "Skyrim 3D Furniture
+  // 1.9.0" rejected because its own version looked like "runtime 1.9").
+  const descText = String(file?.description || '');
+  return [...runtimeCompatRejects(descText), ...branchCompatRejects(localText, candText)];
 }
 
 function chainCandidate({ files, fileUpdates, mine, localName = '', installationFile = '', profile = null, meta = null }) {

@@ -68,6 +68,20 @@ function parseRequiredRuntimes(text) {
   const adaptedRuntimeVersions = [];
   const reAdapted = /适配\s*(?:SE|AE|SSE|skyrim|天际)?\s*[:：]?\s*(\d\.\d+(?:\.\d+)*)/gi;
   while ((m = reAdapted.exec(t))) adaptedRuntimeVersions.push(m[1]);
+  // "Added support for Skyrim 1.7.99, previous versions are still compatible":
+  // the new-version mention is additive, not exclusive — drop it so the
+  // min-mention heuristic does not reject on it.
+  if (/previous\s+versions\s+(?:are\s+)?still\s+compatible/i.test(t)) {
+    const reAdditive = /added\s+support\s+for\s+(?:skyrim\s*)?(1\.\d+(?:\.\d+)*)/gi;
+    const additive = [];
+    while ((m = reAdditive.exec(t))) additive.push(m[1]);
+    for (const list of [runtimeVersions, hardRuntimeVersions, adaptedRuntimeVersions]) {
+      for (const v of additive) {
+        const i = list.indexOf(v);
+        if (i !== -1) list.splice(i, 1);
+      }
+    }
+  }
   return { skseVersions, runtimeVersions, hardRuntimeVersions, adaptedRuntimeVersions };
 }
 
