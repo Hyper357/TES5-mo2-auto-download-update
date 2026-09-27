@@ -45,6 +45,14 @@ function parseRequiredRuntimes(text) {
   const runtimeVersions = [];
   const reRt = /\b(1\.[5-9](?:\.\d{1,4})?)\b/g;
   while ((m = reRt.exec(t))) runtimeVersions.push(m[1]);
+  // Edition-tagged mentions ("SE1.7", "AE1.6.640", "适配SE1.7"): \b never
+  // fires between the tag's last letter and the digit (both are \w), so the
+  // generic scan above misses them. Only branch abbreviations qualify —
+  // "v1.9.1" is a MOD version, not a runtime, and must stay unrecognized.
+  const reEd = /(?:(?<=SE)|(?<=AE)|(?<=SSE)|(?<=适配))\s*(1\.[5-9](?:\.\d{1,4})?)(?![\d.])/g;
+  while ((m = reEd.exec(t))) {
+    if (!runtimeVersions.includes(m[1])) runtimeVersions.push(m[1]);
+  }
   // Hard requirement: phrases like "Updated for compatibility with Skyrim
   // v1.7.104" state the runtime THIS build targets. They override the
   // min-mentioned heuristic, because such texts often ALSO mention older
@@ -53,7 +61,14 @@ function parseRequiredRuntimes(text) {
   const hardRuntimeVersions = [];
   const reHard = /updated\s+for\s+(?:compatibility\s+with\s+)?(?:skyrim|sse|the\s+)?\s*(?:v|ver(?:sion)?)?\s*[:=]?\s*(\d\.\d+(?:\.\d+)*)/gi;
   while ((m = reHard.exec(t))) hardRuntimeVersions.push(m[1]);
-  return { skseVersions, runtimeVersions, hardRuntimeVersions };
+  // Chinese equivalent: "适配SE1.7" states the runtime THIS build targets.
+  // Unlike the English phrase, texts may list several targets ("适配1.6.1170、
+  // 1.7"); for those the MINIMUM is the compatibility floor, so the caller
+  // checks the min instead of rejecting per mention.
+  const adaptedRuntimeVersions = [];
+  const reAdapted = /适配\s*(?:SE|AE|SSE|skyrim|天际)?\s*[:：]?\s*(\d\.\d+(?:\.\d+)*)/gi;
+  while ((m = reAdapted.exec(t))) adaptedRuntimeVersions.push(m[1]);
+  return { skseVersions, runtimeVersions, hardRuntimeVersions, adaptedRuntimeVersions };
 }
 
 function minVersion(list) {
@@ -67,7 +82,7 @@ function minVersion(list) {
 // Reject reasons when the candidate text states a minimum requirement newer
 // than the local installation. Empty text -> no reject (no evidence).
 function runtimeCompatRejects(candidateText, local = defaultLocalRuntime()) {
-  const { skseVersions, runtimeVersions, hardRuntimeVersions } = parseRequiredRuntimes(candidateText);
+  const { skseVersions, runtimeVersions, hardRuntimeVersions, adaptedRuntimeVersions } = parseRequiredRuntimes(candidateText);
   const out = [];
   const minSkse = minVersion(skseVersions);
   if (minSkse && compareNumericVersions(minSkse, local.skse) > 0) {
@@ -79,6 +94,11 @@ function runtimeCompatRejects(candidateText, local = defaultLocalRuntime()) {
     }
   }
   if (out.some(x => x.reason === 'TARGET_REQUIRES_NEWER_RUNTIME')) return out;
+  const minAdapted = minVersion(adaptedRuntimeVersions);
+  if (minAdapted && compareNumericVersions(minAdapted, local.runtime) > 0) {
+    out.push({ reason: 'TARGET_REQUIRES_NEWER_RUNTIME', required: minAdapted, local: local.runtime, evidence: 'ADAPTED_FOR_PHRASE' });
+    return out;
+  }
   const minRuntime = minVersion(runtimeVersions);
   if (minRuntime && compareNumericVersions(minRuntime, local.runtime) > 0) {
     out.push({ reason: 'TARGET_REQUIRES_NEWER_RUNTIME', required: minRuntime, local: local.runtime });

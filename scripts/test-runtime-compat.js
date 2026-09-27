@@ -46,6 +46,24 @@ function f(id, name, version, uploaded, categoryId = 1) {
 
 // No evidence -> no reject.
 {
+// Chinese description stating the target runtime ("适配SE1.7") must reject
+// on 1.6.1170; older targets ("适配SE1.5.97") and dual targets must not.
+{
+  const rejects = runtimeCompatRejects('Chinese Translation For USSEP 4.3.9a 适配SE1.7');
+  assert.ok(rejects.some(x => x.reason === 'TARGET_REQUIRES_NEWER_RUNTIME' && x.required === '1.7'));
+  assert.deepStrictEqual(runtimeCompatRejects('基于1.6.1170的最后一个非官方补丁4.3.8a'), []);
+  assert.deepStrictEqual(runtimeCompatRejects('适配SE1.5.97'), []);
+  assert.deepStrictEqual(runtimeCompatRejects('适配1.6.1170、1.7 双版本'), []);
+}
+
+// Edition-tagged digits ("SE1.7.104") are runtime mentions even without a
+// space; a mod version like "v1.9.1-SE" must NOT read as a runtime.
+{
+  const rejects = runtimeCompatRejects('This build is for SE1.7.104 only');
+  assert.ok(rejects.some(x => x.reason === 'TARGET_REQUIRES_NEWER_RUNTIME' && x.required === '1.7.104'));
+  assert.deepStrictEqual(runtimeCompatRejects('Enhanced Combat AI v1.9.1-SE'), []);
+}
+
   assert.deepStrictEqual(runtimeCompatRejects(''), []);
   assert.deepStrictEqual(runtimeCompatRejects('Fix a bug in the quest stage.'), []);
 }
