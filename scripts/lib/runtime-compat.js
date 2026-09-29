@@ -68,6 +68,20 @@ function parseRequiredRuntimes(text) {
   const adaptedRuntimeVersions = [];
   const reAdapted = /适配\s*(?:SE|AE|SSE|skyrim|天际)?\s*[:：]?\s*(\d\.\d+(?:\.\d+)*)/gi;
   while ((m = reAdapted.exec(t))) adaptedRuntimeVersions.push(m[1]);
+  // Bare "For vX" statements ("For v1.7.104", "Backwards compatible (CommonlibNG)
+  // for 1.6.1130", "Requires 1.7.104"). The generic scan cannot see these — the
+  // "v" prefix suppresses \b between the letter and the digit, and that
+  // suppression is deliberate so MOD versions like "v1.9.1" stay unrecognized.
+  // The verb phrase ("for"/"requires") is what disambiguates: here the v-number
+  // is a RUNTIME requirement, not the mod's own version. To keep that
+  // disambiguation sharp, only runtime-shaped versions qualify (1.[5-9] with a
+  // 3-4 digit build tail: 1.5.97 / 1.6.1170 / 1.7.104). Min-mention semantics
+  // apply: "for 1.7.104" alone rejects on 1.6.1170, "backwards compatible for
+  // 1.6.1130" passes, and multi-target lists ("for 1.6.1170 and 1.7.104")
+  // take the minimum.
+  const forRuntimeVersions = [];
+  const reFor = /\b(?:for|requires?)\b\s*:?\s*(?:skyrim\s*)?v?\s*(1\.[5-9]\.\d{3,4})\b/gi;
+  while ((m = reFor.exec(t))) forRuntimeVersions.push(m[1]);
   // "Added support for Skyrim 1.7.99, previous versions are still compatible":
   // the new-version mention is additive, not exclusive — drop it so the
   // min-mention heuristic does not reject on it.
@@ -75,14 +89,14 @@ function parseRequiredRuntimes(text) {
     const reAdditive = /added\s+support\s+for\s+(?:skyrim\s*)?(1\.\d+(?:\.\d+)*)/gi;
     const additive = [];
     while ((m = reAdditive.exec(t))) additive.push(m[1]);
-    for (const list of [runtimeVersions, hardRuntimeVersions, adaptedRuntimeVersions]) {
+    for (const list of [runtimeVersions, hardRuntimeVersions, adaptedRuntimeVersions, forRuntimeVersions]) {
       for (const v of additive) {
         const i = list.indexOf(v);
         if (i !== -1) list.splice(i, 1);
       }
     }
   }
-  return { skseVersions, runtimeVersions, hardRuntimeVersions, adaptedRuntimeVersions };
+  return { skseVersions, runtimeVersions, hardRuntimeVersions, adaptedRuntimeVersions, forRuntimeVersions };
 }
 
 function minVersion(list) {
@@ -106,7 +120,7 @@ function quoteAround(text, ver) {
 // Reject reasons when the candidate text states a minimum requirement newer
 // than the local installation. Empty text -> no reject (no evidence).
 function runtimeCompatRejects(candidateText, local = defaultLocalRuntime()) {
-  const { skseVersions, runtimeVersions, hardRuntimeVersions, adaptedRuntimeVersions } = parseRequiredRuntimes(candidateText);
+  const { skseVersions, runtimeVersions, hardRuntimeVersions, adaptedRuntimeVersions, forRuntimeVersions } = parseRequiredRuntimes(candidateText);
   const out = [];
   const minSkse = minVersion(skseVersions);
   if (minSkse && compareNumericVersions(minSkse, local.skse) > 0) {
@@ -121,6 +135,11 @@ function runtimeCompatRejects(candidateText, local = defaultLocalRuntime()) {
   const minAdapted = minVersion(adaptedRuntimeVersions);
   if (minAdapted && compareNumericVersions(minAdapted, local.runtime) > 0) {
     out.push({ reason: 'TARGET_REQUIRES_NEWER_RUNTIME', required: minAdapted, local: local.runtime, evidence: 'ADAPTED_FOR_PHRASE', quote: quoteAround(candidateText, minAdapted) });
+    return out;
+  }
+  const minFor = minVersion(forRuntimeVersions);
+  if (minFor && compareNumericVersions(minFor, local.runtime) > 0) {
+    out.push({ reason: 'TARGET_REQUIRES_NEWER_RUNTIME', required: minFor, local: local.runtime, evidence: 'FOR_VERSION_PHRASE', quote: quoteAround(candidateText, minFor) });
     return out;
   }
   const minRuntime = minVersion(runtimeVersions);

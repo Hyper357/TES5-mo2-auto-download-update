@@ -222,4 +222,30 @@ function f(id, name, version, uploaded, categoryId = 1) {
   }
 }
 
+// Bare "For vX" statements (the Instantly Skip incident): "For v1.7.104" must
+// reject on 1.6.1170; backwards-compat mentions of OLDER runtimes must pass;
+// mod versions with a short build tail ("for v1.9.1 of the framework") must
+// stay unrecognized.
+{
+  const r = runtimeCompatRejects('For v1.7.104');
+  assert.strictEqual(r.length, 1);
+  assert.strictEqual(r[0].reason, 'TARGET_REQUIRES_NEWER_RUNTIME');
+  assert.strictEqual(r[0].evidence, 'FOR_VERSION_PHRASE');
+  assert.strictEqual(r[0].required, '1.7.104');
+  assert.ok(r[0].quote.includes('For v1.7.104'));
+
+  assert.strictEqual(runtimeCompatRejects('Requires 1.7.104').length, 1);
+  assert.deepStrictEqual(runtimeCompatRejects('Backwards compatible (CommonlibNG) for 1.6.1130'), []);
+  assert.deepStrictEqual(runtimeCompatRejects('for 1.6.353'), []);
+  assert.deepStrictEqual(runtimeCompatRejects('for 1.6.1170 and 1.7.104'), []);
+  // "v1.9.1" has a 1-digit build tail -> not runtime-shaped -> the bare-for
+  // pattern must not fire on it.
+  assert.deepStrictEqual(runtimeCompatRejects('Compatible with v1.9.1 of the framework'), []);
+  // Additive phrasing with the exemption sentence must still pass.
+  assert.deepStrictEqual(
+    runtimeCompatRejects('Added support for 1.7.104, previous versions are still compatible'),
+    []
+  );
+}
+
 console.log('runtime compat tests: OK');
