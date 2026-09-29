@@ -44,6 +44,26 @@ function porcelainIsClean(text) {
   return !String(text || '').trim();
 }
 
+// Untracked local files are not local *work*. Bootstrap never resets, deletes, or
+// overwrites them, and `git pull --ff-only` still refuses on its own if an incoming
+// commit would clobber one. So only tracked modifications may block a fast-forward:
+// otherwise a single untracked scratch file (local handoff note, editor temp file)
+// would make the documented startup command permanently unusable.
+function trackedIsClean(text) {
+  return !String(text || '')
+    .split(/\r?\n/)
+    .some((line) => line.trim() && !line.trim().startsWith('??'));
+}
+
+function untrackedPaths(text) {
+  return String(text || '')
+    .split(/\r?\n/)
+    .map((line) => line.trim())
+    .filter((line) => line.startsWith('??'))
+    .map((line) => line.slice(2).trim())
+    .filter(Boolean);
+}
+
 function dependencyHealth() {
   const marker = path.join(ROOT, 'node_modules', 'puppeteer-core', 'package.json');
   if (!fs.existsSync(marker)) return { ok: false, reason: 'node_modules missing' };
@@ -55,7 +75,7 @@ function currentIdentity() {
   const branch = git(['rev-parse', '--abbrev-ref', 'HEAD'], { capture: true }).stdout;
   const head = git(['rev-parse', 'HEAD'], { capture: true }).stdout;
   const status = git(['status', '--porcelain'], { capture: true }).stdout;
-  return { branch, head, clean: porcelainIsClean(status), status };
+  return { branch, head, clean: trackedIsClean(status), status, untracked: untrackedPaths(status) };
 }
 
 function syncLatestMain() {
@@ -73,7 +93,7 @@ function syncLatestMain() {
     return {
       ok: false,
       code: 'AGENT_BOOTSTRAP_DIRTY_WORKTREE',
-      detail: '工作区存在未提交修改；为避免覆盖本地工作，bootstrap 拒绝自动 pull。',
+      detail: '工作区存在未提交的已跟踪文件修改；为避免覆盖本地工作，bootstrap 拒绝自动 pull。',
       before,
       identity: before,
     };
@@ -147,6 +167,8 @@ if (require.main === module) {
 
 module.exports = {
   porcelainIsClean,
+  trackedIsClean,
+  untrackedPaths,
   dependencyHealth,
   currentIdentity,
   syncLatestMain,
