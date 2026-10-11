@@ -21,6 +21,7 @@ const {
 } = require('./lib/download-guard');
 const { scanModsDirectory, parseMetaIni } = require('./lib/mo2-reader');
 const { compareVersions } = require('./lib/semver');
+const { atomicReplace } = require('./lib/fs-json');
 const { validVersion } = require('./lib/update-eligibility');
 const {
   createDirectSessionPool,
@@ -83,7 +84,12 @@ function saveState(file, state) {
   fs.mkdirSync(path.dirname(file), { recursive: true });
   const tmp = `${file}.tmp-${process.pid}`;
   fs.writeFileSync(tmp, JSON.stringify(state, null, 2), 'utf8');
-  fs.renameSync(tmp, file);
+  try {
+    atomicReplace(tmp, file);
+  } catch (err) {
+    try { fs.rmSync(tmp, { force: true }); } catch (_) {}
+    throw err;
+  }
 }
 
 function runNode(args) {

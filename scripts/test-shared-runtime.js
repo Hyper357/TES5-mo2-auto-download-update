@@ -6,7 +6,8 @@ const fs = require('fs');
 const os = require('os');
 const path = require('path');
 const { parseStrict } = require('./lib/cli');
-const { saveJson, loadJson } = require('./lib/fs-json');
+const { saveJson, loadJson, atomicReplace } = require('./lib/fs-json');
+const { classifyFailure } = require('./lib/diagnostics');
 const { formatManifest, parseManifestText } = require('./lib/manifest');
 const {
   findLatestRun,
@@ -116,6 +117,55 @@ try {
   const jsonFile = path.join(tmp, 'nested', 'x.json');
   saveJson(jsonFile, { ok: true });
   assert.deepStrictEqual(loadJson(jsonFile, null), { ok: true });
+
+  // Regression for the 2026-10-10 batch abort: Defender/indexer hold a transient
+  // handle on a freshly written file, so rename onto it fails with EPERM even
+  // though nothing is wrong. One such failure used to kill a whole download
+  // batch after a single state write. atomicReplace must ride that out.
+  const realRename = fs.renameSync;
+  try {
+    const transient = () => Object.assign(new Error('EPERM: operation not permitted, rename'), { code: 'EPERM' });
+
+    // Retries a transient lock and then succeeds.
+    let calls = 0;
+    fs.renameSync = (a, b) => { calls += 1; if (calls <= 3) throw transient(); return realRename(a, b); };
+    const from1 = path.join(tmp, 'a.tmp');
+    const to1 = path.join(tmp, 'a.json');
+    fs.writeFileSync(from1, '{"a":1}');
+    atomicReplace(from1, to1, { baseDelayMs: 1 });
+    assert.strictEqual(calls, 4, 'expected 3 transient failures then a success');
+    assert.deepStrictEqual(loadJson(to1, null), { a: 1 });
+
+    // A non-transient code is a real error: fail fast, do not burn the budget.
+    calls = 0;
+    fs.renameSync = () => { calls += 1; throw Object.assign(new Error('ENOENT: no such file'), { code: 'ENOENT' }); };
+    assert.throws(() => atomicReplace(path.join(tmp, 'nope'), path.join(tmp, 'nope2'), { baseDelayMs: 1 }),
+      /ENOENT/);
+    assert.strictEqual(calls, 1, 'non-transient errors must not be retried');
+
+    // Persistent transient lock: give up after the attempt budget and surface it.
+    calls = 0;
+    fs.renameSync = () => { calls += 1; throw transient(); };
+    assert.throws(() => atomicReplace(path.join(tmp, 'p.tmp'), path.join(tmp, 'p.json'), { attempts: 4, baseDelayMs: 1 }),
+      /EPERM/);
+    assert.strictEqual(calls, 4, 'must exhaust the attempt budget then throw');
+
+    // saveJson must not leave a .tmp- sibling behind when the rename truly fails.
+    fs.renameSync = () => { throw transient(); };
+    assert.throws(() => saveJson(path.join(tmp, 'locked.json'), { x: 1 }), /EPERM/);
+    assert.deepStrictEqual(
+      fs.readdirSync(tmp).filter(f => f.startsWith('locked.json.tmp-')), [],
+      'failed atomic write must clean up its temp file');
+  } finally {
+    fs.renameSync = realRename;
+  }
+
+  // A transient file lock must not masquerade as UNKNOWN_FAILURE.
+  assert.strictEqual(classifyFailure('EXECUTOR_FAILED EPERM EPERM: operation not permitted, rename a -> b').code, 'STATE_WRITE_LOCKED');
+  assert.strictEqual(classifyFailure('EBUSY: resource busy or locked, rename x').code, 'STATE_WRITE_LOCKED');
+  assert.strictEqual(classifyFailure('EACCES: permission denied, rename y').code, 'STATE_WRITE_LOCKED');
+  assert.strictEqual(classifyFailure('STATE_WRITE_LOCKED').retry, true);
+  assert.strictEqual(classifyFailure('nothing recognizable here').code, 'UNKNOWN_FAILURE');
 
   const runs = path.join(tmp, '.runtime', 'runs');
   fs.mkdirSync(path.join(runs, '2026-01-01'), { recursive: true });

@@ -40,6 +40,7 @@ const CODES = Object.freeze({
   CONCURRENT_EXECUTOR: { retry: false, layer: 'IDEMPOTENCY', action: '已有一个 --go 执行器正在运行。等待它结束并读取其 execution-state，不要并行启动第二个下载批次。' },
   LEDGER_VERIFIED_MISSING: { retry: false, layer: 'IDEMPOTENCY', action: '提交账本记录为 VERIFIED，但本地下载证据已缺失。先确认归档是否被移动/删除，再显式决定是否重下。' },
   COMMAND_FAILED: { retry: false, layer: 'PROCESS', action: '查看 stderr 与上下文后处理。' },
+  STATE_WRITE_LOCKED: { retry: true, layer: 'FILESYSTEM', action: '写入状态文件时被瞬时占用（杀软/索引器持有句柄）。原子写已自带重试；若仍失败，确认无其他进程扫描 .runtime 目录后重试当前批次。' },
   UNKNOWN_FAILURE: { retry: false, layer: 'UNKNOWN', action: '查看 errors.jsonl 与诊断快照，禁止盲目继续。' },
 });
 
@@ -73,6 +74,9 @@ function classifyFailure(input) {
     [/\b401\b.*(?:nexus|api)|nexus.*\b401\b/i, 'NEXUS_API_401'],
     [/\b403\b|cloudflare|forbidden/i, 'NEXUS_API_403'],
     [/\b429\b|rate.?limit/i, 'NEXUS_API_429'],
+    // Transient Windows file locks. Must be matched before the generic rules so
+    // an EPERM/EBUSY rename is not silently downgraded to UNKNOWN_FAILURE.
+    [/STATE_WRITE_LOCKED|EPERM|EBUSY|EACCES|operation not permitted|resource busy|being used by another process/i, 'STATE_WRITE_LOCKED'],
     [/api.*timeout|etimedout|socket hang up/i, 'NEXUS_API_TIMEOUT'],
     [/BROWSER_PROFILE_MISMATCH|unmanaged browser|unmanaged.*profile|profile.*mismatch/i, 'BROWSER_PROFILE_MISMATCH'],
     [/CONCURRENT_EXECUTOR|another --go executor|executor.*already.*running/i, 'CONCURRENT_EXECUTOR'],
