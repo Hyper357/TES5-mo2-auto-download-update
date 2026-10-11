@@ -1,6 +1,9 @@
 'use strict';
 
 const assert = require('assert');
+const fs = require('fs');
+const os = require('os');
+const path = require('path');
 const {
   parseRequiredRuntimes,
   runtimeCompatRejects,
@@ -9,6 +12,11 @@ const {
   versionCore,
   compareNumericVersions,
   defaultLocalRuntime,
+  detectLocalSkse,
+  detectLocalRuntime,
+  resetRuntimeCache,
+  FALLBACK_SKSE_VERSION,
+  FALLBACK_RUNTIME_VERSION,
 } = require('./lib/runtime-compat');
 const { assessUpdateEligibility } = require('./lib/update-eligibility');
 
@@ -246,6 +254,188 @@ function f(id, name, version, uploaded, categoryId = 1) {
     runtimeCompatRejects('Added support for 1.7.104, previous versions are still compatible'),
     []
   );
+}
+
+// --- Local baseline detection ---------------------------------------------
+//
+// Every case below restores env + memo state, so the detection tests cannot
+// leak into the assertions above or into other suites sharing this process.
+
+const baselineTmp = fs.mkdtempSync(path.join(os.tmpdir(), 'tes5-runtime-detect-'));
+try {
+  // Env override beats whatever the machine detectors say.
+  {
+    process.env.LOCAL_SKSE_VERSION = '2.3.1';
+    process.env.LOCAL_RUNTIME_VERSION = '1.7.104';
+    resetRuntimeCache();
+    try {
+      const local = defaultLocalRuntime();
+      assert.strictEqual(local.skse, '2.3.1');
+      assert.strictEqual(local.runtime, '1.7.104');
+      assert.strictEqual(local.sources.skse, 'ENV');
+      assert.strictEqual(local.sources.runtime, 'ENV');
+      // An env-sourced value is never an unverified assumption, so no
+      // fallback warning may be raised for it.
+      assert.deepStrictEqual(local.warnings, []);
+      // Backward compatibility: old callers only ever read these two strings.
+      assert.strictEqual(typeof local.skse, 'string');
+      assert.strictEqual(typeof local.runtime, 'string');
+    } finally {
+      delete process.env.LOCAL_SKSE_VERSION;
+      delete process.env.LOCAL_RUNTIME_VERSION;
+      resetRuntimeCache();
+    }
+  }
+
+  // A real skse64.log head is parsed; only the FIRST initialize line counts.
+  {
+    const log = path.join(baselineTmp, 'skse64.log');
+    fs.writeFileSync(log, [
+      'SKSE64 runtime: initialize (version = 2.3.5 01064920 01DD4FDD9DED6CC7, os = 6.2 (9200))',
+      '[error] System.IO.FileNotFoundException: could not open data file',
+      'SKSE64 runtime: initialize (version = 2.2.6 01064920 01DD4FDD9DED6CC7, os = 6.2 (9200))',
+      'SKSE64 runtime: handoff address ...',
+    ].join('\r\n'));
+    process.env.LOCAL_SKSE_LOG_PATH = log;
+    resetRuntimeCache();
+    try {
+      const det = detectLocalSkse();
+      assert.strictEqual(det.version, '2.3.5');
+      assert.strictEqual(det.path, log);
+      assert.ok(det.source.startsWith('DETECTED'));
+      // More than one initialize line -> the source must say which one won.
+      assert.ok(det.source.includes('MULTIPLE'), `expected a multi-session note, got ${det.source}`);
+
+      const local = defaultLocalRuntime();
+      assert.strictEqual(local.skse, '2.3.5');
+      assert.strictEqual(local.sources.skse, 'DETECTED');
+      // Detection moved away from the hardcoded 2.2.6 -> must be flagged.
+      assert.ok(local.warnings.some(w => w.includes('2.3.5') && w.includes('differs from the hardcoded default')));
+      assert.ok(!local.warnings.some(w => w.includes('SKSE baseline 2.2.6 is an UNVERIFIED ASSUMPTION')));
+    } finally {
+      delete process.env.LOCAL_SKSE_LOG_PATH;
+      resetRuntimeCache();
+    }
+  }
+
+  // Detection returning nothing still yields a usable, labelled baseline.
+  {
+    // A declared list replaces the built-in locations, so these fixtures do not
+    // depend on what happens to be installed on the machine running the test.
+    process.env.LOCAL_SKSE_LOG_PATHS = 'C:\\tes5-nonexistent\\skse64.log';
+    process.env.LOCAL_SKYRIM_EXE_PATHS = 'C:\\tes5-nonexistent\\Skyrim.exe';
+    resetRuntimeCache();
+    try {
+      assert.strictEqual(detectLocalSkse().version, '');
+      assert.strictEqual(detectLocalSkse().source, 'NOT_FOUND');
+      assert.strictEqual(detectLocalRuntime().source, 'NOT_FOUND');
+
+      const local = defaultLocalRuntime();
+      assert.strictEqual(local.skse, FALLBACK_SKSE_VERSION);
+      assert.strictEqual(local.runtime, FALLBACK_RUNTIME_VERSION);
+      assert.strictEqual(local.sources.skse, 'FALLBACK');
+      assert.strictEqual(local.sources.runtime, 'FALLBACK');
+      // Never empty, whatever happened upstream: existing callers stay safe.
+      assert.ok(local.skse.length > 0);
+      assert.ok(local.runtime.length > 0);
+      // Both fallbacks must be labelled as unverified and say how to fix it.
+      const skseWarn = local.warnings.find(w => w.includes('SKSE baseline'));
+      const runtimeWarn = local.warnings.find(w => w.includes('Skyrim runtime baseline'));
+      assert.ok(skseWarn, 'expected a SKSE fallback warning');
+      assert.ok(runtimeWarn, 'expected a runtime fallback warning');
+      assert.ok(skseWarn.includes('UNVERIFIED ASSUMPTION'));
+      assert.ok(skseWarn.includes('LOCAL_SKSE_VERSION') || skseWarn.includes('LOCAL_SKSE_LOG_PATH'));
+      assert.ok(runtimeWarn.includes('UNVERIFIED ASSUMPTION'));
+      assert.ok(runtimeWarn.includes('LOCAL_RUNTIME_VERSION'));
+      assert.ok(runtimeWarn.includes('LOCAL_SKYRIM_EXE'));
+      // The label travels with the value, not only with the warning list.
+      assert.deepStrictEqual(local.detail.skse, { version: '', source: 'NOT_FOUND', path: '' });
+      assert.deepStrictEqual(local.detail.runtime, { version: '', source: 'NOT_FOUND', path: '' });
+    } finally {
+      delete process.env.LOCAL_SKSE_LOG_PATHS;
+      delete process.env.LOCAL_SKYRIM_EXE_PATHS;
+      resetRuntimeCache();
+    }
+  }
+
+  // A machine-declared path list is honoured (first existing candidate wins).
+  {
+    const log = path.join(baselineTmp, 'declared', 'skse64.log');
+    fs.mkdirSync(path.dirname(log), { recursive: true });
+    fs.writeFileSync(log, 'SKSE64 runtime: initialize (version = 2.2.7 01064920 ABCDEF0123456789, os = 6.2 (9200))\r\n');
+    process.env.LOCAL_SKSE_LOG_PATHS = [
+      path.join(baselineTmp, 'declared', 'absent.log'),
+      log,
+    ].join(';');
+    resetRuntimeCache();
+    try {
+      const det = detectLocalSkse();
+      assert.strictEqual(det.version, '2.2.7');
+      assert.strictEqual(det.path, log);
+      assert.strictEqual(det.source, 'DETECTED');
+      const local = defaultLocalRuntime();
+      assert.strictEqual(local.skse, '2.2.7');
+      assert.strictEqual(local.sources.skse, 'DETECTED');
+    } finally {
+      delete process.env.LOCAL_SKSE_LOG_PATHS;
+      resetRuntimeCache();
+    }
+  }
+
+  // An existing file that carries no PE version resource is NOT evidence.
+  {
+    const fakeExe = path.join(baselineTmp, 'Skyrim.exe');
+    fs.writeFileSync(fakeExe, 'this is not a PE image');
+    // A real PE with a version resource may well sit at a built-in location on
+    // the machine running this test (a healthy SSE install has SkyrimSE.exe at
+    // its root). The detector deliberately keeps searching past a file that
+    // yields no version, so the search space must be pinned here or the
+    // fallback candidate would be found and the case would not be testing what
+    // it claims to test.
+    process.env.LOCAL_SKYRIM_EXE = fakeExe;
+    process.env.LOCAL_SKYRIM_EXE_PATHS = 'C:\\tes5-nonexistent\\SkyrimSE.exe';
+    resetRuntimeCache();
+    try {
+      const det = detectLocalRuntime();
+      assert.strictEqual(det.source, 'NOT_FOUND');
+      assert.strictEqual(det.version, '');
+    } finally {
+      delete process.env.LOCAL_SKYRIM_EXE;
+      delete process.env.LOCAL_SKYRIM_EXE_PATHS;
+      resetRuntimeCache();
+    }
+  }
+
+  // Memoized detection is stable and cheap enough for a per-candidate audit.
+  {
+    resetRuntimeCache();
+    const a = detectLocalSkse();
+    const b = detectLocalSkse();
+    assert.deepStrictEqual(a, b);
+    assert.notStrictEqual(a, b, 'detector must hand out copies, not the memo itself');
+    const first = defaultLocalRuntime();
+    const second = defaultLocalRuntime();
+    assert.strictEqual(first.skse, second.skse);
+    assert.strictEqual(first.runtime, second.runtime);
+    assert.deepStrictEqual(first.sources, second.sources);
+  }
+
+  // REGRESSION: the decision function is unchanged by the baseline rework.
+  // An explicit local baseline pins the comparison away from this machine's
+  // detection, so the pre-existing reject semantics are asserted verbatim.
+  {
+    const local = { skse: '2.2.6', runtime: '1.6.1170' };
+    const newer = runtimeCompatRejects('SKSE 2.3.1 / SSE (SAE) 1.7.104', local);
+    assert.ok(newer.some(x => x.reason === 'TARGET_REQUIRES_NEWER_SKSE' && x.local === '2.2.6'));
+    assert.ok(newer.some(x => x.reason === 'TARGET_REQUIRES_NEWER_RUNTIME' && x.local === '1.6.1170'));
+    assert.deepStrictEqual(runtimeCompatRejects('Built for Skyrim 1.6.1170 and 1.7.104, SKSE 2.2.6 or 2.3.1', local), []);
+    // Empty text -> no reject (no evidence). Unchanged by design.
+    assert.deepStrictEqual(runtimeCompatRejects('', local), []);
+    assert.deepStrictEqual(runtimeCompatRejects('Fix a bug in the quest stage.', local), []);
+  }
+} finally {
+  fs.rmSync(baselineTmp, { recursive: true, force: true });
+  resetRuntimeCache();
 }
 
 console.log('runtime compat tests: OK');

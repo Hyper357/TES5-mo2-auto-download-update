@@ -152,11 +152,29 @@ function summary() {
       label + ' ' + (counts[key] || 0) + '</button>').join('');
 }
 
+const RUNTIME_EVIDENCE_HINTS = {
+  EVIDENCED: '描述声明了运行时要求且不高于本地版本：门禁确实校验过。',
+  NO_RUNTIME_CLAIM: '描述有文字，但没有任何运行时/SKSE 要求：门禁没有可校验的证据。',
+  EMPTY_DESCRIPTION: '描述为空：门禁在零证据下放行，并非“已验证兼容”。',
+  REJECTED: '描述声明了高于本地版本的运行时要求，已被兼容性门禁拒绝。',
+};
+
+function runtimeEvidenceLabel(ev) {
+  if (!ev || !ev.status) return '';
+  const required = (ev.required || []).map(r => `${r.kind} ${r.version}`).join(', ');
+  return ev.status
+    + ' · 描述 ' + Number(ev.descChars || 0) + ' 字符'
+    + (required ? ' · 声明 ' + required : '')
+    + ' — ' + (RUNTIME_EVIDENCE_HINTS[ev.status] || '');
+}
+
 function technicalDetails(it) {
   const blockers = (it.blockers || []).map(x => '<li>' + h(x) + '</li>').join('');
   const groups = componentGroups(it);
+  const runtimeEvidence = runtimeEvidenceLabel(it.updateEligibility?.runtimeEvidence);
   return '<details class="technical-panel"><summary>技术详情</summary><div class="technical-body">' +
     '<div><b>modId</b> ' + h(it.modId) + ' · <b>状态</b> ' + h(it.action || 'REVIEW') + '</div>' +
+    (runtimeEvidence ? '<div><b>运行时证据</b> ' + h(runtimeEvidence) + '</div>' : '') +
     (it.localFileId ? '<div><b>本地 fileId</b> ' + h(it.localFileId) + '</div>' : '') +
     (it.targetMainFileId ? '<div><b>推荐 target</b> ' + h(it.targetMainFileId) + '</div>' : '') +
     (it.recentNexusFilesSource ? '<div><b>文件来源</b> ' + h(it.recentNexusFilesSource) + '</div>' : '') +

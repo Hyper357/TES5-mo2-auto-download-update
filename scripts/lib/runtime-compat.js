@@ -1,6 +1,9 @@
 #!/usr/bin/env node
 'use strict';
 
+const fs = require('fs');
+const cp = require('child_process');
+
 // Runtime / SKSE / edition compatibility gate.
 //
 // Nexus file descriptions frequently state the exact runtime the build was
@@ -10,10 +13,255 @@
 // to load. Only the MINIMUM mentioned version is checked, so files that
 // explicitly support older runtimes ("1.6.1170 and 1.7.104") still pass.
 
+// ---------------------------------------------------------------------------
+// Local baseline detection
+//
+// The gate is only as good as the local baseline it compares against. A
+// hardcoded literal cannot notice that the user's game was upgraded, so the
+// baseline is probed on the real machine first. Detection is strictly
+// evidence-based: when no evidence exists it reports NOT_FOUND and the caller
+// falls back to the historical constants while saying so in `warnings`.
+// `defaultLocalRuntime()` runs once per candidate during an audit, so every
+// probe is memoized for the process lifetime.
+// ---------------------------------------------------------------------------
+
+// A SKSE log is hundreds of KB; only its head can hold the initialize line.
+const SKSE_LOG_HEAD_BYTES = 8192;
+
+// Local SKSE log locations, most specific first. MO2 virtualizes Data, so the
+// first entry is the virtualized profile copy and the rest are real installs.
+const DEFAULT_SKSE_LOG_PATHS = [
+  'C:\\Users\\ZHAOLJ\\Documents\\My Games\\Skyrim Special Edition\\SKSE\\skse64.log',
+  'E:\\SkyrimAE\\Data\\SKSE\\Skyrim Special Edition\\Logs\\skse64.log',
+  'E:\\SkyrimAE\\Data\\SKSE\\skse64.log',
+];
+
+// Game binary locations, most specific first.
+//
+// The Special Edition executable is `SkyrimSE.exe`, NOT `Skyrim.exe` — Skyrim
+// Anniversary Edition ships `Skyrim.exe` with a totally different build line,
+// and Skyrim SE has no `Skyrim.exe` at all. Probing only for `Skyrim.exe`
+// silently reports NOT_FOUND on a perfectly healthy SSE install and makes the
+// gate fall back to the hardcoded constant. Both names are listed per root so
+// the detector stays honest on either edition.
+const DEFAULT_SKYRIM_EXE_PATHS = [
+  'E:\\SkyrimAE\\SkyrimSE.exe',
+  'E:\\SkyrimAE\\Skyrim.exe',
+  'E:\\SkyrimAE\\Data\\Skyrim Special Edition\\SkyrimSE.exe',
+  'C:\\Program Files (x86)\\Steam\\steamapps\\common\\Skyrim Special Edition\\SkyrimSE.exe',
+  'C:\\Program Files (x86)\\Steam\\steamapps\\common\\Skyrim Special Edition\\Skyrim.exe',
+  'D:\\SteamLibrary\\steamapps\\common\\Skyrim Special Edition\\SkyrimSE.exe',
+  'D:\\SteamLibrary\\steamapps\\common\\Skyrim Special Edition\\Skyrim.exe',
+];
+
+// Historical constants. Kept ONLY as the last-resort baseline, never as a
+// detector fallback: an unverifiable value must be labelled, not trusted.
+const FALLBACK_SKSE_VERSION = '2.2.6';
+const FALLBACK_RUNTIME_VERSION = '1.6.1170';
+
+let skseDetectionMemo = null;
+let runtimeDetectionMemo = null;
+
+// Test seam: drops the process-wide detection memo so a test can point the
+// detectors at fixture files via the LOCAL_* environment overrides.
+function resetRuntimeCache() {
+  skseDetectionMemo = null;
+  runtimeDetectionMemo = null;
+}
+
+// ";"-separated path list override, PATH-style, so a machine with a layout
+// this file does not know about can still declare its own candidates.
+function envPathList(name) {
+  return String(process.env[name] || '')
+    .split(';')
+    .map(s => s.trim())
+    .filter(Boolean);
+}
+
+function isReadableFile(p) {
+  try {
+    return !!p && fs.statSync(p).isFile();
+  } catch {
+    return false;
+  }
+}
+
+function readFileHead(p, bytes) {
+  const fd = fs.openSync(p, 'r');
+  try {
+    const buf = Buffer.allocUnsafe(bytes);
+    const n = fs.readSync(fd, buf, 0, bytes, 0);
+    return buf.slice(0, n).toString('utf8');
+  } finally {
+    fs.closeSync(fd);
+  }
+}
+
+const SKSE_INIT_RE = /SKSE64\s+runtime:\s*initialize/gi;
+
+// Only the FIRST "SKSE64 runtime: initialize" line is trusted: the version
+// there is the one the running session loaded. A log can hold several sessions
+// (append mode), and the later lines describe sessions that may not be the
+// current installation, so they are counted but never parsed for the value.
+function parseSkseLogHead(head) {
+  SKSE_INIT_RE.lastIndex = 0;
+  const first = SKSE_INIT_RE.exec(head);
+  if (!first) return { version: '', occurrences: 0 };
+  let occurrences = 1;
+  SKSE_INIT_RE.lastIndex = first.index + first[0].length;
+  while (SKSE_INIT_RE.exec(head)) occurrences++;
+  SKSE_INIT_RE.lastIndex = 0;
+  const nl = head.indexOf('\n', first.index);
+  const line = nl === -1 ? head.slice(first.index) : head.slice(first.index, nl);
+  const m = line.match(/version\s*=\s*(\d+(?:\.\d+)*)/i);
+  return { version: m ? m[1] : '', occurrences };
+}
+
+// Candidate list order: an explicit single-path override, then either the
+// machine-declared list or the built-in defaults. A declared list REPLACES the
+// built-ins on purpose: a user who states their own layout does not want the
+// hardcoded guesses probed as well.
+function skseLogCandidates() {
+  const declared = envPathList('LOCAL_SKSE_LOG_PATHS');
+  const out = [];
+  const single = String(process.env.LOCAL_SKSE_LOG_PATH || '').trim();
+  if (single) out.push(single);
+  for (const p of (declared.length ? declared : DEFAULT_SKSE_LOG_PATHS)) out.push(p);
+  return out;
+}
+
+function detectLocalSkseUncached() {
+  for (const p of skseLogCandidates()) {
+    if (!isReadableFile(p)) continue;
+    let parsed;
+    try {
+      parsed = parseSkseLogHead(readFileHead(p, SKSE_LOG_HEAD_BYTES));
+    } catch {
+      continue;
+    }
+    // An unreadable or version-less log must not shadow a later candidate.
+    if (!parsed.version) continue;
+    return {
+      version: parsed.version,
+      source: parsed.occurrences > 1 ? 'DETECTED_FIRST_OF_MULTIPLE_INIT_LINES' : 'DETECTED',
+      path: p,
+    };
+  }
+  return { version: '', source: 'NOT_FOUND', path: '' };
+}
+
+// Local SKSE version straight from the game's own log.
+// -> { version, source, path }; version '' + source 'NOT_FOUND' when there is
+// no evidence at all (the caller decides what to do about that).
+function detectLocalSkse() {
+  if (!skseDetectionMemo) skseDetectionMemo = detectLocalSkseUncached();
+  return Object.assign({}, skseDetectionMemo);
+}
+
+function skyrimExeCandidates() {
+  const declared = envPathList('LOCAL_SKYRIM_EXE_PATHS');
+  const out = [];
+  const single = String(process.env.LOCAL_SKYRIM_EXE || '').trim();
+  if (single) out.push(single);
+  for (const p of (declared.length ? declared : DEFAULT_SKYRIM_EXE_PATHS)) out.push(p);
+  return out;
+}
+
+// PowerShell single-quoted literal ('' escapes an embedded quote).
+function psLiteral(p) {
+  return "'" + String(p).replace(/'/g, "''") + "'";
+}
+
+// The runtime build lives in the PE version resource, not in a readable text
+// file, so it needs the OS to read it for us. Bounded by a short timeout: a
+// wedged shell must not stall an audit.
+function readPeProductVersion(p) {
+  if (process.platform !== 'win32') return '';
+  try {
+    const out = cp.execFileSync(
+      'powershell',
+      ['-NoProfile', '-NonInteractive', '-Command', `(Get-Item -LiteralPath ${psLiteral(p)}).VersionInfo.ProductVersion`],
+      { encoding: 'utf8', timeout: 8000, windowsHide: true, maxBuffer: 1024 * 1024 }
+    );
+    const m = String(out || '').match(/\d+(?:\.\d+)*/);
+    return m ? m[0] : '';
+  } catch {
+    return '';
+  }
+}
+
+function detectLocalRuntimeUncached() {
+  for (const p of skyrimExeCandidates()) {
+    if (!isReadableFile(p)) continue;
+    const version = readPeProductVersion(p);
+    // A file that exists but carries no version resource is not evidence.
+    if (!version) continue;
+    return { version, source: 'DETECTED', path: p };
+  }
+  return { version: '', source: 'NOT_FOUND', path: '' };
+}
+
+// Local game runtime version from Skyrim.exe's PE version resource.
+// -> { version, source, path } or NOT_FOUND. This detector never substitutes a
+// default: an unreadable version is reported honestly.
+function detectLocalRuntime() {
+  if (!runtimeDetectionMemo) runtimeDetectionMemo = detectLocalRuntimeUncached();
+  return Object.assign({}, runtimeDetectionMemo);
+}
+
+function baselineWarning(label, value, evidence, fix, detail) {
+  return `${label} baseline ${value} is an UNVERIFIED ASSUMPTION, not a measured value: no ${evidence} was found at any known location, `
+    + `so detection reported NOT_FOUND and the gate fell back to the hardcoded default. `
+    + `Fix: ${fix}. detection detail: ${JSON.stringify(detail)}`;
+}
+
+// Backward compatible baseline: `skse` and `runtime` stay plain non-empty
+// strings for existing callers, now with provenance attached.
+// Precedence: explicit env override > machine detection > hardcoded default.
 function defaultLocalRuntime() {
+  const detail = { skse: detectLocalSkse(), runtime: detectLocalRuntime() };
+  const envSkse = String(process.env.LOCAL_SKSE_VERSION || '').trim();
+  const envRuntime = String(process.env.LOCAL_RUNTIME_VERSION || '').trim();
+
+  const pick = (envValue, detected, fallback) => {
+    if (envValue) return { value: envValue, source: 'ENV' };
+    if (detected.version) return { value: detected.version, source: 'DETECTED' };
+    return { value: fallback, source: 'FALLBACK' };
+  };
+
+  const skse = pick(envSkse, detail.skse, FALLBACK_SKSE_VERSION);
+  const runtime = pick(envRuntime, detail.runtime, FALLBACK_RUNTIME_VERSION);
+
+  const warnings = [];
+  if (skse.source === 'FALLBACK') {
+    warnings.push(baselineWarning(
+      'SKSE', skse.value, 'SKSE log (skse64.log)',
+      'set LOCAL_SKSE_VERSION to the real SKSE version, or point LOCAL_SKSE_LOG_PATH at the real skse64.log',
+      detail.skse
+    ));
+  }
+  if (runtime.source === 'FALLBACK') {
+    warnings.push(baselineWarning(
+      'Skyrim runtime', runtime.value, 'Skyrim.exe',
+      'set LOCAL_RUNTIME_VERSION to the real game build, or point LOCAL_SKYRIM_EXE at the real Skyrim.exe',
+      detail.runtime
+    ));
+  }
+  // A detected value that differs from the historical constant means the box
+  // moved (game or SKSE upgrade). Say so — the gate now trusts the machine.
+  if (skse.source === 'DETECTED' && compareNumericVersions(skse.value, FALLBACK_SKSE_VERSION) !== 0) {
+    warnings.push(`Detected SKSE version ${skse.value} differs from the hardcoded default ${FALLBACK_SKSE_VERSION}; the gate is now comparing against the detected value (${detail.skse.path || 'unknown path'}).`);
+  }
+  if (runtime.source === 'DETECTED' && compareNumericVersions(runtime.value, FALLBACK_RUNTIME_VERSION) !== 0) {
+    warnings.push(`Detected Skyrim runtime version ${runtime.value} differs from the hardcoded default ${FALLBACK_RUNTIME_VERSION}; the gate is now comparing against the detected value (${detail.runtime.path || 'unknown path'}).`);
+  }
+
   return {
-    skse: process.env.LOCAL_SKSE_VERSION || '2.2.6',
-    runtime: process.env.LOCAL_RUNTIME_VERSION || '1.6.1170',
+    skse: skse.value || FALLBACK_SKSE_VERSION,
+    runtime: runtime.value || FALLBACK_RUNTIME_VERSION,
+    sources: { skse: skse.source, runtime: runtime.source },
+    detail,
+    warnings,
   };
 }
 
@@ -173,6 +421,13 @@ function branchCompatRejects(localText, candidateText) {
 
 module.exports = {
   defaultLocalRuntime,
+  detectLocalSkse,
+  detectLocalRuntime,
+  resetRuntimeCache,
+  DEFAULT_SKSE_LOG_PATHS,
+  DEFAULT_SKYRIM_EXE_PATHS,
+  FALLBACK_SKSE_VERSION,
+  FALLBACK_RUNTIME_VERSION,
   compareNumericVersions,
   versionCore,
   parseRequiredRuntimes,

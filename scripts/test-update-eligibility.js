@@ -6,7 +6,13 @@ const {
   updateChainSuccessors,
   localTargetVersionConflict,
   assessUpdateEligibility,
+  runtimeEvidenceNote,
 } = require('./lib/update-eligibility');
+
+// Pin the runtime baseline so the evidence cases below assert against a known
+// comparison target instead of whatever this box happens to have installed.
+process.env.LOCAL_SKSE_VERSION = '2.2.6';
+process.env.LOCAL_RUNTIME_VERSION = '1.6.1170';
 
 function f(id, name, version, uploaded, categoryId = 1) {
   return {
@@ -211,6 +217,153 @@ function f(id, name, version, uploaded, categoryId = 1) {
     installationFile: mine.file_name,
   });
   assert.strictEqual(x.status, 'UPDATE_CONFIRMED');
+}
+
+// --- Runtime evidence labelling -------------------------------------------------
+// The gate is reject-only, so "no reject" used to conflate "verified
+// compatible" with "the description said nothing at all". runtimeEvidence
+// separates those. None of the cases below may move a decision.
+
+// An empty description is NOT a reject: the decision is exactly what it was
+// before the evidence label existed, and the label says zero evidence.
+{
+  const mine = f(200, 'Empty Desc Main', '1.0', '2026-01-01T00:00:00Z');
+  const next = { ...f(201, 'Empty Desc Main', '1.1', '2026-02-01T00:00:00Z'), description: '' };
+  const x = assessUpdateEligibility({
+    files: [mine, next],
+    fileUpdates: [{ old_file_id: 200, new_file_id: 201 }],
+    mine,
+    meta: { version: '1.0', newestVersion: '1.1', nexusFileStatus: 1 },
+    localName: 'Empty Desc Main',
+    installationFile: mine.file_name,
+  });
+  assert.strictEqual(x.status, 'UPDATE_CONFIRMED');
+  assert.strictEqual(x.reason, 'NEXUS_EXACT_UPDATE_CHAIN');
+  assert.strictEqual(x.target.fileId, '201');
+  assert.strictEqual(x.runtimeEvidence.status, 'EMPTY_DESCRIPTION');
+  assert.strictEqual(x.runtimeEvidence.fileId, '201');
+  assert.strictEqual(x.runtimeEvidence.descChars, 0);
+  assert.deepStrictEqual(x.runtimeEvidence.required, []);
+  assert.strictEqual(x.runtimeEvidence.local.skse, '2.2.6');
+  assert.strictEqual(x.runtimeEvidence.local.runtime, '1.6.1170');
+}
+
+// Markup-only / whitespace-only descriptions carry no readable text either, so
+// they are EMPTY_DESCRIPTION rather than "text that merely said no runtime".
+{
+  const mine = f(210, 'Markup Desc Main', '1.0', '2026-01-01T00:00:00Z');
+  const next = { ...f(211, 'Markup Desc Main', '1.1', '2026-02-01T00:00:00Z'), description: '<p></p>  &nbsp; \n ' };
+  const x = assessUpdateEligibility({
+    files: [mine, next],
+    fileUpdates: [{ old_file_id: 210, new_file_id: 211 }],
+    mine,
+    meta: { version: '1.0', newestVersion: '1.1', nexusFileStatus: 1 },
+    localName: 'Markup Desc Main',
+    installationFile: mine.file_name,
+  });
+  assert.strictEqual(x.status, 'UPDATE_CONFIRMED');
+  assert.strictEqual(x.runtimeEvidence.status, 'EMPTY_DESCRIPTION');
+  assert.strictEqual(x.runtimeEvidence.descChars, 0);
+}
+
+// A stated requirement at or below the local baseline: the gate really checked
+// something and let it through.
+{
+  const mine = f(220, 'Evidenced Main', '1.0', '2026-01-01T00:00:00Z');
+  const next = {
+    ...f(221, 'Evidenced Main', '1.1', '2026-02-01T00:00:00Z'),
+    description: 'Supports SKSE 2.2.6 and Skyrim 1.5.97, 1.6.1170 and 1.7.104.',
+  };
+  const x = assessUpdateEligibility({
+    files: [mine, next],
+    fileUpdates: [{ old_file_id: 220, new_file_id: 221 }],
+    mine,
+    meta: { version: '1.0', newestVersion: '1.1', nexusFileStatus: 1 },
+    localName: 'Evidenced Main',
+    installationFile: mine.file_name,
+  });
+  assert.strictEqual(x.status, 'UPDATE_CONFIRMED');
+  assert.strictEqual(x.runtimeEvidence.status, 'EVIDENCED');
+  assert.ok(x.runtimeEvidence.descChars > 0);
+  assert.deepStrictEqual(x.runtimeEvidence.required, [
+    { kind: 'SKSE', version: '2.2.6', via: 'SKSE_MENTION' },
+    { kind: 'RUNTIME', version: '1.5.97', via: 'MENTION' },
+    { kind: 'RUNTIME', version: '1.6.1170', via: 'MENTION' },
+    { kind: 'RUNTIME', version: '1.7.104', via: 'MENTION' },
+  ]);
+  assert.strictEqual(x.compatRejects, undefined);
+}
+
+// A stated requirement newer than the local baseline: REJECTED, and the
+// pre-existing HOLD is untouched.
+{
+  const mine = f(230, 'Rejected Desc Main', '1.0', '2026-01-01T00:00:00Z');
+  const next = { ...f(231, 'Rejected Desc Main', '1.1', '2026-02-01T00:00:00Z'), description: 'For v1.7.104 only.' };
+  const x = assessUpdateEligibility({
+    files: [mine, next],
+    fileUpdates: [{ old_file_id: 230, new_file_id: 231 }],
+    mine,
+    meta: { version: '1.0', newestVersion: '1.1', nexusFileStatus: 1 },
+    localName: 'Rejected Desc Main',
+    installationFile: mine.file_name,
+  });
+  assert.strictEqual(x.status, 'HOLD_UPDATE_ELIGIBILITY');
+  assert.strictEqual(x.reason, 'TARGET_REQUIRES_NEWER_RUNTIME');
+  assert.ok(x.compatRejects.some(r => r.reason === 'TARGET_REQUIRES_NEWER_RUNTIME'));
+  assert.strictEqual(x.runtimeEvidence.status, 'REJECTED');
+  assert.deepStrictEqual(x.runtimeEvidence.required, [
+    { kind: 'RUNTIME', version: '1.7.104', via: 'FOR_PHRASE' },
+  ]);
+}
+
+// A changelog-only description states no runtime requirement at all: readable
+// text, zero claim, still accepted exactly as before.
+{
+  const mine = f(240, 'Changelog Main', '1.0', '2026-01-01T00:00:00Z');
+  const next = {
+    ...f(241, 'Changelog Main', '1.1', '2026-02-01T00:00:00Z'),
+    description: "Please endorse if you have enjoyed this mod. Fixed a crash in the inventory menu.",
+  };
+  const x = assessUpdateEligibility({
+    files: [mine, next],
+    fileUpdates: [{ old_file_id: 240, new_file_id: 241 }],
+    mine,
+    meta: { version: '1.0', newestVersion: '1.1', nexusFileStatus: 1 },
+    localName: 'Changelog Main',
+    installationFile: mine.file_name,
+  });
+  assert.strictEqual(x.status, 'UPDATE_CONFIRMED');
+  assert.strictEqual(x.runtimeEvidence.status, 'NO_RUNTIME_CLAIM');
+  assert.ok(x.runtimeEvidence.descChars > 0);
+  assert.deepStrictEqual(x.runtimeEvidence.required, []);
+}
+
+// The fallback (no exact chain) path carries the same label.
+{
+  const mine = f(250, 'Silent Fallback Main', '1.0', '2026-01-01T00:00:00Z');
+  const next = { ...f(251, 'Silent Fallback Main', '1.1', '2026-02-01T00:00:00Z'), description: '   ' };
+  const x = assessUpdateEligibility({
+    files: [mine, next],
+    fileUpdates: [],
+    mine,
+    meta: { version: '1.0', newestVersion: '1.0', nexusFileStatus: 1 },
+    localName: 'Silent Fallback Main',
+    installationFile: mine.file_name,
+  });
+  assert.strictEqual(x.status, 'UPDATE_CONFIRMED');
+  assert.strictEqual(x.reason, 'NEWER_COMPATIBLE_FILE_UPLOAD');
+  assert.strictEqual(x.runtimeEvidence.status, 'EMPTY_DESCRIPTION');
+  assert.strictEqual(x.runtimeEvidence.fileId, '251');
+}
+
+// The note token is additive; the existing note tokens stay byte-identical.
+{
+  assert.strictEqual(runtimeEvidenceNote({ runtimeEvidence: { status: 'EMPTY_DESCRIPTION' } }), 'runtimeEvidence=EMPTY_DESCRIPTION');
+  assert.strictEqual(runtimeEvidenceNote({ runtimeEvidence: { status: 'NO_RUNTIME_CLAIM' } }), 'runtimeEvidence=NO_RUNTIME_CLAIM');
+  assert.strictEqual(runtimeEvidenceNote({ runtimeEvidence: { status: 'EVIDENCED' } }), 'runtimeEvidence=EVIDENCED');
+  assert.strictEqual(runtimeEvidenceNote({ runtimeEvidence: { status: 'REJECTED' } }), 'runtimeEvidence=REJECTED');
+  assert.strictEqual(runtimeEvidenceNote({}), '');
+  assert.strictEqual(runtimeEvidenceNote({ runtimeEvidence: {} }), '');
 }
 
 console.log('update eligibility tests: OK');

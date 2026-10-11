@@ -14,7 +14,7 @@ const { readApiKey, createFilesClient } = require('./lib/nexus-api');
 const { defaultPolicyFile, loadVariantPolicies, getVariantPolicy, resolveVariantPolicy } = require('./lib/variant-policy');
 const { classifyComponent, componentFamily } = require('./lib/component-discovery');
 const { buildEnvironmentGraph, enabledContextNames, compactEnvironmentSummary, normalizeName } = require('./lib/mo2-environment');
-const { assessUpdateEligibility, eligibilityCounts } = require('./lib/update-eligibility');
+const { assessUpdateEligibility, eligibilityCounts, runtimeEvidenceNote } = require('./lib/update-eligibility');
 
 const rootDir = path.resolve(__dirname, '..');
 const modsDir = process.argv[2];
@@ -155,6 +155,10 @@ function compactEligibilitySkip(r, mine, eligibility, resolvedReason) {
     `mo2Signal=${eligibility.mo2?.signal ? 'YES' : 'NO'}:${eligibility.mo2?.reason || 'UNKNOWN'}`,
     `local=${mine?.file_id || ''}:${mine?.version || ''}`,
     `target=${target?.fileId || mine?.file_id || ''}:${target?.version || mine?.version || ''}`,
+    // Runtime evidence provenance: EMPTY_DESCRIPTION / NO_RUNTIME_CLAIM mean the
+    // gate passed on NO evidence, not on a verified-compatible reading. Additive
+    // only -- the tokens above are byte-identical to before.
+    ...(runtimeEvidenceNote(eligibility) ? [runtimeEvidenceNote(eligibility)] : []),
   ].join('; ');
   return {
     ...r,
@@ -371,6 +375,8 @@ async function main() {
           `profileState=${r.profileState}`,
           `local=${mine.file_id}:${mine.version || ''}`,
           `target=${target?.file_id || ''}:${target?.version || ''}`,
+          // Runtime evidence provenance -- see compactEligibilitySkip above.
+          ...(runtimeEvidenceNote(updateEligibility) ? [runtimeEvidenceNote(updateEligibility)] : []),
         ];
         if (choice.margin !== undefined && choice.margin !== null) noteParts.push(`margin=${choice.margin}`);
         if (variantReview.required) noteParts.push(`variantReview=${variantReview.reason}`);

@@ -6,6 +6,7 @@ const path = require('path');
 const { argValue, hasFlag } = require('./lib/cli');
 const { loadJson, saveJson } = require('./lib/fs-json');
 const { findLatestRun } = require('./lib/runtime');
+const { defaultLocalRuntime } = require('./lib/runtime-compat');
 
 const rootDir = path.resolve(__dirname, '..');
 
@@ -73,6 +74,32 @@ function topEntries(counts, limit = 8) {
     .map(([key, count]) => ({ key, count }));
 }
 
+// Provenance of the local runtime baseline the update-eligibility gate compares
+// candidates against. `sources` distinguishes a value measured on this machine
+// from one that is still a hardcoded assumption.
+function compactRuntimeBaseline() {
+  let local;
+  try {
+    local = defaultLocalRuntime();
+  } catch (_) {
+    return { available: false };
+  }
+  return {
+    available: true,
+    skse: String(local.skse || ''),
+    runtime: String(local.runtime || ''),
+    sources: {
+      skse: String(local.sources?.skse || ''),
+      runtime: String(local.sources?.runtime || ''),
+    },
+    detail: {
+      skse: String(local.detail?.skse?.path || ''),
+      runtime: String(local.detail?.runtime?.path || ''),
+    },
+    warnings: (local.warnings || []).map(String),
+  };
+}
+
 function buildBrief({ runDir, plan, report, review }) {
   const planItems = plan?.items || [];
   const reviewItems = review?.items || [];
@@ -102,6 +129,11 @@ function buildBrief({ runDir, plan, report, review }) {
     },
     topActions: topEntries(actions, 10),
     topHoldReasons: topEntries(holdReasons, 10),
+    // Provenance of the runtime/SKSE baseline the eligibility gate compares
+    // against. `sources` says whether each value was measured on this machine
+    // (DETECTED), forced by the operator (ENV), or is still the historical
+    // hardcoded assumption (FALLBACK). A FALLBACK value is not a measurement.
+    runtimeBaseline: compactRuntimeBaseline(),
     nextCommands: [],
   };
 
@@ -155,6 +187,18 @@ function main() {
   }
 
   const brief = buildBrief({ runDir, plan, report, review });
+  // The text brief is contractually tiny (see test-agent-brief.js), so an
+  // unverified baseline is raised on stderr instead of taking a stdout line.
+  // This is the alarm that fires when the box has moved away from the
+  // hardcoded 1.6.1170 / 2.2.6 assumptions the gate falls back to.
+  const base = brief.runtimeBaseline;
+  if (base?.available && (base.warnings.length || base.sources.skse === 'FALLBACK' || base.sources.runtime === 'FALLBACK')) {
+    console.error(`RUNTIME BASELINE ALERT: skse=${base.skse}(${base.sources.skse}) runtime=${base.runtime}(${base.sources.runtime})`);
+    for (const w of base.warnings) console.error(`  - ${w}`);
+    if (!base.warnings.length) {
+      console.error('  - baseline fell back to hardcoded defaults; no machine evidence was found.');
+    }
+  }
   const outFile = argValue(process.argv, '--out', path.join(rootDir, '.runtime', 'state', 'agent-brief.json'));
   saveJson(outFile, brief);
   console.log(hasFlag(process.argv, '--json') ? JSON.stringify(brief, null, hasFlag(process.argv, '--compact') ? 0 : 2) : textBrief(brief));
