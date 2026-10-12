@@ -116,12 +116,26 @@ function classifyFailure(input) {
     [/selector.*(?:changed|missing)|shadow dom.*(?:changed|unexpected)/i, 'DOM_SELECTOR_CHANGED'],
   ];
   for (const [re, code] of rules) if (re.test(text)) return describeCode(code);
-  return describeCode('UNKNOWN_FAILURE');
+  return describeCode('UNKNOWN_FAILURE', text);
 }
 
-function describeCode(code) {
+// `rawText` is only used for UNKNOWN_FAILURE. classifyFailure guesses a code by
+// regex, so an unrecognised failure used to collapse to the bare label and the
+// actual wording was thrown away - which is why ECONNRESET and EPERM both first
+// read as an opaque UNKNOWN_FAILURE until errors.jsonl was dug into by hand.
+// Carrying the (already sanitized) message keeps the summary diagnosable even
+// when no rule matches yet. Bounded so execution-state.json stays small; it is
+// rewritten on every checkpoint.
+const UNKNOWN_DETAIL_LIMIT = 300;
+
+function describeCode(code, rawText = '') {
   const meta = CODES[code] || CODES.UNKNOWN_FAILURE;
-  return { code: CODES[code] ? code : 'UNKNOWN_FAILURE', ...meta };
+  const resolved = CODES[code] ? code : 'UNKNOWN_FAILURE';
+  const out = { code: resolved, ...meta };
+  if (resolved === 'UNKNOWN_FAILURE' && rawText) {
+    out.detail = String(rawText).slice(0, UNKNOWN_DETAIL_LIMIT);
+  }
+  return out;
 }
 
 function createLogger(runDir, options = {}) {

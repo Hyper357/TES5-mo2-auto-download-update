@@ -7,7 +7,7 @@ const os = require('os');
 const path = require('path');
 const { parseStrict } = require('./lib/cli');
 const { saveJson, loadJson, atomicReplace } = require('./lib/fs-json');
-const { classifyFailure } = require('./lib/diagnostics');
+const { classifyFailure, describeCode } = require('./lib/diagnostics');
 const { formatManifest, parseManifestText } = require('./lib/manifest');
 const {
   findLatestRun,
@@ -181,6 +181,24 @@ try {
   // and the file-lock rule for EPERM, even though both now have near neighbours.
   assert.strictEqual(classifyFailure('ECONNREFUSED 127.0.0.1:9222').code, 'CDP_UNAVAILABLE');
   assert.strictEqual(classifyFailure('cdp connect failed').code, 'CDP_UNAVAILABLE');
+
+  // An unrecognised failure must keep its original wording. Before this the
+  // label was all that survived, so ECONNRESET and EPERM each first presented
+  // as an opaque UNKNOWN_FAILURE until errors.jsonl was read by hand.
+  const unknown = classifyFailure('EXECUTOR_FAILED WEIRD_NEW_THING exploded at offset 42');
+  assert.strictEqual(unknown.code, 'UNKNOWN_FAILURE');
+  assert.strictEqual(unknown.detail, 'EXECUTOR_FAILED WEIRD_NEW_THING exploded at offset 42');
+  // A recognised failure stays lean - no redundant echo of the message.
+  assert.strictEqual(classifyFailure('ECONNRESET').detail, undefined);
+  // The detail must go through the same redaction as everything else: this path
+  // writes into execution-state.json, which is not a place for API keys.
+  assert.strictEqual(
+    classifyFailure('unmatched https://x.test/f?key=SECRET123&expires=99 thing').detail,
+    'unmatched https://x.test/f?key=[REDACTED]&expires=[REDACTED] thing');
+  // Bounded so the frequently rewritten state file cannot balloon.
+  assert.strictEqual(classifyFailure(`unmatched ${'A'.repeat(5000)}`).detail.length, 300);
+  // describeCode stays callable with a bare code name (it is exported).
+  assert.deepStrictEqual(describeCode('NEXUS_API_429').detail, undefined);
 
   const runs = path.join(tmp, '.runtime', 'runs');
   fs.mkdirSync(path.join(runs, '2026-01-01'), { recursive: true });
