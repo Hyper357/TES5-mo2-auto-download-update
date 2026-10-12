@@ -8,6 +8,7 @@ const CODES = Object.freeze({
   NEXUS_API_403: { retry: false, layer: 'NEXUS_API', action: '检查 Nexus/Cloudflare 拦截、API 权限或速率策略。' },
   NEXUS_API_429: { retry: true, layer: 'NEXUS_API', action: '等待后重试，降低请求频率。' },
   NEXUS_API_TIMEOUT: { retry: true, layer: 'NEXUS_API', action: '检查网络后重试。' },
+  CDN_TRANSFER_RESET: { retry: true, layer: 'DOWNLOAD', action: 'CDN 传输被对端断开（连接重置/半关闭），属临时网络故障。确认无 .unfinished/.part 残留后重试该精确 fileId；不要因单项失败整批重提。' },
   NEXUS_LOGIN_REQUIRED: { retry: false, layer: 'BROWSER', action: '在项目专用自动化浏览器中重新登录 Nexus。' },
   CDP_UNAVAILABLE: { retry: true, layer: 'BROWSER', action: '运行 npm run browser:start 启动项目专用自动化浏览器。' },
   BROWSER_PROFILE_MISMATCH: { retry: false, layer: 'BROWSER', action: '当前 CDP 端口属于非项目浏览器/Profile。关闭该远程调试实例，保持日常 Edge 正常启动，再运行 npm run browser:start。' },
@@ -86,6 +87,11 @@ function classifyFailure(input) {
     [/MO2_UI_UNAVAILABLE|uiautomation.*(?:unavailable|failed)|ui automation.*(?:unavailable|failed)/i, 'MO2_UI_UNAVAILABLE'],
     [/sign.?in|login required|not logged|登录/i, 'NEXUS_LOGIN_REQUIRED'],
     [/ECONNREFUSED.*(?:9222|cdp)|cdp.*(?:failed|unavailable|connect)|127\.0\.0\.1:\d+.*refused/i, 'CDP_UNAVAILABLE'],
+    // Socket-level failures during a CDN transfer. Placed AFTER the CDP rule so a
+    // port-9222 ECONNREFUSED still classifies as CDP_UNAVAILABLE. Without this an
+    // ECONNRESET was downgraded to UNKNOWN_FAILURE in the aggregate error even
+    // though errors.jsonl recorded the real code per attempt.
+    [/CDN_TRANSFER_RESET|ECONNRESET|ECONNABORTED|EPIPE|ERR_STREAM_PREMATURE_CLOSE|premature close|UND_ERR_SOCKET|EAI_AGAIN|getaddrinfo|ENOTFOUND|ETIMEDOUT/i, 'CDN_TRANSFER_RESET'],
     [/NO-NXM-EXTRACTED|nxm.*(?:extract|capture).*(?:fail|missing)|no nxm/i, 'NXM_EXTRACT_FAILED'],
     [/nxm.*expired|expires.*(?:past|expired)|signature.*expired/i, 'NXM_EXPIRED'],
     [/nxmhandler.*(?:fail|error)|handler.*(?:fail|error)/i, 'NXM_HANDLER_FAILED'],

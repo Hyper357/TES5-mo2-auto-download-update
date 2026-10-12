@@ -167,6 +167,21 @@ try {
   assert.strictEqual(classifyFailure('STATE_WRITE_LOCKED').retry, true);
   assert.strictEqual(classifyFailure('nothing recognizable here').code, 'UNKNOWN_FAILURE');
 
+  // Socket failures during a CDN transfer. errors.jsonl recorded the real
+  // ECONNRESET per attempt while the aggregate error said UNKNOWN_FAILURE, so
+  // the actual cause was invisible in the summary a reader sees first.
+  assert.strictEqual(classifyFailure('parallel direct exact download attempt failed ECONNRESET').code, 'CDN_TRANSFER_RESET');
+  assert.strictEqual(classifyFailure('ECONNRESET').code, 'CDN_TRANSFER_RESET');
+  assert.strictEqual(classifyFailure('EPIPE: broken pipe, write').code, 'CDN_TRANSFER_RESET');
+  assert.strictEqual(classifyFailure('Error: aborted ERR_STREAM_PREMATURE_CLOSE').code, 'CDN_TRANSFER_RESET');
+  assert.strictEqual(classifyFailure('getaddrinfo ENOTFOUND files.nexus-cdn.com').code, 'CDN_TRANSFER_RESET');
+  assert.strictEqual(classifyFailure('CDN_TRANSFER_RESET').retry, true);
+  assert.strictEqual(classifyFailure('CDN_TRANSFER_RESET').layer, 'DOWNLOAD');
+  // Ordering regression: the CDP rule must still win for a port-9222 refusal,
+  // and the file-lock rule for EPERM, even though both now have near neighbours.
+  assert.strictEqual(classifyFailure('ECONNREFUSED 127.0.0.1:9222').code, 'CDP_UNAVAILABLE');
+  assert.strictEqual(classifyFailure('cdp connect failed').code, 'CDP_UNAVAILABLE');
+
   const runs = path.join(tmp, '.runtime', 'runs');
   fs.mkdirSync(path.join(runs, '2026-01-01'), { recursive: true });
   fs.mkdirSync(path.join(runs, '2026-01-02'), { recursive: true });
