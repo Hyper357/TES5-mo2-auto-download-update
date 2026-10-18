@@ -11,6 +11,7 @@ const CODES = Object.freeze({
   CDN_TRANSFER_RESET: { retry: true, layer: 'DOWNLOAD', action: 'CDN 传输被对端断开（连接重置/半关闭），属临时网络故障。确认无 .unfinished/.part 残留后重试该精确 fileId；不要因单项失败整批重提。' },
   NEXUS_LOGIN_REQUIRED: { retry: false, layer: 'BROWSER', action: '在项目专用自动化浏览器中重新登录 Nexus。' },
   CDP_UNAVAILABLE: { retry: true, layer: 'BROWSER', action: '运行 npm run browser:start 启动项目专用自动化浏览器。' },
+  BROWSER_UNAVAILABLE_FOR_COVERAGE: { retry: true, layer: 'BROWSER', action: '组件发现靠浏览器读取 Nexus 的 Requirements/Description 区段；浏览器不可用时覆盖率全部未证明，本轮的 HOLD 与「无可下载」结论无效。先 npm run browser:start 确认 MANAGED，再重跑。' },
   BROWSER_PROFILE_MISMATCH: { retry: false, layer: 'BROWSER', action: '当前 CDP 端口属于非项目浏览器/Profile。关闭该远程调试实例，保持日常 Edge 正常启动，再运行 npm run browser:start。' },
   DOM_FILE_NOT_FOUND: { retry: false, layer: 'BROWSER', action: '核对目标 fileId；查看事故现场，禁止模糊点击。' },
   DOM_SELECTOR_CHANGED: { retry: false, layer: 'BROWSER', action: 'Nexus 页面结构可能变化；让 Agent 分析诊断快照并修复 selector。' },
@@ -86,7 +87,15 @@ function classifyFailure(input) {
     [/MO2_REDOWNLOAD_BLOCKED|redownload.*blocked|重新下载.*取消/i, 'MO2_REDOWNLOAD_BLOCKED'],
     [/MO2_UI_UNAVAILABLE|uiautomation.*(?:unavailable|failed)|ui automation.*(?:unavailable|failed)/i, 'MO2_UI_UNAVAILABLE'],
     [/sign.?in|login required|not logged|登录/i, 'NEXUS_LOGIN_REQUIRED'],
-    [/ECONNREFUSED.*(?:9222|cdp)|cdp.*(?:failed|unavailable|connect)|127\.0\.0\.1:\d+.*refused/i, 'CDP_UNAVAILABLE'],
+    // Must precede the CDP rule: the detail usually embeds "connect ECONNREFUSED
+    // 127.0.0.1:9223", which the CDP pattern would otherwise claim. The specific
+    // code is what tells a reader the COVERAGE was unverified, not just CDP down.
+    [/BROWSER_UNAVAILABLE_FOR_COVERAGE/i, 'BROWSER_UNAVAILABLE_FOR_COVERAGE'],
+    // Any loopback connection refusal is a CDP problem in this codebase. The old
+    // pattern only named port 9222, but the managed browser falls back to other
+    // ports (browser-port.json currently says 9223), so "ECONNREFUSED
+    // 127.0.0.1:9223" was silently downgraded to UNKNOWN_FAILURE.
+    [/ECONNREFUSED.*(?:127\.0\.0\.1|localhost)|(?:127\.0\.0\.1|localhost):\d+.*(?:refused|ECONNREFUSED)|cdp.*(?:failed|unavailable|connect)/i, 'CDP_UNAVAILABLE'],
     // Socket-level failures during a CDN transfer. Placed AFTER the CDP rule so a
     // port-9222 ECONNREFUSED still classifies as CDP_UNAVAILABLE. Without this an
     // ECONNRESET was downgraded to UNKNOWN_FAILURE in the aggregate error even

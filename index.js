@@ -107,14 +107,37 @@ async function run() {
   logger.info('SCAN', 'planning scan completed', { report: files.plan });
 
   console.log('\n[Step 2/9] Patch Discovery Graph：自动项 + 延期人工项全部扫描...');
+  // The browser is started by run-workflow before the long planning scan, but it
+  // can die while that scan runs (a 2-minute quiet gap is enough). Component
+  // discovery is its only later consumer, so re-ensure it here; 'start' is
+  // idempotent and returns fast when the managed browser is already healthy.
+  const browserReensure = runNode([path.join(rootDir, 'scripts', 'browser-manager.js'), 'start'], { capture: true, allowFailure: true });
+  if (!browserReensure.ok) {
+    console.error(`  ⚠️ 组件发现前无法确保浏览器可用：${(browserReensure.stderr || browserReensure.stdout || '').trim().slice(0, 200)}`);
+  }
   const discoveryRun = runNode([
     path.join(rootDir, 'scripts', 'discover-all-patches.js'), files.plan, modsDir,
     '--registry', auxRegistry, '--relations', patchRelations,
     '--max-age-days', String(cli.maxAgeDays), '--out', files.patchDiscovery, '--tasks', files.patchTasks,
-  ], { capture: true });
+  ], { capture: true, allowFailure: true });
   const discoverySummary = safeJson(discoveryRun.stdout, {});
   console.log(`  targets=${discoverySummary.targets || 0} complete=${discoverySummary.complete || 0} held=${discoverySummary.held || 0} unresolved=${discoverySummary.unresolvedCandidates || 0}`);
   logger.info('PATCH_DISCOVERY', 'patch graph built', { ...discoverySummary, report: files.patchDiscovery, tasks: files.patchTasks });
+
+  // Degraded coverage must never be presented as a clean verdict. Every target
+  // gets coverage gaps that have nothing to do with the mods themselves, so the
+  // resulting HOLDs and the resulting "nothing to download" are both meaningless.
+  const coverageDegraded = !!discoverySummary.browserUnavailable;
+  if (coverageDegraded) {
+    const n = Number(discoverySummary.browserTargets || discoverySummary.targets || 0);
+    const detail = String(discoverySummary.browserError || '').slice(0, 200);
+    const e = classifyFailure(`BROWSER_UNAVAILABLE_FOR_COVERAGE ${detail}`);
+    logger.error('PATCH_DISCOVERY', 'component discovery ran without the managed browser', {
+      errorCode: e.code, layer: e.layer, action: e.action, targets: n, error: detail,
+    });
+    console.error(`  ❌ BROWSER_UNAVAILABLE_FOR_COVERAGE: ${n} 个目标无法做覆盖率检查（${detail || '无详情'}）`);
+    console.error('     → 本轮的 HOLD / "无可下载" 结论无效，不要当作真实结果。');
+  }
 
   console.log('\n[Step 3/9] 审计 REQUIRED aux 的精确 modId/fileId/version...');
   const registryArgs = [path.join(rootDir, 'scripts', 'audit-registry.js'), auxRegistry, apiKeyFile, '--out', files.registryAudit];
@@ -195,10 +218,16 @@ async function run() {
       generatedAt: new Date().toISOString(), mode: 'AUDIT', runDir,
       downloadReady: downloadRows.length, holds: holdRows.length, humanReview: centerSummary.items || 0,
       actions: Object.fromEntries(byAction), reviewCenter: files.reviewCenterHtml, logs: logger.files,
+      coverageDegraded,
     });
     rebuildCenter();
     console.log(`\n🔎 AUDIT 完成。自动项=${downloadRows.length}，人工复核=${centerSummary.items || 0}。`);
     console.log(`只读 HTML: ${files.reviewCenterHtml}\n可操作模式: npm run review -- --run "${runDir}"`);
+    if (coverageDegraded) {
+      console.error('\n❌ AUDIT 结果不可信：组件发现阶段浏览器不可用，覆盖率没有真正检查。');
+      console.error('   上面的自动项 / 人工复核数字都不代表真实结论。先修好浏览器再重跑。');
+      process.exitCode = 3;
+    }
     return;
   }
 
@@ -257,9 +286,13 @@ async function run() {
   console.log(`✅ 自动阶段 requested=${downloadRows.length}, VERIFIED=${verified}, failed/not-verified=${failed}`);
   console.log(`🎛️ 人工复核项目=${centerSummary.items || 0} | ${files.reviewCenterHtml}`);
   maybeOpenReview();
+  if (coverageDegraded) {
+    console.error('❌ 组件发现阶段浏览器不可用：本轮覆盖率未被真正检查，自动项可能被错误地全部 HOLD。');
+    process.exitCode = 3;
+  }
   if (failed > 0 || !execRun.ok) {
     console.log('⚠️ 自动阶段存在未 VERIFIED 项；Review Center 不会把这些失败当作成功。');
-    process.exitCode = 2;
+    if (!coverageDegraded) process.exitCode = 2;
   }
 }
 

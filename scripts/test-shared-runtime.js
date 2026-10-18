@@ -182,6 +182,19 @@ try {
   assert.strictEqual(classifyFailure('ECONNREFUSED 127.0.0.1:9222').code, 'CDP_UNAVAILABLE');
   assert.strictEqual(classifyFailure('cdp connect failed').code, 'CDP_UNAVAILABLE');
 
+  // Degraded component coverage has its own code and must beat the CDP rule,
+  // because the detail it carries is usually "connect ECONNREFUSED ...:9223".
+  // Regression: on 2026-10-18 the browser died mid-scan, all 17 targets fell to
+  // BROWSER_UNAVAILABLE, nothing was logged, and the audit exited 0 reporting
+  // "nothing to download" — indistinguishable from a clean run.
+  assert.strictEqual(
+    classifyFailure('BROWSER_UNAVAILABLE_FOR_COVERAGE connect ECONNREFUSED 127.0.0.1:9223').code,
+    'BROWSER_UNAVAILABLE_FOR_COVERAGE');
+  assert.strictEqual(classifyFailure('BROWSER_UNAVAILABLE_FOR_COVERAGE').retry, true);
+  assert.strictEqual(classifyFailure('BROWSER_UNAVAILABLE_FOR_COVERAGE').layer, 'BROWSER');
+  // ...while a plain CDP refusal still resolves to CDP_UNAVAILABLE.
+  assert.strictEqual(classifyFailure('ECONNREFUSED 127.0.0.1:9223').code, 'CDP_UNAVAILABLE');
+
   // An unrecognised failure must keep its original wording. Before this the
   // label was all that survived, so ECONNRESET and EPERM each first presented
   // as an opaque UNKNOWN_FAILURE until errors.jsonl was read by hand.

@@ -239,11 +239,32 @@ async function main() {
   const targets = (plan.items || []).filter(x => x.action === 'DOWNLOAD' && (x.latestFileId || x.fileId));
 
   let browser = null;
+  let browserError = '';
   if (!noBrowser && targets.length) {
     try {
       const puppeteer = require('puppeteer-core');
       browser = await puppeteer.connect({ browserURL: 'http://127.0.0.1:9222', defaultViewport: null });
-    } catch { browser = null; }
+    } catch (err) {
+      browser = null;
+      browserError = String((err && err.message) || err || 'unknown connect failure');
+    }
+  }
+
+  // The managed browser is the ONLY source for the Nexus requirements/description
+  // coverage sections. Without it every target degrades to BROWSER_UNAVAILABLE,
+  // every closure check fails for a reason that has nothing to do with the mods,
+  // and the run ends up reporting "nothing to update" while exiting 0. That is
+  // indistinguishable from a genuinely clean audit (observed 2026-10-18: 17/17
+  // targets degraded, 0 auto items reported). Treat it as a hard failure so the
+  // caller cannot mistake degraded coverage for a real verdict.
+  const browserLost = !noBrowser && targets.length > 0 && !browser;
+  if (browserLost) {
+    console.error(
+      `BROWSER_UNAVAILABLE_FOR_COVERAGE: component discovery could not reach the managed browser ` +
+      `(${browserError}). ${targets.length} target(s) cannot be coverage-checked; both ` +
+      `requirementsForward/Reverse and description stay unproven, so each of them will be HOLDed ` +
+      `without real evidence. Re-run after the browser is healthy.`,
+    );
   }
 
   const items = [];
@@ -358,6 +379,10 @@ async function main() {
     targets: items.length,
     complete: items.filter(x => x.complete).length,
     held: items.filter(x => !x.complete).length,
+    // Surfaced so the pipeline can refuse to present a degraded run as clean.
+    browserUnavailable: browserLost,
+    browserError,
+    browserTargets: browserLost ? targets.length : 0,
     unresolvedCandidates: items.reduce((n, x) => n + x.unresolvedCount, 0),
     environmentResolvedCandidates: items.reduce((n, x) => n + x.environmentResolvedCount, 0),
     candidateCountsByKind: countsByKind(items.flatMap(x => x.candidates || [])),
@@ -392,6 +417,9 @@ async function main() {
     targets: payload.targets,
     complete: payload.complete,
     held: payload.held,
+    browserUnavailable: payload.browserUnavailable,
+    browserError: payload.browserError,
+    browserTargets: payload.browserTargets,
     unresolvedCandidates: payload.unresolvedCandidates,
     environmentResolvedCandidates: payload.environmentResolvedCandidates,
     candidateCountsByKind: payload.candidateCountsByKind,
@@ -400,6 +428,10 @@ async function main() {
     outFile,
     tasksFile,
   }, null, 2));
+
+  // Distinct non-zero code so a caller that only inspects the exit status still
+  // sees that coverage was not real. discover-all-patches.js forwards r.status.
+  if (browserLost) process.exitCode = 3;
 }
 
 main().catch(err => { console.error(`discover-components failed: ${err.message}`); process.exit(1); });
