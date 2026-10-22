@@ -11,10 +11,10 @@
 
 ## ISS-001 — 弱证据路径把同页的"另一个文件"当成更新
 
-- **状态**：**OPEN**（2026-10-22 尝试修复，两次方案均造成更大回归，已回滚）
+- **状态**：**FIXED（2026-10-22，方案一：弱证据降级人工复核）**
 - **发现**：2026-10-21，用户质疑 `Somewhere in Between - Helmets 3.0.5` 是否真的需要更新
 - **影响面**：所有「一个 Nexus 页面挂多个并列文件」的 mod；每轮影响约 1–2 项
-- **回归测试**：无（修复未落地）
+- **回归测试**：`scripts/test-update-eligibility.js`（弱证据必须 HOLD）、`scripts/test-runtime-compat.js`（runtime 门禁通过也不得自动放行）
 
 ### 症状
 
@@ -68,7 +68,36 @@ installed   : 2.4.1.0    target: 3.0.5
 
 该 mod 的 25 个文件全表（`scripts/.api_cache/98945.json`）可证 `Guards` 无 3.0.5 后继。
 
-### 修复尝试（均失败，已回滚）
+### 最终修复（方案一，已实施）
+
+**弱证据不再自动下载，一律转人工复核。**
+
+`assessUpdateEligibility()` 里 `NEWER_COMPATIBLE_FILE_UPLOAD` 的终态由 `UPDATE_CONFIRMED`（自动下载）改为：
+
+```
+status   : HOLD_UPDATE_ELIGIBILITY
+reason   : WEAK_UPDATE_EVIDENCE_DEFERRED
+evidence : ['NEWER_COMPATIBLE_FILE_UPLOAD', 'WEAK_EVIDENCE_DEFERRED']
+target   : 仍然保留（Review Center 能直接显示"将要下载哪个文件"）
+```
+
+只有 `NEXUS_EXACT_UPDATE_CHAIN`（Nexus 官方"A 被 B 替换"记录）继续自动下载。
+
+**为什么降级而不是继续找启发式：** 见下方两次失败尝试。名字与归档名都不可靠，任何启发式都会误伤几十个真实更新；但"弱证据"这个信号本身是可靠的 —— 它确实不足以证明替换关系。**不再猜，交给人工一眼判断。**
+
+**实测影响**（2026-10-22，同一 modlist 前后对比）：
+
+| | 修复前 | 修复后 |
+|---|---:|---:|
+| 自动可下载 | 5 | **3** |
+| `WEAK_UPDATE_EVIDENCE_DEFERRED` | — | 5 条 |
+| 人工复核 | 220 | 220 |
+
+代价符合预期：每轮约 1–2 项由自动转为人工。`Somewhere in Between - Helmets` 不再出现在自动下载列表。
+
+**注意**：98945 本轮实际落在 `LOCAL_FILE_IDENTITY_UNRESOLVED`（本地已有 3 个共用该 modId 的文件夹），不是 `WEAK_UPDATE_EVIDENCE_DEFERRED`。两条路都是 HOLD，结果一致。
+
+### 已被否决的方案（勿重试）
 
 **方案 A —— 用「区别词」判定是否同一 artefact。**
 `pageFamilyVocabulary()` 统计出现在 ≥50% 文件里的词作"页名"，剩下的词作该文件"区别词"；双方各有区别词且不相交 → 判为不同 artefact。分词用 `name + file_name`。
@@ -89,19 +118,10 @@ installed   : 2.4.1.0    target: 3.0.5
 
 本地文件夹名普遍被中文标签装饰（`【前置】`、`【汉化·人工】`），且作者在版本之间会**重命名文件**。名字差异无法区分「真·不同 artefact」与「合法改名」，信噪比不足。
 
-### 可行的方向（待决策，未实现）
-
-两条路，都不便宜：
-
-1. **把弱证据降级为人工复核**（推荐）。令 `NEWER_COMPATIBLE_FILE_UPLOAD` 不再自动 `DOWNLOAD`，一律 `HOLD` 交 Review Center；精确更新链 `NEXUS_EXACT_UPDATE_CHAIN` 仍然自动下载。
-   - 代价：作者"只传新文件、不留更新链"的合法更新，需要人工点一次。按当前数据每轮约 1–2 项。
-   - 收益：这一类误报**结构上归零**，不再靠启发式猜。
-2. **引入结构性判据**。例如「同一 category 下存在多个并列 active 文件时不猜」——但 `PapyrusUtil` 这类页面同一 category 也有 SE/VR/GOG 多个变体，边界同样难划，需要先做数据调研。
-
 ### 遗留 / 未做
 
 - 已产生的 3 个共用 modId 98945 的文件夹**未清理**，需要人工决定保留哪个（同 `Horde` / `NAT Effect 11`）。
-- 该误报**目前仍然存在**，每轮 audit 会继续把 `Somewhere in Between - Helmets` 列为可下载。**在 ISS-001 关闭前，看到 modId 98945 请手动跳过。**
+- 若将来出现更强的结构性判据（例如 Nexus 明确标注某个文件被某个文件取代），可以再考虑恢复弱证据的自动下载能力。
 
 ---
 

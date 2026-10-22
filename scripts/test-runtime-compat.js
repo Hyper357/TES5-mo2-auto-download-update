@@ -192,7 +192,10 @@ function f(id, name, version, uploaded, categoryId = 1) {
   assert.ok(['SAME_VERSION_NEWER_FILE_REPLACEMENT', 'TARGET_EDITION_MISMATCH'].includes(x.reason));
 }
 
-// A genuinely newer, runtime-compatible candidate still confirms.
+// A genuinely newer, runtime-compatible candidate is no longer auto-approved:
+// with no exact Nexus chain it is weak evidence and is deferred to a human
+// (docs/ISSUES.md ISS-001). What this case still proves is that the RUNTIME gate
+// did not reject it.
 {
   const mine = f(95, 'Simple Main', '1.0', '2026-01-01T00:00:00Z');
   const next = f(96, 'Simple Main', '1.1', '2026-04-01T00:00:00Z');
@@ -204,10 +207,14 @@ function f(id, name, version, uploaded, categoryId = 1) {
     localName: 'Simple Main',
     installationFile: mine.file_name,
   });
-  assert.strictEqual(x.status, 'UPDATE_CONFIRMED');
+  assert.strictEqual(x.status, 'HOLD_UPDATE_ELIGIBILITY');
+  assert.strictEqual(x.reason, 'WEAK_UPDATE_EVIDENCE_DEFERRED');
+  assert.ok(!/RUNTIME|SKSE|EDITION/.test(x.reason), 'runtime gate must not be the reason');
 }
 
-// Env override: pretend we are on the new runtime, the same candidate confirms.
+// Env override: with the newer baseline the runtime gate no longer rejects this
+// candidate. It is still deferred (weak evidence, ISS-001), but the reason must
+// NOT be a runtime one.
 {
   process.env.LOCAL_SKSE_VERSION = '2.3.1';
   process.env.LOCAL_RUNTIME_VERSION = '1.7.104';
@@ -223,7 +230,9 @@ function f(id, name, version, uploaded, categoryId = 1) {
       localName: 'Simple Framework',
       installationFile: mine.file_name,
     });
-    assert.strictEqual(x.status, 'UPDATE_CONFIRMED');
+    assert.strictEqual(x.status, 'HOLD_UPDATE_ELIGIBILITY');
+    assert.strictEqual(x.reason, 'WEAK_UPDATE_EVIDENCE_DEFERRED');
+    assert.ok(!/RUNTIME|SKSE|EDITION/.test(x.reason), 'runtime gate must not be the reason');
   } finally {
     delete process.env.LOCAL_SKSE_VERSION;
     delete process.env.LOCAL_RUNTIME_VERSION;

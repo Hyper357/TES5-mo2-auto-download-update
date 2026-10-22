@@ -123,7 +123,11 @@ function f(id, name, version, uploaded, categoryId = 1) {
   assert.strictEqual(x.mo2.signal, true);
 }
 
-// MO2 can miss a real update.
+// A newer upload with NO exact Nexus chain is weak evidence and is deferred to a
+// human, not auto-downloaded. Rationale + measurements in docs/ISSUES.md ISS-001:
+// "a newer file appeared on this page" cannot separate an upgrade from a sibling
+// artefact, and every name-based discriminator tried wrongly HOLDed dozens of
+// legitimate updates.
 {
   const mine = f(30, 'Simple Main', '1.0', '2026-01-01T00:00:00Z');
   const next = f(31, 'Simple Main', '1.1', '2026-04-01T00:00:00Z');
@@ -135,9 +139,13 @@ function f(id, name, version, uploaded, categoryId = 1) {
     localName: 'Simple Main',
     installationFile: mine.file_name,
   });
-  assert.strictEqual(x.status, 'UPDATE_CONFIRMED');
-  assert.strictEqual(x.reason, 'NEWER_COMPATIBLE_FILE_UPLOAD');
+  assert.strictEqual(x.status, 'HOLD_UPDATE_ELIGIBILITY');
+  assert.strictEqual(x.reason, 'WEAK_UPDATE_EVIDENCE_DEFERRED');
+  assert.strictEqual(x.updateNeeded, false);
   assert.strictEqual(x.mo2.signal, false);
+  // The proposed file stays attached so Review Center can offer it explicitly.
+  assert.strictEqual(String(x.target.fileId), '31');
+  assert.deepStrictEqual(x.evidence, ['NEWER_COMPATIBLE_FILE_UPLOAD', 'WEAK_EVIDENCE_DEFERRED']);
 }
 
 // Same-version later upload without exact chain remains HOLD.
@@ -350,8 +358,8 @@ function f(id, name, version, uploaded, categoryId = 1) {
     localName: 'Silent Fallback Main',
     installationFile: mine.file_name,
   });
-  assert.strictEqual(x.status, 'UPDATE_CONFIRMED');
-  assert.strictEqual(x.reason, 'NEWER_COMPATIBLE_FILE_UPLOAD');
+  assert.strictEqual(x.status, 'HOLD_UPDATE_ELIGIBILITY');
+  assert.strictEqual(x.reason, 'WEAK_UPDATE_EVIDENCE_DEFERRED');
   assert.strictEqual(x.runtimeEvidence.status, 'EMPTY_DESCRIPTION');
   assert.strictEqual(x.runtimeEvidence.fileId, '251');
 }

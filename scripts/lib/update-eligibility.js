@@ -549,14 +549,24 @@ function assessUpdateEligibility({ files = [], fileUpdates = [], mine, meta = {}
       }
     }
 
+    // Weak evidence is deliberately NOT auto-approved. "A newer file was
+    // uploaded on this page" cannot tell an upgrade from a sibling artefact:
+    // modId 98945 proposed "… - Helmets" 3.0.5 as the update of an installed
+    // "… - Guards" 2.4.1, and there is no Guards file at 3.0.5 at all (ISS-001).
+    // Two name-based discriminators were tried and both wrongly HOLDed dozens of
+    // legitimate updates (68 and 99 items), because local folder names are
+    // Chinese-decorated and authors rename files between versions. So the whole
+    // class is deferred to a human instead of guessed at. The proposed target is
+    // still attached so Review Center can show exactly what would be fetched;
+    // only the exact Nexus chain (NEXUS_EXACT_UPDATE_CHAIN) auto-downloads.
     return withRuntimeEvidence({
-      status: 'UPDATE_CONFIRMED',
-      reason: 'NEWER_COMPATIBLE_FILE_UPLOAD',
-      updateNeeded: true,
-      priority: mo2.signal ? 96 : 84,
+      status: 'HOLD_UPDATE_ELIGIBILITY',
+      reason: 'WEAK_UPDATE_EVIDENCE_DEFERRED',
+      updateNeeded: false,
+      priority: mo2.signal ? 80 : 45,
       mo2,
       target: compactFile(target),
-      evidence: ['NEWER_COMPATIBLE_FILE_UPLOAD', ...(mo2.signal ? ['MO2_UPDATE_SIGNAL'] : [])],
+      evidence: ['NEWER_COMPATIBLE_FILE_UPLOAD', 'WEAK_EVIDENCE_DEFERRED', ...(mo2.signal ? ['MO2_UPDATE_SIGNAL'] : [])],
       margin: fallback.margin,
     }, fallback.runtimeEvidence);
   }
