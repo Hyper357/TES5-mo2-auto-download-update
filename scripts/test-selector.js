@@ -5,6 +5,7 @@ const assert = require('assert');
 const {
   categoryRole,
   groupLatestAuxFiles,
+  hardVariantConflicts,
   selectUpdateTarget,
 } = require('./lib/file-selector');
 
@@ -62,6 +63,67 @@ function f(file_id, name, version, category_id = 1, uploaded_time = '2026-01-01T
   assert.ok(grouped.some(x => String(x.file_id) === '302'));
   assert.ok(grouped.some(x => String(x.file_id) === '401'));
   assert.ok(grouped.some(x => categoryRole(x) === 'TRANSLATION'));
+})();
+
+// Regression, ISS-002 (modId 128582): "NG" is the community label for the
+// 1.6+/AE build, not a third runtime branch. The installed file and its Nexus
+// chain replacement are both NG, so the profile gate must not answer
+// `profile-runtime:AE!=NG` and reject a real update.
+(function ngIsTheAeBranchNotANewRuntime() {
+  const conflicts = hardVariantConflicts(
+    'Unequip Quiver NG',
+    'Unequip Quiver NG 1.3.1',
+    { platform: 'AE', bodyType: 'UNKNOWN', textureTier: 'UNKNOWN' },
+  );
+  assert.deepStrictEqual(conflicts, [], 'NG must not conflict with an AE profile');
+})();
+
+(function selectsNgUpdateOfAnInstalledNgMod() {
+  const mine = f(797013, 'Unequip Quiver NG', '1.3.0', 1, '2026-08-29T14:04:03Z', 'MAIN FILES');
+  const target = f(814615, 'Unequip Quiver NG', '1.3.1', 1, '2026-10-04T17:27:17Z', 'MAIN FILES');
+  const res = selectUpdateTarget({
+    files: [mine, target],
+    mine,
+    localName: '取消装备箭袋 — Unequip Quiver NG — 【系统·装备】【技术·SKSE】',
+    installationFile: 'Unequip Quiver NG 128582 1.3.0 2026-08-29T14-04Z UK35XnhA5.zip',
+    profile: { platform: 'AE', bodyType: '3BA', textureTier: '2K' },
+  });
+  assert.strictEqual(res.decision, 'DOWNLOAD');
+  assert.strictEqual(String(res.target.file_id), '814615');
+})();
+
+// Regression, ISS-003 (modIds 150727 / 142566 / 173074): when the installed
+// file itself declares its game edition, that branch is what the user runs.
+// The profile must not hard-reject the same branch as `profile-runtime:AE!=SE`.
+(function installedEditionBranchOutranksTheProfile() {
+  const conflicts = hardVariantConflicts(
+    'Glorious Doors of Skyrim (GDOS) SE',
+    'Glorious Doors of Skyrim (GDOS) SE PBR 4.0',
+    { platform: 'AE', bodyType: '3BA', textureTier: '2K' },
+  );
+  assert.deepStrictEqual(conflicts, [], 'installed SE branch must not be rejected by an AE profile');
+})();
+
+(function profileRuntimeStillGuardsAnUnknownInstalledBranch() {
+  const conflicts = hardVariantConflicts('Mystery Widget', 'Mystery Widget VR 2.0', { platform: 'AE' });
+  assert.ok(
+    conflicts.some(x => /profile-runtime/.test(x)),
+    'when the installed file states no branch the profile must still guard',
+  );
+})();
+
+(function selectsSeBranchUpdateForAnInstalledSeMod() {
+  const mine = f(756444, 'Glorious Doors of Skyrim (GDOS) SE', '3.5.1', 1, '2026-06-01T00:00:00Z', 'MAIN FILES');
+  const target = f(824267, 'Glorious Doors of Skyrim (GDOS) SE PBR', '4.0', 1, '2026-10-24T00:00:00Z', 'MAIN FILES');
+  const res = selectUpdateTarget({
+    files: [mine, target],
+    mine,
+    localName: '天际之门 — Glorious Doors of Skyrim (GDOS) SE PBR',
+    installationFile: 'Glorious Doors of Skyrim (GDOS) SE PBR 150727 3.5.1 2026-06-01T00:00Z achSzYJfW.rar',
+    profile: { platform: 'AE', bodyType: '3BA', textureTier: '2K' },
+  });
+  assert.strictEqual(res.decision, 'DOWNLOAD');
+  assert.strictEqual(String(res.target.file_id), '824267');
 })();
 
 console.log('selector tests: OK');

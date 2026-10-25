@@ -125,6 +125,98 @@ target   : 仍然保留（Review Center 能直接显示"将要下载哪个文件
 
 ---
 
+## ISS-002 — 名字里的 "NG" 被当成独立 runtime 分支，误拦真实更新
+
+- **状态**：**FIXED（2026-10-25）**
+- **发现**：2026-10-25，用户指出 `modId 128582`（取消装备箭袋 / Unequip Quiver NG）"似乎没查到更新"
+- **影响面**：名字带 `NG` 的 mod。当日 plan 中含 NG token 的 49 行里 10 行被 HOLD；其中因本缺陷误拦 **7 项**：128582、182536、189962、181603、42161、195077、97674
+- **回归测试**：`scripts/test-selector.js` → `ngIsTheAeBranchNotANewRuntime`、`selectsNgUpdateOfAnInstalledNgMod`
+
+### 症状
+
+已装 mod 有明确的 Nexus 更新链，却被判成"版本分支冲突"，既不进自动下载、`target` 还是 `null`（Review Center 里连"要下哪个文件"都显示不出来）：
+
+```
+action   : HOLD_UPDATE_ELIGIBILITY
+reason   : NEXUS_UPDATE_CHAIN_VARIANT_CONFLICT
+conflicts: ["profile-runtime:AE!=NG"]
+local    : 797013  v1.3.0
+nexus    : 814615  v1.3.1 MAIN (2026-10-04)
+chain    : file_updates 797013 -> 814615   （Nexus 官方替换记录，无歧义）
+```
+
+### 根因
+
+`scripts/lib/file-selector.js` 的 `variantSignature()`：
+
+```js
+if (/\bng\b|next gen/.test(t)) runtime.add('NG');
+```
+
+它把 mod 名里的 `NG`（next-gen，社区对 1.6+ / AE 的叫法）当成**与 AE 并列的第三种 runtime**。随后 `hardVariantConflicts()` 用 profile 的 `AE` 与该集合比较，交集为空 → 判为硬冲突 → `chainCandidate()` 拒绝这条唯一后继 → `latest` 回退成已装文件 → `target: null`。
+
+即：**用名字里的词去猜 runtime 分支**，而这个词本身就是 AE 的同义词。
+
+### 修复
+
+`variantSignature()` 将 `NG` 归一为 `AE`。分支证据只应来自两处：① 已装文件实际所在的分支；② 描述里显式写明的运行时/SKSE 要求（`runtimeCompatRejects`，原样保留、仍是硬门禁）。
+
+刻意保留的东西：
+
+- `SE` / `VR` / `GOG` 语义不变——那是真正不同的游戏分支；
+- `body`（3BA/CBBE/BHUNP）、`resolution`（2K/4K）、`cc` 的名字判定不变——这些是内容分支，选错是真实的安装错误；
+- `profile-body` / `profile-resolution` 的硬冲突不变（`test-variant-policy` 有断言）。
+
+### 遗留 / 未做
+
+- 另有 3 项被 `profile-runtime:AE!=SE` 拦住（150727 GDOS SE PBR 4.0、142566 Sturdy Sandals SE 2.0、173074 Character Menu SE 1.4）。本地装的就是 SE 版且能跑，但门禁按"不跨 AE/SE 分支"硬拦 —— 该问题已由 **ISS-003** 修复（已装分支优先于 profile）。
+- `variant-review` 的 `branchKey` 里 `RUNTIME_NG` 会变成 `RUNTIME_AE`；现存 `variant-policies.json` 没有 NG 条目，无迁移影响。
+
+---
+
+## ISS-003 — profile 的 runtime 判定压过"已装文件实际分支"，把同分支更新判成跨版本
+
+- **状态**：**FIXED（2026-10-25）**
+- **发现**：2026-10-25，ISS-002 修完后仍有 3 项 `profile-runtime:AE!=SE`；用户裁定「材质类跨版本要求低，放行」
+- **影响面**：已装文件自身带 runtime 标签、但 profile 标签与之不同的 mod。当日 3 项：150727（GDOS SE 3.5.1→4.0）、142566（Sturdy Sandals SE 1.9.1→2.0）、173074（Character Menu SE 1.3.0→1.4）
+- **回归测试**：`scripts/test-selector.js` → `installedEditionBranchOutranksTheProfile`、`profileRuntimeStillGuardsAnUnknownInstalledBranch`、`selectsSeBranchUpdateForAnInstalledSeMod`
+
+### 症状
+
+```
+action   : HOLD_UPDATE_ELIGIBILITY
+reason   : NEXUS_UPDATE_CHAIN_VARIANT_CONFLICT
+conflicts: ["profile-runtime:AE!=SE"]
+local    : Glorious Doors of Skyrim (GDOS) SE PBR 3.5.1   ← 本地就是 SE 分支
+nexus    : Glorious Doors of Skyrim (GDOS) SE PBR 4.0      ← 同分支更新
+```
+
+本地 `SE` ↔ 候选 `SE` 的 local 对比是通过的，冲突只来自 profile 的 `AE`。
+
+### 根因
+
+`hardVariantConflicts()` 里 profile 对比**无条件**执行：profile 写的是 `AE`，候选文件写的是 `SE`，交集为空即硬拒。可是"已装文件是 SE 且用户正在用它"本身就是该分支可用的证据——门禁在拿一个理想 profile 去否定用户的实际运行状态。
+
+### 修复
+
+profile 只在**已装文件自身没有 runtime 证据**时才参与 runtime 判定：
+
+```js
+const dimensions = [['body','profile-body'],['resolution','profile-resolution']];
+if (!local.runtime.size) dimensions.unshift(['runtime','profile-runtime']);
+```
+
+`profile-body` / `profile-resolution` 仍是硬冲突（内容分支，选错是真实错误）。
+
+**边界**：这不等于"SE 文件能随便装到 AE 上"。它只消除"已装同分支却被 profile 否掉"的自相矛盾；描述里显式声明需要 1.5.97 的运行时要求仍由 `runtimeCompatRejects` 硬拒。
+
+### 遗留 / 未做
+
+- 已装文件无 branch 标签时，profile 仍会保守 HOLD（有意为之）。
+- `173074 Character Menu` 疑似 SKSE 插件，跨版本风险高于纯材质；用户已知悉后放行，若游戏出问题优先回退这一项。
+
+---
+
 ## 待建条目（尚未编号，记录线索）
 
 - **多文件夹共用 modId 无自动检测**：`Horde`（2 夹）、`NAT Effect 11`（3 夹）、`Somewhere in Between`（3 夹）反复出现。目前只有 `LOCAL_MULTI_VERSION_IDENTITY` 在特定路径上拦截，没有全局体检。

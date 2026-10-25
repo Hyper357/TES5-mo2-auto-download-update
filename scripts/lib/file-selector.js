@@ -52,7 +52,15 @@ function variantSignature(text) {
   if (/\b1[ ._-]?5[ ._-]?97\b|\bse\b/.test(t)) runtime.add('SE');
   if (/\b1[ ._-]?6(?:[ ._-]?\d+){1,2}\b|\bae\b/.test(t)) runtime.add('AE');
   if (/\bgog\b/.test(t)) runtime.add('GOG');
-  if (/\bng\b|next gen/.test(t)) runtime.add('NG');
+  // "NG" (next-gen) is the community label for the 1.6+ / AE build, NOT a
+  // third runtime branch. Mapping it to its own token made every mod named
+  // "... NG" look like an AE-conflicting branch: the profile gate answered
+  // `profile-runtime:AE!=NG` and rejected its own Nexus update chain
+  // (e.g. modId 128582, local file v1.3.0 -> chain target v1.3.1 MAIN).
+  // Branch evidence must come from the actual branch the installed file is on,
+  // or from an explicit version claim in the description (runtimeCompat gate),
+  // never from the word "NG" alone.
+  if (/\bng\b|next gen/.test(t)) runtime.add('AE');
 
   if (/\b3ba\b/.test(t)) body.add('3BA');
   if (/\bcbbe\b/.test(t)) body.add('CBBE');
@@ -89,7 +97,15 @@ function hardVariantConflicts(localText, candidateText, profile) {
   const p = norm(`${profile?.platform || ''} ${profile?.bodyType || ''} ${profile?.textureTier || ''}`);
   if (p) {
     const ps = variantSignature(p);
-    for (const [key, label] of [['runtime', 'profile-runtime'], ['body', 'profile-body'], ['resolution', 'profile-resolution']]) {
+    // The profile is only a fallback witness for the game edition. When the
+    // installed file itself already states its runtime branch, that branch is
+    // what the user actually runs -- a `profile-runtime:AE!=SE` hard reject on
+    // top of it silently parks real updates (e.g. modId 150727 GDOS 3.5.1 SE ->
+    // 4.0 SE, 142566 Sturdy Sandals SE -> 2.0). Body and resolution stay hard
+    // because those are content choices, not edition evidence.
+    const dimensions = [['body', 'profile-body'], ['resolution', 'profile-resolution']];
+    if (!local.runtime.size) dimensions.unshift(['runtime', 'profile-runtime']);
+    for (const [key, label] of dimensions) {
       const c = setConflict(ps[key], cand[key], label);
       if (c) conflicts.push(c);
     }
