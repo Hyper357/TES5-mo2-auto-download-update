@@ -242,6 +242,21 @@ function candidateRelevance(candidate, context = {}) {
   const decision = c.decision || null;
   const envReason = String(c.environmentDecision?.reason || '');
 
+  // A translation is a SEPARATE artefact on its own Nexus page with its own
+  // update chain -- it is never a companion archive of the main file. Blocking
+  // the main update until the Chinese localisation catches up means the user
+  // can never take a main-file fix without also re-translating it (user policy,
+  // 2026-10-29: "汉化是汉化，本体是本体"). The translation stays visible as an
+  // advisory candidate so the report can still flag "汉化可能滞后", and any
+  // registry rule for the translation kind keeps its own aux handling.
+  if (c.kind === 'TRANSLATION') {
+    return {
+      blocking: false,
+      disposition: 'NON_BLOCKING_TRANSLATION_SEPARATE_ARTEFACT',
+      reason: 'TRANSLATION_HAS_ITS_OWN_NEXUS_PAGE_AND_UPDATE_CHAIN',
+    };
+  }
+
   if (decision?.resolved && decision.status === 'REQUIRED') {
     return { blocking: true, disposition: 'BLOCKING_REQUIRED_RULE', reason: 'REGISTRY_REQUIRED' };
   }

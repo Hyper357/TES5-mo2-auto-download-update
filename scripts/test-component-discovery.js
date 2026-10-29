@@ -152,15 +152,19 @@ assert.strictEqual(optionalAssessed.complete, true);
 assert.strictEqual(optionalAssessed.unresolved.length, 0);
 assert.strictEqual(optionalAssessed.nonBlocking.length, 1);
 
-// A directly discovered Chinese translation remains blocking so localization is never silently forgotten.
-const translationHeld = assessComponentDiscovery({
+// ISS-005: a directly discovered Chinese translation is advisory, not blocking.
+// The main archive must stay downloadable while the localisation follows on its
+// own page and its own update chain.
+const translationAdvisory = assessComponentDiscovery({
   candidates: mergeComponentCandidates([{ kind: 'TRANSLATION', family: 'ZH_CN', source: 'SAME_PAGE_FILE', fileId: '77', name: 'Chinese Translation' }]),
   rules: [],
   coverage: { samePageComponents: { required: true, complete: true }, requirementsForward: { required: true, complete: true }, description: { required: true, complete: true } },
 });
-assert.strictEqual(translationHeld.complete, false);
-assert.strictEqual(translationHeld.unresolved.length, 1);
-assert.strictEqual(translationHeld.unresolved[0].kind, 'TRANSLATION');
+assert.strictEqual(translationAdvisory.complete, true);
+assert.strictEqual(translationAdvisory.unresolved.length, 0);
+assert.strictEqual(translationAdvisory.nonBlocking.length, 1);
+assert.strictEqual(translationAdvisory.nonBlocking[0].kind, 'TRANSLATION');
+assert.strictEqual(translationAdvisory.nonBlocking[0].relevance.disposition, 'NON_BLOCKING_TRANSLATION_SEPARATE_ARTEFACT');
 
 // A resolved active-profile compatibility decision is allowed to close a PATCH/HOTFIX candidate without a persisted registry row.
 const envResolved = assessComponentDiscovery({

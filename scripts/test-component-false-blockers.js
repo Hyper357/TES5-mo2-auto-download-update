@@ -29,8 +29,10 @@ assert.strictEqual(rel({ source: 'DESCRIPTION_TEXT', kind: 'PATCH', requiredHint
 assert.strictEqual(rel({ source: 'DESCRIPTION_LINK', kind: 'RESOURCE', name: 'Address Library for SKSE Plugins', installedContextMatch: true }).blocking, false);
 assert.strictEqual(rel({ source: 'DESCRIPTION_LINK', kind: 'PHYSICS', name: 'FSMP - Faster HDT-SMP', installedContextMatch: true }).blocking, false);
 
-// Direct Chinese translation relationships stay blocking.
-assert.strictEqual(rel({ source: 'DESCRIPTION_LINK', kind: 'TRANSLATION', family: 'ZH_CN', name: 'Mandarin Translation' }).blocking, true);
+// ISS-005: a Chinese translation is a separate artefact on its own Nexus page
+// with its own update chain, so it must never block the main-file update.
+assert.strictEqual(rel({ source: 'DESCRIPTION_LINK', kind: 'TRANSLATION', family: 'ZH_CN', name: 'Mandarin Translation' }).blocking, false);
+assert.strictEqual(rel({ source: 'DESCRIPTION_LINK', kind: 'TRANSLATION', family: 'ZH_CN', name: 'Mandarin Translation' }).disposition, 'NON_BLOCKING_TRANSLATION_SEPARATE_ARTEFACT');
 
 // A satisfied prerequisite must not block a Main update.
 assert.strictEqual(rel({
@@ -67,11 +69,13 @@ assert.strictEqual(rel({
   environmentDecision: { resolved: false, status: 'UNRESOLVED', reason: 'COMPAT_COUNTERPART_ENABLED', evidence: ['Lux Orbis.esp'] },
 }).blocking, true);
 
-// Installed neighbors do not become companions by fuzzy name match; installed translations do.
+// Installed neighbors do not become companions by fuzzy name match; an installed
+// translation is advisory only as well (ISS-005).
 assert.strictEqual(rel({ source: 'INSTALLED_COMPONENT', kind: 'PHYSICS', installed: true, installedContextMatch: true, name: 'Third-party SMP Hair' }).blocking, false);
-assert.strictEqual(rel({ source: 'INSTALLED_COMPONENT', kind: 'TRANSLATION', family: 'ZH_CN', installed: true, installedContextMatch: true, name: 'Horde 汉化包' }).blocking, true);
+assert.strictEqual(rel({ source: 'INSTALLED_COMPONENT', kind: 'TRANSLATION', family: 'ZH_CN', installed: true, installedContextMatch: true, name: 'Horde 汉化包' }).blocking, false);
 
-// Integration: false evidence should produce a complete discovery record, while a Chinese translation stays unresolved.
+// Integration: false evidence produces a complete discovery record, and an
+// unresolved Chinese translation stays advisory instead of unresolved (ISS-005).
 const falseOnly = assessComponentDiscovery({
   candidates: [
     { kind: 'RESOURCE', source: 'DESCRIPTION_LINK', name: 'Address Library', family: 'CUSTOM:ADDRESS', installedContextMatch: true, decision: { resolved: false }, environmentDecision: { reason: 'NO_SAFE_INFERENCE' } },
@@ -86,7 +90,9 @@ const translation = assessComponentDiscovery({
   candidates: [{ kind: 'TRANSLATION', source: 'DESCRIPTION_LINK', name: 'Mandarin Translation', family: 'ZH_CN', decision: { resolved: false }, environmentDecision: { reason: 'NO_SAFE_INFERENCE' } }],
   rules: [], coverage: { description: { required: true, complete: true, status: 'COMPLETE' } }, mainName: 'Icy Mesh Remaster', mainVersion: '2.2.1',
 });
-assert.strictEqual(translation.complete, false);
-assert.strictEqual(translation.unresolved.length, 1);
+assert.strictEqual(translation.complete, true);
+assert.strictEqual(translation.unresolved.length, 0);
+assert.strictEqual(translation.nonBlocking.length, 1);
+assert.strictEqual(translation.nonBlocking[0].relevance.disposition, 'NON_BLOCKING_TRANSLATION_SEPARATE_ARTEFACT');
 
 console.log('component false-blocker tests: OK');

@@ -271,6 +271,47 @@ detail: net::ERR_CONNECTION_CLOSED at .../mods/181328   （5 个）
 
 ---
 
+## ISS-005 — 汉化组件阻塞本体更新（"汉化是汉化，本体是本体"）
+
+- **状态**：**FIXED（2026-10-29）**
+- **发现**：2026-10-29，用户质问「Open Shaders 为什么没检测到更新」——其实检测到了（2.18→2.20.0，`NEXUS_EXACT_UPDATE_CHAIN`），但被汉化组件挡住，进不了自动清单
+- **影响面**：所有"描述页挂简体汉化 / 本地装了汉化"的 mod。当日 6 项：180419 Open Shaders 2.20.0、175589 Horde 3.1.0、142566 Sturdy Sandals 2.0、173074 Character Menu 1.4、182536 Racemenu Enhancer 2.2.0、191283 Walk With Me 0.3.1
+- **回归测试**：`scripts/test-component-discovery.js`（`translationAdvisory`）、`scripts/test-component-false-blockers.js`（`NON_BLOCKING_TRANSLATION_SEPARATE_ARTEFACT` 三条断言）
+- **用户裁决**：汉化是独立 artefact，不得阻塞本体更新
+
+### 症状
+
+```
+action : HOLD_COMPONENT_DISCOVERY
+目标   : 180419:828238 — Open Shaders 2.20.0（当天 18:06 上传，精确链确认）
+卡点   : TRANSLATION/DESCRIPTION_LINK → aux 195723（Open Shaders 简体汉化）
+结果   : 不进自动下载列表；用户视角 = "没检测到更新"
+```
+
+### 根因
+
+`scripts/lib/component-discovery.js` 的 `candidateRelevance()` 把中文汉化一律判成 **blocking**（`BLOCKING_TRANSLATION_LINK` / `BLOCKING_SAME_PAGE_TRANSLATION` / `BLOCKING_INSTALLED_TRANSLATION`）。设计初衷是"汉化不能被静默忘记"，但代价是：**本体修 bug/加功能必须等汉化跟版**，而汉化是另一个 Nexus 页面、另一条更新链，追版节奏完全独立。
+
+### 修复
+
+`candidateRelevance()` 最前面加一条硬规则：`kind === 'TRANSLATION'` → `blocking: false`，disposition `NON_BLOCKING_TRANSLATION_SEPARATE_ARTEFACT`。于是：
+
+- 汉化不再进 `unresolved`，`complete` 只取决于覆盖度和其他组件；
+- 汉化仍留在 `nonBlocking` / advisory 里，报告仍然能看到"汉化可能滞后"；
+- 注册表里显式的 `TRANSLATION` REQUIRED 规则（aux 下载）走的是 registry 路径，**不受影响**；
+- PATCH / RESOURCE / PHYSICS / BODYSLIDE / CONFIG 等真正影响本体能否运行的组件，仍然阻塞。
+
+### 刻意保留
+
+- 汉化的**独立更新**不会被本修复接管：已装为独立 mod 的汉化（如 191342 OStim CHS、190119 LOYI CHS）照旧按自己的 modId 参与审计；描述页里"未安装的汉化链接"只作提示。
+- 装新版本体后旧汉化可能出现未翻译文本或键位错配——这属于汉化窗口/用户侧的后续动作，不再是本体的阻塞条件。
+
+### 遗留 / 未做
+
+- Review Center 目前把汉化候选计入 `nonBlockingEvidence` 计数，但还没有"汉化滞后"的独立提醒列表；若需要可后续加。
+
+---
+
 ## 待建条目（尚未编号，记录线索）
 
 - **多文件夹共用 modId 无自动检测**：`Horde`（2 夹）、`NAT Effect 11`（3 夹）、`Somewhere in Between`（3 夹）反复出现。目前只有 `LOCAL_MULTI_VERSION_IDENTITY` 在特定路径上拦截，没有全局体检。
