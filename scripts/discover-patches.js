@@ -268,6 +268,13 @@ async function main() {
   }
 
   const items = [];
+  // Per-page scraping failures. A reached-but-unusable browser is a DIFFERENT
+  // failure from never connecting: browserDiscover catches its own throw and
+  // stamps all three coverage sections BROWSER_ERROR, so the run used to look
+  // clean while 6 of 14 targets had no real coverage (2026-10-29: five
+  // net::ERR_CONNECTION_CLOSED plus one navigation timeout, audit exited 0).
+  let browserErrored = 0;
+  const browserErrorSamples = [];
   for (const item of targets) {
     const mainName = item.latestName || item.name || '';
     const mainFileId = String(item.latestFileId || item.fileId || '');
@@ -301,6 +308,15 @@ async function main() {
       candidates: [],
     };
     if (browser) browserResult = await browserDiscover(browser, item.modId, mainName);
+    if (browser && browserResult?.requirementsForward?.status === 'BROWSER_ERROR') {
+      browserErrored++;
+      if (browserErrorSamples.length < 5) {
+        browserErrorSamples.push({
+          modId: String(item.modId || ''),
+          detail: String(browserResult.requirementsForward.detail || '').slice(0, 160),
+        });
+      }
+    }
     raw.push(...browserResult.candidates);
 
     let candidates = mergeComponentCandidates(raw)
@@ -383,6 +399,8 @@ async function main() {
     browserUnavailable: browserLost,
     browserError,
     browserTargets: browserLost ? targets.length : 0,
+    browserErrored,
+    browserErrorSamples,
     unresolvedCandidates: items.reduce((n, x) => n + x.unresolvedCount, 0),
     environmentResolvedCandidates: items.reduce((n, x) => n + x.environmentResolvedCount, 0),
     candidateCountsByKind: countsByKind(items.flatMap(x => x.candidates || [])),
@@ -420,6 +438,8 @@ async function main() {
     browserUnavailable: payload.browserUnavailable,
     browserError: payload.browserError,
     browserTargets: payload.browserTargets,
+    browserErrored: payload.browserErrored,
+    browserErrorSamples: payload.browserErrorSamples,
     unresolvedCandidates: payload.unresolvedCandidates,
     environmentResolvedCandidates: payload.environmentResolvedCandidates,
     candidateCountsByKind: payload.candidateCountsByKind,
@@ -431,7 +451,9 @@ async function main() {
 
   // Distinct non-zero code so a caller that only inspects the exit status still
   // sees that coverage was not real. discover-all-patches.js forwards r.status.
-  if (browserLost) process.exitCode = 3;
+  // Partial page-scrape failures count too: they degrade individual targets just
+  // as silently as a dead browser.
+  if (browserLost || browserErrored > 0) process.exitCode = 3;
 }
 
 main().catch(err => { console.error(`discover-components failed: ${err.message}`); process.exit(1); });

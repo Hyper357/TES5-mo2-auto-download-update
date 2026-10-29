@@ -217,6 +217,60 @@ if (!local.runtime.size) dimensions.unshift(['runtime','profile-runtime']);
 
 ---
 
+## ISS-004 — 浏览器"逐页抓取失败"仍被当成干净审计
+
+- **状态**：**FIXED（2026-10-29）**
+- **发现**：2026-10-29 例行 audit，组件闭合 `complete=2 / held=12`、`coverageComplete = 0/14`
+- **影响面**：每次 Nexus 网络抖动都会命中；本轮 6/14 目标
+
+### 症状
+
+audit 正常退出 0、报"自动项=2"，但 14 个目标里有 **6 个根本没做覆盖率检查**：
+
+```
+requirementsForward=BROWSER_ERROR   6
+requirementsReverse=BROWSER_ERROR   6
+description=BROWSER_ERROR           6
+
+detail: net::ERR_CONNECTION_CLOSED at .../mods/181328   （5 个）
+        Navigation timeout of 45000 ms exceeded         （1 个）
+```
+
+受影响：`Horde`、`Outfit Distributor SKSE`、`Simple Follower Framework CHS`、`Inventory Interface Injector`、`SPS`、`AnvilLOD`。
+
+### 根因
+
+`scripts/discover-patches.js` 的 `browserDiscover()` 用 try/catch 把任何抓取异常吞成 `BROWSER_ERROR`（三个覆盖率区段一起标记），`detail` 只写进工件。
+
+而 2026-10-18 那次修复（见 §ISS-001 之前的 `c18d8f6`）只覆盖了**浏览器完全连不上**（`browserUnavailable`），判据是 `browser == null`。本轮浏览器**连上了**，只是逐页取失败 —— 走的是另一条路径，**降级检测完全没看到它**。
+
+同一个"静默失败"缺陷类别，第二次出现，只是状态字符串不同。
+
+### 修复
+
+1. `scripts/discover-patches.js`：逐目标统计 `BROWSER_ERROR`，产出 `browserErrored` 计数与前 5 条 `browserErrorSamples`（modId + detail）；`browserErrored > 0` 时同样以 **exit 3** 退出。
+2. `scripts/lib/coverage-degradation.js`（新）：把判定抽成纯函数 `summarizeCoverageDegradation()`，返回 `{ degraded, kind, affected }`，`kind ∈ BROWSER_UNAVAILABLE | PAGE_SCRAPE_FAILED`。抽出来是为了**能脱离真实浏览器做单元测试**。
+3. `index.js`：改用该函数；`PAGE_SCRAPE_FAILED` 时打印受影响数与样例 `modId`，并记录 `errorCode=BROWSER_UNAVAILABLE_FOR_COVERAGE`（沿用既有诊断码，layer=BROWSER, retry=true）。
+
+**注意**：`BROWSER_ERROR` 本身不代表"这些 mod 有问题" —— 它是**网络/浏览器**问题。所以修复方式是"让结论不可信并大声报出来"，不是把它们升级成别的 HOLD 原因。
+
+### 防复发测试
+
+`scripts/test-patch-discovery.js` 末尾 5 组断言：
+
+1. `browserUnavailable` → `kind=BROWSER_UNAVAILABLE`，`affected=targets`
+2. `browserErrored=6/targets=14` → `kind=PAGE_SCRAPE_FAILED`，`affected=6`，**必须 degraded**
+3. 单个页面失败（1/3）也是 degraded
+4. 健康运行（0 失败）→ `degraded=false`
+5. 老调用方不传新字段 → 不得被判定为 degraded（向后兼容）
+
+### 遗留 / 未做
+
+- 只统计 `requirementsForward` 的状态作为代表（三个区段总是同时被标记，等价）。若将来 `browserDiscover` 改成部分区段成功，这里需要改成逐区段统计。
+- 网络抖动导致的 6 个目标需要**重跑才能补上真实覆盖率**；本轮结论（自动项=2）对那 6 个不成立。
+
+---
+
 ## 待建条目（尚未编号，记录线索）
 
 - **多文件夹共用 modId 无自动检测**：`Horde`（2 夹）、`NAT Effect 11`（3 夹）、`Somewhere in Between`（3 夹）反复出现。目前只有 `LOCAL_MULTI_VERSION_IDENTITY` 在特定路径上拦截，没有全局体检。

@@ -10,6 +10,7 @@ const { parseStrict } = require('./scripts/lib/cli');
 const { ensureDir, safeJson, saveJson, writeText } = require('./scripts/lib/fs-json');
 const { parseManifestText, formatManifest } = require('./scripts/lib/manifest');
 const { runNode, spawnNodeDetached } = require('./scripts/lib/process-runner');
+const { summarizeCoverageDegradation } = require('./scripts/lib/coverage-degradation');
 
 const rootDir = __dirname;
 
@@ -127,16 +128,30 @@ async function run() {
   // Degraded coverage must never be presented as a clean verdict. Every target
   // gets coverage gaps that have nothing to do with the mods themselves, so the
   // resulting HOLDs and the resulting "nothing to download" are both meaningless.
-  const coverageDegraded = !!discoverySummary.browserUnavailable;
+  const coverage = summarizeCoverageDegradation({
+    browserUnavailable: discoverySummary.browserUnavailable,
+    browserErrored: discoverySummary.browserErrored,
+    browserTargets: discoverySummary.browserTargets,
+    targets: discoverySummary.targets,
+  });
+  const coverageDegraded = coverage.degraded;
   if (coverageDegraded) {
-    const n = Number(discoverySummary.browserTargets || discoverySummary.targets || 0);
     const detail = String(discoverySummary.browserError || '').slice(0, 200);
-    const e = classifyFailure(`BROWSER_UNAVAILABLE_FOR_COVERAGE ${detail}`);
-    logger.error('PATCH_DISCOVERY', 'component discovery ran without the managed browser', {
-      errorCode: e.code, layer: e.layer, action: e.action, targets: n, error: detail,
+    const e = classifyFailure(`BROWSER_UNAVAILABLE_FOR_COVERAGE ${detail || 'page scrape failed'}`);
+    logger.error('PATCH_DISCOVERY', 'component discovery ran without usable browser coverage', {
+      errorCode: e.code, layer: e.layer, action: e.action,
+      kind: coverage.kind, affected: coverage.affected, error: detail,
+      samples: discoverySummary.browserErrorSamples || [],
     });
-    console.error(`  ❌ BROWSER_UNAVAILABLE_FOR_COVERAGE: ${n} 个目标无法做覆盖率检查（${detail || '无详情'}）`);
-    console.error('     → 本轮的 HOLD / "无可下载" 结论无效，不要当作真实结果。');
+    if (coverage.kind === 'BROWSER_UNAVAILABLE') {
+      console.error(`  ❌ BROWSER_UNAVAILABLE_FOR_COVERAGE: ${coverage.affected} 个目标无法做覆盖率检查（${detail || '无详情'}）`);
+    } else {
+      console.error(`  ❌ BROWSER_UNAVAILABLE_FOR_COVERAGE: ${coverage.affected}/${discoverySummary.targets || '?'} 个目标页面抓取失败（浏览器已连上但取不到页面）`);
+      for (const s of (discoverySummary.browserErrorSamples || []).slice(0, 3)) {
+        console.error(`       modId ${s.modId}: ${s.detail}`);
+      }
+    }
+    console.error('     → 这些目标的 HOLD 与"无可下载"结论不可信，不要当作真实结果。');
   }
 
   console.log('\n[Step 3/9] 审计 REQUIRED aux 的精确 modId/fileId/version...');
