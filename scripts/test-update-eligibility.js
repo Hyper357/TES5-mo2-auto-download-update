@@ -376,9 +376,10 @@ function f(id, name, version, uploaded, categoryId = 1) {
 
 // ISS-006 regression: MO2 signals an update and the page really does carry a
 // newer active file, but the name-similarity score stays below the 58 bar
-// (Chinese-decorated local folder name vs a packed archive name). That must be
-// HOLD_UPDATE_ELIGIBILITY with the newer file attached, never a silent
-// "MO2 is lying" skip.
+// (Chinese-decorated local folder name vs a packed archive name). It must not
+// be silently written off as a metadata lie: HOLD with the candidate attached.
+// When the archive name cannot be tied to the same product family, no target is
+// asserted -- only candidates, so nothing gets downloaded by guesswork.
 {
   const mine = f(700, '服装画廊 OutfitGallery 1.0.16', '1.0.16', '2026-10-16T14:36:00Z');
   const next = f(701, 'OutfitGalleryX', '1.0.17', '2026-10-31T15:00:00Z');
@@ -392,9 +393,27 @@ function f(id, name, version, uploaded, categoryId = 1) {
   });
   assert.strictEqual(x.status, 'HOLD_UPDATE_ELIGIBILITY');
   assert.strictEqual(x.reason, 'MO2_SIGNAL_WITH_NEWER_UNVERIFIED_FILE');
-  assert.strictEqual(String(x.target.fileId), '701');
-  assert.ok(x.evidence.includes('NEWER_FILE_UPLOADS_UNVERIFIED'));
+  assert.strictEqual(x.target, null, 'unrelated archive name must not become a download target');
+  assert.strictEqual(x.candidates.length, 1);
+  assert.strictEqual(String(x.candidates[0].fileId), '701');
   assert.strictEqual(x.mo2.signal, true);
+}
+
+// A newer file of the SAME product family is a usable weak-evidence target.
+{
+  const mine = f(720, 'Simple Follower Framework', '2.2B', '2026-09-13T00:00:00Z', 2);
+  const next = f(721, 'Simple Follower Framework', '2.2.2', '2026-10-30T00:00:00Z', 3);
+  const x = assessUpdateEligibility({
+    files: [mine, next],
+    fileUpdates: [],
+    mine,
+    meta: { version: '2.2.0.0B', newestVersion: '2.2.2.0', nexusFileStatus: 4 },
+    localName: '简易随从框架 — Simple Follower Framework — 【随从】【技术·框架】',
+    installationFile: 'Simple Follower Framework 174017 2.2B 2026-09-13T07-50Z xDLPwGrzj.7z',
+  });
+  assert.strictEqual(x.status, 'HOLD_UPDATE_ELIGIBILITY');
+  assert.strictEqual(x.reason, 'WEAK_UPDATE_EVIDENCE_DEFERRED');
+  assert.strictEqual(String(x.target.fileId), '721');
 }
 
 // The same MO2 signal without any newer active file stays a real false

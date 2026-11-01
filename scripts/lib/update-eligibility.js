@@ -248,7 +248,7 @@ function candidateCompatGate({ file, mine, localName = '', installationFile = ''
   const candText = [file?.description, file?.file_name, file?.name, file?.version].join(' ');
   // Runtime evidence comes from the DESCRIPTION only. The version field and
   // version-suffixed file names are full of MOD version numbers (1.5-1.9
-  // range) that are not runtime requirements — scanning them produced mass
+  // range) that are not runtime requirements 鈥?scanning them produced mass
   // false TARGET_REQUIRES_NEWER_RUNTIME positives (e.g. "Skyrim 3D Furniture
   // 1.9.0" rejected because its own version looked like "runtime 1.9").
   const descText = String(file?.description || '');
@@ -317,7 +317,7 @@ function chainCandidate({ files, fileUpdates, mine, localName = '', installation
   return { candidate: accepted[0].file, successors, conflicts: [], compatRejects, runtimeEvidence: candidateRuntimeEvidence(accepted[0].file) };
 }
 
-function fallbackNewerCandidate({ files, mine, localName = '', installationFile = '', profile = null, meta = null }) {
+function fallbackNewerCandidate({ files, mine, localName = '', installationFile = '', profile = null, meta = null, minScore = 58 }) {
   const mineTime = uploadedMs(mine);
   const candidates = [];
   const compatRejects = [];
@@ -325,7 +325,7 @@ function fallbackNewerCandidate({ files, mine, localName = '', installationFile 
   for (const f of files || []) {
     if (!f || String(f.file_id || '') === String(mine?.file_id || '') || !isActive(f)) continue;
     const scored = compatibilityProbe({ mine, candidate: f, localName, installationFile, profile });
-    if (!scored.accepted || scored.score < 58) continue;
+    if (!scored.accepted || scored.score < minScore) continue;
     const gate = candidateCompatGate({ file: f, mine, localName, installationFile });
     if (gate.rejects.length && !(meta && ignoredTarget(meta, f))) {
       compatRejects.push(...gate.rejects);
@@ -343,6 +343,31 @@ function fallbackNewerCandidate({ files, mine, localName = '', installationFile 
   const margin = second ? best.score - second.score : best.score;
   if (second && margin < 10) return { candidate: null, ranked: candidates.slice(0, 8), ambiguous: true, margin, compatRejects, runtimeEvidence: best.runtimeEvidence };
   return { candidate: best.file, ranked: candidates.slice(0, 8), ambiguous: false, margin, compatRejects, runtimeEvidence: best.runtimeEvidence };
+}
+
+// The product token a Nexus upload carries in its own name ("OutfitGallery",
+// "Simple Follower Framework"). Used to keep the widened MO2-signal path from
+// attaching an unrelated same-page file (e.g. a texture pack sibling) as if it
+// were the update of this specific mod.
+function productTokens(file) {
+  const text = `${file?.name || ''} ${file?.file_name || ''}`.toLowerCase();
+  return text.split(/[^a-z0-9]+/).filter((t) => t.length >= 4 && !/^\d+$/.test(t));
+}
+
+function sameProductFamily(mine, candidate) {
+  const local = new Set(productTokens(mine));
+  if (!local.size) return true;
+  return productTokens(candidate).some((t) => local.has(t));
+}
+
+// Is the candidate a genuine version step forward by numeric core? Letter
+// suffixes ("2.2B") and re-uploads of the same release ("1.0.8") must not count
+// as an update target; a lower numeric core is a downgrade, never a target.
+function isStrictlyNewerByCore(candidate, mine) {
+  const coreC = versionCore(candidate?.version);
+  const coreM = versionCore(mine?.version);
+  if (!coreC || !coreM) return false;
+  return compareNumericVersions(coreC, coreM) > 0;
 }
 
 // Every still-active file uploaded after the installed exact file, newest
@@ -571,8 +596,8 @@ function assessUpdateEligibility({ files = [], fileUpdates = [], mine, meta = {}
 
     // Weak evidence is deliberately NOT auto-approved. "A newer file was
     // uploaded on this page" cannot tell an upgrade from a sibling artefact:
-    // modId 98945 proposed "… - Helmets" 3.0.5 as the update of an installed
-    // "… - Guards" 2.4.1, and there is no Guards file at 3.0.5 at all (ISS-001).
+    // modId 98945 proposed "鈥?- Helmets" 3.0.5 as the update of an installed
+    // "鈥?- Guards" 2.4.1, and there is no Guards file at 3.0.5 at all (ISS-001).
     // Two name-based discriminators were tried and both wrongly HOLDed dozens of
     // legitimate updates (68 and 99 items), because local folder names are
     // Chinese-decorated and authors rename files between versions. So the whole
@@ -618,15 +643,49 @@ function assessUpdateEligibility({ files = [], fileUpdates = [], mine, meta = {}
   }
 
   if (mo2.signal) {
-    // MO2 says there is an update. Before writing that off as a metadata lie,
-    // check the page itself: if a still-active file was uploaded after the
-    // installed one, the honest answer is "there IS newer file evidence, it
-    // just did not clear the fragile name-similarity bar" (ISS-006). Chinese
-    // decorated folder names and packed archive names routinely score far
-    // below 58 (modId 193410 v1.0.16 -> 1.0.17 sim 0.19, 184332 v1.13 -> 1.26.1
-    // sim 0.39, 196449 v1.4.0 -> 1.4.1 sim 0.50), and silently skipping them is
-    // exactly how a real update disappears. Surface it to Review Center
-    // instead -- still no auto-download, HOLD over guessing.
+    // Widened fallback: the same scorer, with no minimum score. If it still
+    // accepts a candidate that is the same product family and a real version
+    // step, that is ordinary weak evidence -> HOLD with the exact target. If it
+    // is ambiguous or the runtime gate rejected the newer files, say so instead
+    // of claiming the MO2 arrow is a lie (ISS-006).
+    const loose = fallbackNewerCandidate({ files, mine, localName, installationFile, profile, meta, minScore: 0 });
+    const candidate = loose.candidate;
+    if (candidate && sameProductFamily(mine, candidate) && isStrictlyNewerByCore(candidate, mine)) {
+      return withRuntimeEvidence({
+        status: 'HOLD_UPDATE_ELIGIBILITY',
+        reason: 'WEAK_UPDATE_EVIDENCE_DEFERRED',
+        updateNeeded: false,
+        priority: 80,
+        mo2,
+        target: compactFile(candidate),
+        evidence: ['MO2_UPDATE_SIGNAL', 'NEWER_FILE_UPLOADS_UNVERIFIED'],
+        margin: loose.margin,
+      }, loose.runtimeEvidence);
+    }
+    if (loose.ambiguous) {
+      return withRuntimeEvidence({
+        status: 'HOLD_UPDATE_ELIGIBILITY',
+        reason: 'MULTIPLE_NEWER_COMPATIBLE_FILES',
+        updateNeeded: false,
+        priority: 78,
+        mo2,
+        target: null,
+        evidence: ['MO2_UPDATE_SIGNAL', 'NEWER_FILE_UPLOADS_AMBIGUOUS'],
+        candidates: loose.ranked.map(x => compactFile(x.file)),
+      }, loose.runtimeEvidence);
+    }
+    if (loose.compatRejects && loose.compatRejects.length) {
+      return withRuntimeEvidence({
+        status: 'HOLD_UPDATE_ELIGIBILITY',
+        reason: loose.compatRejects[0].reason,
+        updateNeeded: false,
+        priority: 85,
+        mo2,
+        target: null,
+        evidence: ['MO2_UPDATE_SIGNAL', 'RUNTIME_COMPAT_GATE'],
+        compatRejects: loose.compatRejects,
+      }, loose.runtimeEvidence);
+    }
     const newer = newerActiveFiles(files, mine);
     if (newer.length) {
       return withRuntimeEvidence({
@@ -635,7 +694,7 @@ function assessUpdateEligibility({ files = [], fileUpdates = [], mine, meta = {}
         updateNeeded: false,
         priority: 70,
         mo2,
-        target: compactFile(newer[0]),
+        target: null,
         evidence: ['MO2_UPDATE_SIGNAL', 'NEWER_FILE_UPLOADS_UNVERIFIED'],
         candidates: newer.slice(0, 8).map(x => compactFile(x)),
       }, candidateRuntimeEvidence(newer[0]));
@@ -690,3 +749,4 @@ module.exports = {
   assessUpdateEligibility,
   eligibilityCounts,
 };
+
