@@ -262,7 +262,9 @@ See `docs/DEBUG_PLAYBOOK.md` after a concrete errorCode is known.
 
 `RUN`: bootstrap/brief → `npm run update` → brief/report. Do not run full tests when code did not change.
 
-`AUDIT`: bootstrap/brief → `npm run audit` → report. No download.
+`AUDIT`: bootstrap/brief → `npm run audit` → `npm run audit:problems` → report. No download.
+
+The problem sweep is mandatory, not optional. Every audit report must state which rows are NOT auto-downloadable and why: suspect updates whose exact target file is known, weak evidence, ambiguous candidates, component holds, unresolved local identity, runtime/edition gates, API blind spots, and mods with no Nexus modId. Never wait for the user to notice a missing update and come back for it — surface it in the same turn, with the exact `modId:fileId` when the sweep already knows it.
 
 `FIX`: inspect only implicated files → targeted tests → full `npm test` once before PR/merge.
 
