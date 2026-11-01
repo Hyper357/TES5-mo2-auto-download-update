@@ -345,6 +345,26 @@ function fallbackNewerCandidate({ files, mine, localName = '', installationFile 
   return { candidate: best.file, ranked: candidates.slice(0, 8), ambiguous: false, margin, compatRejects, runtimeEvidence: best.runtimeEvidence };
 }
 
+// Every still-active file uploaded after the installed exact file, newest
+// first. This is the page-level evidence the strict scorer may have thrown
+// away: used only to decide whether "MO2 says update" can be written off as a
+// metadata lie or has to be shown to a human (see ISS-006).
+function newerActiveFiles(files, mine) {
+  const mineTime = uploadedMs(mine);
+  const mineId = String(mine?.file_id || '');
+  const out = (files || []).filter((f) => {
+    if (!f || !isActive(f)) return false;
+    if (String(f.file_id || '') === mineId) return false;
+    const t = uploadedMs(f);
+    return t > 0 && t > mineTime;
+  });
+  out.sort((a, b) =>
+    compareVersions(String(b.version || ''), String(a.version || '')) ||
+    uploadedMs(b) - uploadedMs(a) ||
+    Number(b.file_id || 0) - Number(a.file_id || 0));
+  return out;
+}
+
 function ignoredTarget(meta, target) {
   if (!versionEqual(meta?.ignoredVersion, meta?.newestVersion)) return false;
   if (!validVersion(target?.version)) return true;
@@ -598,6 +618,28 @@ function assessUpdateEligibility({ files = [], fileUpdates = [], mine, meta = {}
   }
 
   if (mo2.signal) {
+    // MO2 says there is an update. Before writing that off as a metadata lie,
+    // check the page itself: if a still-active file was uploaded after the
+    // installed one, the honest answer is "there IS newer file evidence, it
+    // just did not clear the fragile name-similarity bar" (ISS-006). Chinese
+    // decorated folder names and packed archive names routinely score far
+    // below 58 (modId 193410 v1.0.16 -> 1.0.17 sim 0.19, 184332 v1.13 -> 1.26.1
+    // sim 0.39, 196449 v1.4.0 -> 1.4.1 sim 0.50), and silently skipping them is
+    // exactly how a real update disappears. Surface it to Review Center
+    // instead -- still no auto-download, HOLD over guessing.
+    const newer = newerActiveFiles(files, mine);
+    if (newer.length) {
+      return withRuntimeEvidence({
+        status: 'HOLD_UPDATE_ELIGIBILITY',
+        reason: 'MO2_SIGNAL_WITH_NEWER_UNVERIFIED_FILE',
+        updateNeeded: false,
+        priority: 70,
+        mo2,
+        target: compactFile(newer[0]),
+        evidence: ['MO2_UPDATE_SIGNAL', 'NEWER_FILE_UPLOADS_UNVERIFIED'],
+        candidates: newer.slice(0, 8).map(x => compactFile(x)),
+      }, candidateRuntimeEvidence(newer[0]));
+    }
     return {
       status: 'SKIP_METADATA_FALSE_POSITIVE',
       reason: 'MO2_SIGNAL_WITHOUT_NEWER_EXACT_OR_COMPATIBLE_FILE',

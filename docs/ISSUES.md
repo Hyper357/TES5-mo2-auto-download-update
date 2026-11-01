@@ -312,6 +312,52 @@ action : HOLD_COMPONENT_DISCOVERY
 
 ---
 
+## ISS-006 — 页面上确有更新的文件，却被当成"MO2 元数据虚警"静默跳过
+
+- **状态**：**FIXED（2026-11-01）**
+- **发现**：2026-11-01，用户列出 5 个"没探测到"的 mod（196449、193410、146873、184332、174017），质问原因
+- **影响面**：当日 32 条 `SKIP_METADATA_FALSE_POSITIVE` 里，**16 条**页面上确实存在更新的在架文件（含用户点名的 4 个）
+- **回归测试**：`scripts/test-update-eligibility.js`（`MO2_SIGNAL_WITH_NEWER_UNVERIFIED_FILE` 两条断言）
+
+### 症状
+
+```
+action : SKIP_METADATA_FALSE_POSITIVE
+reason : MO2_SIGNAL_WITHOUT_NEWER_EXACT_OR_COMPATIBLE_FILE
+MO2    : newestVersion > version（箭头亮着）
+实际    : 同页有更新的在架 MAIN 文件（例：193410 本地 1.0.16 → 页面 1.0.17 MAIN）
+结果    : 不进自动清单、也不进人工复核 —— 用户视角 = "没探测到"
+```
+
+### 根因
+
+两条门槛叠加：
+
+1. `fallbackNewerCandidate()` 要求 `scoreCandidate(...).score >= 58`。分数 = 名称相似度×70 + 分类/角色加成 + 新版本/新上传加成。当本地文件夹名被中文标签装饰、或归档名被压缩（`OutfitGallery` vs `Outfit Gallery`），相似度只有 0.19–0.50，**分数到不了 58**，候选被丢弃。
+2. 候选为空且 `mo2.signal` 为真时，`assessUpdateEligibility()` 直接返回 `SKIP_METADATA_FALSE_POSITIVE`（priority 5）—— 把"证据不够"误当成"MO2 在骗人"。
+
+实测（当日）：196449 sim 0.50（差一点点）、184332 sim 0.39、193410 sim 0.19。另有 174017 被 `version-downgrade` 误判（`2.2B` 的字母后缀被当成比 `2.2.2` 更新），同样落到这条分支。
+
+### 修复
+
+`mo2.signal` 分支里先做**页面级检查**：只要还有"在架（非 OLD_VERSION/ARCHIVED）且上传时间晚于已装精确文件"的文件，就返回
+
+```
+status     : HOLD_UPDATE_ELIGIBILITY
+reason     : MO2_SIGNAL_WITH_NEWER_UNVERIFIED_FILE
+target     : 最新的那个在架文件
+candidates : 最多 8 个在架候选（Review Center 可直接挑）
+```
+
+**依然不自动下载**——名字相似度仍然不算证据（ISS-001 的教训），只是不再把"有更新但我没法证明是同一个 artefact"静默丢掉。只有页面上连一个更新的在架文件都没有时，才继续判 `SKIP_METADATA_FALSE_POSITIVE`。
+
+### 遗留 / 未做
+
+- 版本比较把 `2.2B` 这类字母后缀当数字（`2.2B > 2.2.2`）。本次靠页面级兜底绕过，未改 `compareVersions` 本身（改动面大，需单独评估）。
+- 146873 属于另一种情况：本地装的 `2.0.8` 在 Nexus 文件表里不存在（`LOCAL_FILE_IDENTITY_UNRESOLVED`），需要人工确认装的是哪个档，工具无法自行收敛。
+
+---
+
 ## 待建条目（尚未编号，记录线索）
 
 - **多文件夹共用 modId 无自动检测**：`Horde`（2 夹）、`NAT Effect 11`（3 夹）、`Somewhere in Between`（3 夹）反复出现。目前只有 `LOCAL_MULTI_VERSION_IDENTITY` 在特定路径上拦截，没有全局体检。

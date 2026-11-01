@@ -374,4 +374,44 @@ function f(id, name, version, uploaded, categoryId = 1) {
   assert.strictEqual(runtimeEvidenceNote({ runtimeEvidence: {} }), '');
 }
 
+// ISS-006 regression: MO2 signals an update and the page really does carry a
+// newer active file, but the name-similarity score stays below the 58 bar
+// (Chinese-decorated local folder name vs a packed archive name). That must be
+// HOLD_UPDATE_ELIGIBILITY with the newer file attached, never a silent
+// "MO2 is lying" skip.
+{
+  const mine = f(700, '服装画廊 OutfitGallery 1.0.16', '1.0.16', '2026-10-16T14:36:00Z');
+  const next = f(701, 'OutfitGalleryX', '1.0.17', '2026-10-31T15:00:00Z');
+  const x = assessUpdateEligibility({
+    files: [mine, next],
+    fileUpdates: [],
+    mine,
+    meta: { version: '1.0.16.0', newestVersion: '1.0.17.0', nexusFileStatus: 4 },
+    localName: '服装画廊 — 可视化换装管理 — Outfit Gallery - Visual Outfit Manager — 【实用·工具】',
+    installationFile: 'OutfitGallery 1.0.16 193410 1.0.16 2026-10-16T14-36Z 8gJHT4ADH.zip',
+  });
+  assert.strictEqual(x.status, 'HOLD_UPDATE_ELIGIBILITY');
+  assert.strictEqual(x.reason, 'MO2_SIGNAL_WITH_NEWER_UNVERIFIED_FILE');
+  assert.strictEqual(String(x.target.fileId), '701');
+  assert.ok(x.evidence.includes('NEWER_FILE_UPLOADS_UNVERIFIED'));
+  assert.strictEqual(x.mo2.signal, true);
+}
+
+// The same MO2 signal without any newer active file stays a real false
+// positive (the arrow really is metadata noise).
+{
+  const mine = f(710, 'Quiet Main', '1.0', '2026-01-01T00:00:00Z');
+  const archived = { ...f(711, 'Quiet Main', '1.1', '2026-02-01T00:00:00Z'), category_id: 7, category_name: 'OLD_VERSION' };
+  const x = assessUpdateEligibility({
+    files: [mine, archived],
+    fileUpdates: [],
+    mine,
+    meta: { version: '1.0.0.0', newestVersion: '1.1.0.0', nexusFileStatus: 4 },
+    localName: 'Quiet Main',
+    installationFile: mine.file_name,
+  });
+  assert.strictEqual(x.status, 'SKIP_METADATA_FALSE_POSITIVE');
+  assert.strictEqual(x.reason, 'MO2_SIGNAL_WITHOUT_NEWER_EXACT_OR_COMPATIBLE_FILE');
+}
+
 console.log('update eligibility tests: OK');
