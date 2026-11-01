@@ -358,6 +358,58 @@ candidates : 最多 8 个在架候选（Review Center 可直接挑）
 
 ---
 
+## ISS-007 — 描述里"Requires Skyrim SE v1.7.104.0"没被识别，1.7 专用档下到了 1.6 上
+
+- **状态**：**FIXED（2026-11-01）**
+- **发现**：2026-11-01，用户质问「Fuz Ro D'oh 最新版是需要 v1.7.104.0 吧？你怎么下载下来了？」
+- **影响面**：所有写法为 "动词 + 版本分支名 + vX.Y.Z" 的运行时要求（`Requires Skyrim SE v1.7.104.0`、`Updated for compatibility with Skyrim SE v1.7.104`）。本次实际误下 1 项（15109 Fuz Ro D-oh 2.6），已隔离
+- **回归测试**：`scripts/test-runtime-compat.js`（`Requires Skyrim SE v1.7.104.0` 必须 reject；`v1.6.1170` / 多目标最小版 / 裸 `v1.7.104` 不误伤）
+
+### 症状
+
+`15109 Fuz Ro D-oh 2.6` 的 Nexus **文件描述**只有 29 个字符：
+
+```
+Requires Skyrim SE v1.7.104.0
+```
+
+本机 1.6.1170，却判成 `runtimeEvidence=NO_RUNTIME_CLAIM`、`compatRejects=[]`，走弱证据路径下载成功。
+
+### 根因（三条正则同时漏掉）
+
+1. 通用扫描 `\b(1\.[5-9]…)\b`：`v1.7` 里字母与数字之间没有 `\b`（这个抑制是**故意**的，为了不让 mod 自己的 `v1.9.1` 被当运行时）；
+2. 分支 tag 前瞻 `(?<=SE)\s*(1\.[5-9]…)`：`SE v1.7` 中间隔着 `v`，匹配不到；
+3. "for/requires" 短语只允许单个 `skyrim` token：`Requires Skyrim SE v…` 在 `Skyrim` 后多了一个 `SE` 就整条失败。
+
+结果：文本明明写着 1.7.104，解析出来的 required 列表是空的。
+
+### 修复
+
+`parseRequiredRuntimes()` 里给 `reHard` / `reFor` 加上可选的版本分支词序列：
+
+```
+EDITION_WORDS = (?:(?:skyrim|sse|se|ae|vr|gog|tes|the|game|
+                     special edition|anniversary edition)\s*){0,3}
+```
+
+`Requires Skyrim SE v1.7.104.0` → 命中 `reFor` → `1.7.104 > 1.6.1170` → `TARGET_REQUIRES_NEWER_RUNTIME` 硬拒。裸 `v1.7.104`（无动词、无分支词）仍然不认，避免把 mod 版本当运行时。
+
+### 处置
+
+误下的归档已**移入隔离区**（未删除，可复原）：
+
+```
+.runtime/quarantine/2026-11-01-fuz-ro-doh-1.7only/
+  Fuz Ro D'Oh 15109 2.6 … .7z
+  Fuz Ro D'Oh 15109 2.6 … .7z.meta
+```
+
+### 遗留 / 未做
+
+- 运行时门禁只读**文件**描述（`files[].description`），不读 mod 页面级 description；本次两种写法都在文件描述里所以够用，但页面级限制仍是个潜在盲点。
+
+---
+
 ## 待建条目（尚未编号，记录线索）
 
 - **多文件夹共用 modId 无自动检测**：`Horde`（2 夹）、`NAT Effect 11`（3 夹）、`Somewhere in Between`（3 夹）反复出现。目前只有 `LOCAL_MULTI_VERSION_IDENTITY` 在特定路径上拦截，没有全局体检。

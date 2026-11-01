@@ -447,4 +447,27 @@ try {
   resetRuntimeCache();
 }
 
+// ISS-007 regression: edition words between the verb and the version used to
+// defeat every pattern, so a 1.7.104-only build read as NO_RUNTIME_CLAIM and
+// was downloaded onto 1.6.1170 (modId 15109, Fuz Ro D-oh 2.6).
+{
+  const local = { skse: '2.2.6', runtime: '1.6.1170' };
+  const fuz = runtimeCompatRejects('Requires Skyrim SE v1.7.104.0', local);
+  assert.ok(
+    fuz.some(x => x.reason === 'TARGET_REQUIRES_NEWER_RUNTIME' && x.required === '1.7.104'),
+    'Requires Skyrim SE v1.7.104.0 must reject on 1.6.1170',
+  );
+  const updated = runtimeCompatRejects('Updated for compatibility with Skyrim SE v1.7.104', local);
+  assert.ok(updated.some(x => x.reason === 'TARGET_REQUIRES_NEWER_RUNTIME'));
+  // Same edition words, but a runtime this box satisfies: no reject.
+  assert.deepStrictEqual(runtimeCompatRejects('Requires Skyrim SE v1.6.1170', local), []);
+  // Multi-target lists still take the minimum.
+  assert.deepStrictEqual(
+    runtimeCompatRejects('For 1.5.97, 1.6.1170 and 1.7.104. Other versions may work but are not supported.', local),
+    [],
+  );
+  // A bare version with no verb phrase and no edition word stays unrecognized.
+  assert.deepStrictEqual(runtimeCompatRejects('v1.7.104', local), []);
+}
+
 console.log('runtime compat tests: OK');

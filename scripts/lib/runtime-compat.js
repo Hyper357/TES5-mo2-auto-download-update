@@ -306,8 +306,15 @@ function parseRequiredRuntimes(text) {
   // min-mentioned heuristic, because such texts often ALSO mention older
   // runtimes only as port suggestions ("Last Compatible 1.6 version: 2.0",
   // "for 1.5.97 use one of the ports").
+  // Edition words may sit between the verb and the version. "Requires Skyrim
+  // SE v1.7.104.0" used to miss every pattern: the generic \b scan cannot see
+  // "v1.7" (letter-digit boundary), the SE lookbehind needs the digits right
+  // after the tag, and this phrase only allowed a single "skyrim" token. The
+  // whole file went through as NO_RUNTIME_CLAIM and a 1.7-only build was
+  // downloaded onto 1.6.1170 (modId 15109, Fuz Ro D-oh 2.6 / ISS-007).
+  const EDITION_WORDS = '(?:(?:skyrim|sse|se|ae|vr|gog|tes|the|game|special\\s+edition|anniversary\\s+edition)\\s*){0,3}';
   const hardRuntimeVersions = [];
-  const reHard = /updated\s+for\s+(?:compatibility\s+with\s+)?(?:skyrim|sse|the\s+)?\s*(?:v|ver(?:sion)?)?\s*[:=]?\s*(\d\.\d+(?:\.\d+)*)/gi;
+  const reHard = new RegExp(`updated\\s+for\\s+(?:compatibility\\s+with\\s+)?${EDITION_WORDS}\\s*(?:v|ver(?:sion)?)?\\s*[:=]?\\s*(\\d\\.\\d+(?:\\.\\d+)*)`, 'gi');
   while ((m = reHard.exec(t))) hardRuntimeVersions.push(m[1]);
   // Chinese equivalent: "适配SE1.7" states the runtime THIS build targets.
   // Unlike the English phrase, texts may list several targets ("适配1.6.1170、
@@ -328,7 +335,7 @@ function parseRequiredRuntimes(text) {
   // 1.6.1130" passes, and multi-target lists ("for 1.6.1170 and 1.7.104")
   // take the minimum.
   const forRuntimeVersions = [];
-  const reFor = /\b(?:for|requires?)\b\s*:?\s*(?:skyrim\s*)?v?\s*(1\.[5-9]\.\d{3,4})\b/gi;
+  const reFor = new RegExp(`\\b(?:for|requires?)\\b\\s*:?\\s*${EDITION_WORDS}\\s*v?\\s*(1\\.[5-9]\\.\\d{3,4})\\b`, 'gi');
   while ((m = reFor.exec(t))) forRuntimeVersions.push(m[1]);
   // "Added support for Skyrim 1.7.99, previous versions are still compatible":
   // the new-version mention is additive, not exclusive — drop it so the
