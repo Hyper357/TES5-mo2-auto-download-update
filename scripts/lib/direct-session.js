@@ -139,36 +139,64 @@ async function clickDownloadControl(page) {
   });
 }
 
-async function extractSignedNxmFast(page, modId, fileId, { timeoutMs = 25000 } = {}) {
-  let captured = '';
-  const onRequest = req => {
-    const u = String(req.url() || '');
-    if (!captured && u.startsWith('nxm://')) captured = u;
-  };
-  page.on('request', onRequest);
-  let clicked = false;
-  try {
-    const target = `https://www.nexusmods.com/${GAME_DOMAIN}/mods/${modId}?tab=files&file_id=${fileId}&nmm=1`;
-    await page.goto(target, { waitUntil: 'domcontentloaded', timeout: 90000 });
-    const deadline = Date.now() + timeoutMs;
-    while (Date.now() < deadline) {
-      if (captured) return captured;
-      const nxm = await readSignedNxm(page);
-      if (nxm) return nxm;
-      if (!clicked) {
-        const control = await clickDownloadControl(page);
-        if (control) clicked = true;
+// A Nexus mod page is a client-side app: it renders its file table, then may
+// route/re-render while we are already polling it. Puppeteer surfaces that as
+// "Execution context was destroyed, most likely because of a navigation", which
+// used to abort the whole one-mod download before the file list even existed
+// (2026-11-02: all 11 downloads in a batch died that way). Navigation during a
+// poll is expected, not fatal: wait for the new context and keep polling.
+function isNavigationError(err) {
+  const msg = String((err && err.message) || '');
+  return /Execution context was destroyed|Cannot find context|Target closed|Session closed|navigating frame|frame was removed|detached/i.test(msg);
+}
+
+async function extractSignedNxmFast(page, modId, fileId, { timeoutMs = 25000, attempts = 2 } = {}) {
+  const target = `https://www.nexusmods.com/${GAME_DOMAIN}/mods/${modId}?tab=files&file_id=${fileId}&nmm=1`;
+  let lastError = null;
+  for (let attempt = 1; attempt <= attempts; attempt++) {
+    let captured = '';
+    const onRequest = req => {
+      const u = String(req.url() || '');
+      if (!captured && u.startsWith('nxm://')) captured = u;
+    };
+    page.on('request', onRequest);
+    try {
+      await page.goto(target, { waitUntil: 'domcontentloaded', timeout: 90000 });
+      const deadline = Date.now() + timeoutMs;
+      let clicked = false;
+      let navigations = 0;
+      while (Date.now() < deadline) {
+        if (captured) return captured;
+        try {
+          const nxm = await readSignedNxm(page);
+          if (nxm) return nxm;
+          if (!clicked) {
+            const control = await clickDownloadControl(page);
+            if (control) clicked = true;
+          }
+        } catch (err) {
+          if (!isNavigationError(err)) throw err;
+          navigations++;
+          await sleep(400);
+          continue;
+        }
+        await sleep(clicked ? 120 : 160);
       }
-      await sleep(clicked ? 120 : 160);
+      // A page that kept re-navigating never got a fair chance to render the
+      // file table; one clean reload usually settles it.
+      const e = new Error(clicked
+        ? 'NXM_EXTRACT_FAILED: download control clicked but no signed nxm URL appeared'
+        : 'NXM_DOWNLOAD_CONTROL_MISSING: no Slow download / Mod manager download control found');
+      e.code = clicked ? 'NXM_EXTRACT_FAILED' : 'NXM_DOWNLOAD_CONTROL_MISSING';
+      e.navigations = navigations;
+      lastError = e;
+      if (attempt === attempts) throw e;
+      await sleep(700);
+    } finally {
+      page.off('request', onRequest);
     }
-    const e = new Error(clicked
-      ? 'NXM_EXTRACT_FAILED: download control clicked but no signed nxm URL appeared'
-      : 'NXM_DOWNLOAD_CONTROL_MISSING: no Slow download / Mod manager download control found');
-    e.code = clicked ? 'NXM_EXTRACT_FAILED' : 'NXM_DOWNLOAD_CONTROL_MISSING';
-    throw e;
-  } finally {
-    page.off('request', onRequest);
   }
+  throw lastError || new Error('NXM_EXTRACT_FAILED: no attempt completed');
 }
 
 function normalizePageCount(value) {
@@ -366,6 +394,7 @@ module.exports = {
   testArchive,
   withTargetLock,
   extractSignedNxmFast,
+  isNavigationError,
   normalizePageCount,
   createDirectSession,
   closeDirectSession,

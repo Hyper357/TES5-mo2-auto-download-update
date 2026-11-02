@@ -11,6 +11,7 @@ const { runNode } = require('./lib/process-runner');
 const { getCdpUrl } = require('./lib/browser-session');
 const { readApiKey, createFilesClient } = require('./lib/nexus-api');
 const { scanExactDownload } = require('./lib/download-guard');
+const { extractSignedNxmFast } = require('./lib/direct-session');
 const {
   configureDirectNxmTarget,
   launchNxmDirect,
@@ -134,38 +135,13 @@ async function clickDownloadControl(page) {
 async function extractSignedNxm(browser, modId, fileId) {
   const page = await browser.newPage();
   await page.setViewport({ width: 1500, height: 950 });
-  let captured = '';
-  const onRequest = req => {
-    const u = String(req.url() || '');
-    if (!captured && u.startsWith('nxm://')) captured = u;
-  };
-  page.on('request', onRequest);
   try {
-    const target = `https://www.nexusmods.com/${DOMAIN}/mods/${modId}?tab=files&file_id=${fileId}&nmm=1`;
-    await page.goto(target, { waitUntil: 'domcontentloaded', timeout: 90000 });
-    await sleep(2500);
-
-    let nxm = await readSignedNxm(page);
-    if (nxm) return nxm;
-
-    const clicked = await clickDownloadControl(page);
-    if (!clicked) {
-      const e = new Error('NXM_DOWNLOAD_CONTROL_MISSING: no Slow download / Mod manager download control found in light or shadow DOM');
-      e.code = 'NXM_DOWNLOAD_CONTROL_MISSING';
-      throw e;
-    }
-
-    for (let i = 0; i < 36; i++) {
-      if (captured) return captured;
-      nxm = await readSignedNxm(page);
-      if (nxm) return nxm;
-      await sleep(500);
-    }
-    const e = new Error('NXM_EXTRACT_FAILED: download control was clicked but no signed nxm URL appeared');
-    e.code = 'NXM_EXTRACT_FAILED';
-    throw e;
+    // One implementation, one set of navigation-race guards: the Nexus mod page
+    // re-renders itself while we poll it, which used to abort every download in
+    // a batch with "Execution context was destroyed" (ISS-008). The direct
+    // session extractor already waits through those re-renders.
+    return await extractSignedNxmFast(page, modId, fileId, { timeoutMs: 30000, attempts: 2 });
   } finally {
-    page.off('request', onRequest);
     await page.close().catch(() => {});
   }
 }

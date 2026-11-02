@@ -410,6 +410,39 @@ EDITION_WORDS = (?:(?:skyrim|sse|se|ae|vr|gog|tes|the|game|
 
 ---
 
+## ISS-008 — Nexus 页面重渲染时 "Execution context was destroyed" 直接中断整批下载
+
+- **状态**：**FIXED（2026-11-02）**
+- **发现**：2026-11-02，11 个自动项一次性全部失败，同一个错误
+- **影响面**：任何一批下载；当天 11/11 全灭
+- **回归测试**：`scripts/test-direct-session-pool.js`（`isNavigationError` 六条断言）
+
+### 症状
+
+```
+❌ SMOKE FAILED: Execution context was destroyed, most likely because of a navigation.
+```
+
+11 个 mod 全部如此，没有一个走到真正的下载阶段。
+
+### 根因
+
+Nexus 的 mod 页是客户端渲染的 SPA：`extractSignedNxm` 用 `domcontentloaded` 返回后立刻轮询/点击，而此时页面仍在重新路由渲染 → puppeteer 的 `page.evaluate` 抛 "Execution context was destroyed"。旧代码把这个**预期中的重渲染**当成致命错误直接向上抛，于是整项失败（换来的错误信息还看不出是页面在动，而不是下载坏了）。
+
+另外 `scripts/smoke-download.js` 里有一份**平行实现**的提取器，与 `lib/direct-session.js` 的那份逻辑不同步，修复必须同时覆盖，否则单文件工具仍然走旧逻辑。
+
+### 修复
+
+- `extractSignedNxmFast()`：轮询期间捕获"导航类"错误（`Execution context was destroyed` / `Cannot find context` / `Target closed` / `detached` 等），等待 400ms 后继续，而不是直接失败；整段提取带一次有界重试（`attempts`）。
+- 新增并导出 `isNavigationError()`，作为可测试的判定。
+- `smoke-download.js` 的 `extractSignedNxm()` 改为**复用** `extractSignedNxmFast()`，删掉平行实现，避免两份逻辑再次漂移。
+
+### 遗留 / 未做
+
+- 同日稍晚 Nexus 对托管浏览器返回 **Cloudflare 安全验证页**（`正在进行安全验证`，Ray ID 记录在案）。那是网络层的反自动化挑战，**不是本缺陷**，也不能由代码绕过：必须在这个浏览器窗口里人工完成验证（然后再登录 Nexus）。验证未过时所有页面只返回挑战页，表现为"页面空白 / 没有登录表单 / 没有下载按钮"。
+
+---
+
 ## 待建条目（尚未编号，记录线索）
 
 - **多文件夹共用 modId 无自动检测**：`Horde`（2 夹）、`NAT Effect 11`（3 夹）、`Somewhere in Between`（3 夹）反复出现。目前只有 `LOCAL_MULTI_VERSION_IDENTITY` 在特定路径上拦截，没有全局体检。

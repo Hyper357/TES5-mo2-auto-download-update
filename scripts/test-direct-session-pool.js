@@ -2,11 +2,26 @@
 'use strict';
 
 const assert = require('assert');
-const { normalizePageCount, withTargetLock } = require('./lib/direct-session');
+const { normalizePageCount, withTargetLock, isNavigationError } = require('./lib/direct-session');
 
 assert.strictEqual(normalizePageCount(0), 1);
 assert.strictEqual(normalizePageCount(2), 2);
 assert.strictEqual(normalizePageCount(99), 3);
+
+// ISS-008: a client-side re-render of the Nexus mod page destroys the JS
+// execution context. That is an expected mid-poll event and must be classified
+// as retryable, not surfaced as a hard download failure.
+{
+  assert.strictEqual(
+    isNavigationError(new Error('Execution context was destroyed, most likely because of a navigation.')),
+    true,
+  );
+  assert.strictEqual(isNavigationError(new Error('Cannot find context with specified id')), true);
+  assert.strictEqual(isNavigationError(new Error('Target closed')), true);
+  assert.strictEqual(isNavigationError(new Error('NXM_DOWNLOAD_CONTROL_MISSING: no Slow download')), false);
+  assert.strictEqual(isNavigationError(new Error('DIRECT_TARGET_ARCHIVED: 1:2')), false);
+  assert.strictEqual(isNavigationError(null), false);
+}
 
 (async () => {
   const events = [];
