@@ -433,4 +433,41 @@ function f(id, name, version, uploaded, categoryId = 1) {
   assert.strictEqual(x.reason, 'MO2_SIGNAL_WITHOUT_NEWER_EXACT_OR_COMPATIBLE_FILE');
 }
 
+// ISS-009 regression: the installed archive no longer exists on the page (the
+// author deleted it without a file_updates edge), so exact identity is
+// unprovable. The installed archive name still names the product, so a newer
+// same-family file becomes a HOLD with a concrete target -- not an opaque
+// "local identity unresolved" (modId 146873: local 2.0.8 -> page 2.0.9).
+{
+  const newer = f(823459, 'Core Impact Framework - Latest Version', '2.0.9', '2026-10-20T19:43:00Z');
+  const older = { ...f(801478, 'Core Impact Framework - Version 2.0.7', '2.0.7', '2026-09-06T21:49:00Z'), category_id: 6, category_name: 'OLD_VERSION' };
+  const x = assessUpdateEligibility({
+    files: [newer, older],
+    fileUpdates: [],
+    mine: null,
+    meta: { version: '2.0.8.0', newestVersion: '2.0.9.0', nexusFileStatus: 4 },
+    localName: '核心冲击框架 — Core Impact Framework (CIF)',
+    installationFile: 'Core Impact Framework - Latest Version 146873 2.0.8 2026-10-19T22-01Z 31i7Ioq4N.zip',
+  });
+  assert.strictEqual(x.status, 'HOLD_UPDATE_ELIGIBILITY');
+  assert.strictEqual(x.reason, 'LOCAL_FILE_IDENTITY_INFERRED');
+  assert.strictEqual(String(x.target.fileId), '823459');
+  assert.ok(x.evidence.includes('INSTALLATION_FILE_FAMILY_MATCH'));
+}
+
+// Without any name relation to the page, the honest answer stays unresolved.
+{
+  const newer = f(823459, 'Core Impact Framework - Latest Version', '2.0.9', '2026-10-20T19:43:00Z');
+  const x = assessUpdateEligibility({
+    files: [newer],
+    fileUpdates: [],
+    mine: null,
+    meta: { version: '1.0.0.0', newestVersion: '1.0.0.0', nexusFileStatus: 1 },
+    localName: 'Totally Different Mod',
+    installationFile: 'Totally Different Mod 99999 1.0 2026-01-01T00-00Z abc.zip',
+  });
+  assert.strictEqual(x.reason, 'LOCAL_FILE_IDENTITY_UNRESOLVED');
+  assert.strictEqual(x.target, null);
+}
+
 console.log('update eligibility tests: OK');

@@ -470,9 +470,59 @@ function localConflictDecision({ conflict, target, mo2, sourceEvidence }) {
   };
 }
 
+// When the installed archive disappeared from the Nexus file table, the exact
+// "mine" record is gone, but meta.ini still carries its archive name and
+// version. If a still-active file of the SAME product family is a real version
+// step forward, that is usable weak evidence: a HOLD with a concrete target,
+// never an auto-download (the exact installed archive is unprovable).
+function identityInferredTarget({ files, meta, installationFile = '', localName = '' }) {
+  const installedVersion = meta?.version || meta?.installedVersion || '';
+  const installedCore = versionCore(installedVersion);
+  if (!installedCore || !installationFile) return null;
+  const pseudoLocal = { name: localName, file_name: installationFile };
+  const family = (files || []).filter((f) => {
+    if (!f || !isActive(f)) return false;
+    if (!sameProductFamily(pseudoLocal, f)) return false;
+    const core = versionCore(f.version);
+    if (!core || compareNumericVersions(core, installedCore) <= 0) return false;
+    const gate = candidateCompatGate({ file: f, mine: null, localName, installationFile });
+    return gate.rejects.length === 0;
+  });
+  if (!family.length) return null;
+  family.sort((a, b) =>
+    compareVersions(String(b.version || ''), String(a.version || '')) ||
+    uploadedMs(b) - uploadedMs(a) ||
+    Number(b.file_id || 0) - Number(a.file_id || 0));
+  const topVersion = String(family[0].version || '');
+  const sameVersion = family.filter((f) => String(f.version || '') === topVersion);
+  if (sameVersion.length > 1) {
+    return { candidate: null, ranked: family.slice(0, 8), ambiguous: true };
+  }
+  return { candidate: family[0], ranked: family.slice(0, 8), ambiguous: false };
+}
+
 function assessUpdateEligibility({ files = [], fileUpdates = [], mine, meta = {}, localName = '', installationFile = '', profile = null }) {
   const mo2 = mo2UpdateSignal(meta);
   if (!mine) {
+    // The installed archive is not in the Nexus file table any more: the author
+    // deleted/replaced it without a file_updates edge (modId 146873: local
+    // v2.0.8 was removed, page now only has v2.0.9). Exact identity cannot be
+    // proven, but the installed archive NAME still names the product, so a
+    // same-family newer file is usable weak evidence -- surface it as a HOLD
+    // with a concrete target instead of an opaque "identity unresolved".
+    const inferred = identityInferredTarget({ files, meta, installationFile, localName });
+    if (inferred) {
+      return withRuntimeEvidence({
+        status: 'HOLD_UPDATE_ELIGIBILITY',
+        reason: 'LOCAL_FILE_IDENTITY_INFERRED',
+        updateNeeded: false,
+        priority: mo2.signal ? 65 : 45,
+        mo2,
+        target: inferred.candidate ? compactFile(inferred.candidate) : null,
+        evidence: ['INSTALLATION_FILE_FAMILY_MATCH', ...(mo2.signal ? ['MO2_UPDATE_SIGNAL'] : [])],
+        candidates: inferred.ranked.map(x => compactFile(x)),
+      }, inferred.candidate ? candidateRuntimeEvidence(inferred.candidate) : null);
+    }
     return {
       status: 'HOLD_UPDATE_ELIGIBILITY',
       reason: 'LOCAL_FILE_IDENTITY_UNRESOLVED',
@@ -745,6 +795,7 @@ module.exports = {
   candidateRuntimeEvidence,
   candidateCompatRejects,
   candidateCompatGate,
+  identityInferredTarget,
   runtimeEvidenceNote,
   assessUpdateEligibility,
   eligibilityCounts,

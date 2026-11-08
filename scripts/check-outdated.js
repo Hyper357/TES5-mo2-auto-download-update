@@ -14,7 +14,7 @@ const { readApiKey, createFilesClient } = require('./lib/nexus-api');
 const { defaultPolicyFile, loadVariantPolicies, getVariantPolicy, resolveVariantPolicy } = require('./lib/variant-policy');
 const { classifyComponent, componentFamily } = require('./lib/component-discovery');
 const { buildEnvironmentGraph, enabledContextNames, compactEnvironmentSummary, normalizeName } = require('./lib/mo2-environment');
-const { assessUpdateEligibility, eligibilityCounts, runtimeEvidenceNote } = require('./lib/update-eligibility');
+const { assessUpdateEligibility, eligibilityCounts, runtimeEvidenceNote, identityInferredTarget } = require('./lib/update-eligibility');
 
 const rootDir = path.resolve(__dirname, '..');
 const modsDir = process.argv[2];
@@ -260,15 +260,35 @@ async function main() {
 
         const resolved = resolveInstalledFile(files, r);
         if (!resolved.mine) {
-          const eligibility = {
-            status: 'HOLD_UPDATE_ELIGIBILITY',
-            reason: resolved.reason === 'MULTI_SOURCE' ? 'LOCAL_MULTI_SOURCE_IDENTITY' : 'LOCAL_FILE_IDENTITY_UNRESOLVED',
-            updateNeeded: false,
-            priority: 65,
-            mo2: null,
-            target: null,
-            evidence: [],
-          };
+          // ISS-009: the installed archive is gone from the file table, so the
+          // exact "mine" record cannot be resolved. Its archive NAME still
+          // identifies the product, so a same-family newer file is usable weak
+          // evidence: surface it as a HOLD with a concrete target instead of an
+          // opaque "identity unresolved" that nobody can act on.
+          const inferred = identityInferredTarget({ files, meta: r, installationFile: r.instFile, localName: r.name });
+          const inferredTarget = inferred && inferred.candidate ? inferred.candidate : null;
+          const eligibility = inferred
+            ? {
+                status: 'HOLD_UPDATE_ELIGIBILITY',
+                reason: 'LOCAL_FILE_IDENTITY_INFERRED',
+                updateNeeded: false,
+                priority: 65,
+                mo2: null,
+                target: inferredTarget
+                  ? { fileId: String(inferredTarget.file_id), version: inferredTarget.version || '', name: inferredTarget.name || '', fileName: inferredTarget.file_name || '' }
+                  : null,
+                evidence: ['INSTALLATION_FILE_FAMILY_MATCH'],
+                candidates: (inferred.ranked || []).map(f => ({ fileId: String(f.file_id), version: f.version || '', name: f.name || '' })),
+              }
+            : {
+                status: 'HOLD_UPDATE_ELIGIBILITY',
+                reason: resolved.reason === 'MULTI_SOURCE' ? 'LOCAL_MULTI_SOURCE_IDENTITY' : 'LOCAL_FILE_IDENTITY_UNRESOLVED',
+                updateNeeded: false,
+                priority: 65,
+                mo2: null,
+                target: null,
+                evidence: [],
+              };
           results.push({
             ...r,
             action: 'HOLD_UPDATE_ELIGIBILITY',

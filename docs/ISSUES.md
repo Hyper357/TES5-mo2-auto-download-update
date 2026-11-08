@@ -443,6 +443,48 @@ Nexus 的 mod 页是客户端渲染的 SPA：`extractSignedNxm` 用 `domcontentl
 
 ---
 
+## ISS-009 — 作者删掉旧档后，本地身份"无法解析"把真实更新变成不可操作
+
+- **状态**：**FIXED（2026-11-08）**
+- **发现**：2026-11-08，用户问「modId 146873 最新版 2.0.9 怎么没检测到」
+- **影响面**：已装归档被作者从 Nexus 文件表删除、且没有 `file_updates` 取代记录的情况。当日全库 1 项（146873），另有 64 项仍无法推断（档案名与页面文件对不上，属正常拒绝）
+- **回归测试**：`scripts/test-update-eligibility.js`（`LOCAL_FILE_IDENTITY_INFERRED` 命中 + 无关系时仍 `LOCAL_FILE_IDENTITY_UNRESOLVED`）
+
+### 症状
+
+```
+action : HOLD_UPDATE_ELIGIBILITY
+reason : LOCAL_FILE_IDENTITY_UNRESOLVED
+target : null
+本地   : 2.0.8（installationFile = Core Impact Framework - Latest Version 146873 2.0.8 … 31i7Ioq4N.zip）
+Nexus  : 页面只剩 2.0.9 MAIN / 2.0.7 OLD / 1.2.8 OLD / examples；2.0.8 已被作者删除，且无 replaced-by 链
+```
+
+结果是：明明页面上有 2.0.9，工具却连"该下哪个文件"都不给，用户视角就是"没检测到"。
+
+### 根因
+
+两层短路：
+
+1. `check-outdated.js` 在 `resolveInstalledFile()` 拿不到 `mine` 时**直接构造 HOLD 并 continue**，根本不调用 `assessUpdateEligibility()`；
+2. 即使调用了，`assessUpdateEligibility()` 的 `!mine` 分支也只返回 `LOCAL_FILE_IDENTITY_UNRESOLVED`（`target: null`）。
+
+精确身份确实无法证明（作者删档 + 无官方链），但 `meta.ini` 的**安装档名**仍然带着产品名，足以判断"同页哪个文件是同一产品的更高版本"。
+
+### 修复
+
+- `update-eligibility.js`：新增并导出 `identityInferredTarget()`——用安装档名做产品族匹配（≥4 字符 token）、要求数值版本核心前进、过运行时门禁；同版本出现多个并列文件时只给候选不给目标。
+- `assessUpdateEligibility()` 的 `!mine` 分支：命中时返回 `LOCAL_FILE_IDENTITY_INFERRED`（带 `target` + `candidates`），仍是 **HOLD，不自动下载**。
+- `check-outdated.js`：`!resolved.mine` 分支改为先尝试推断，命中则写入 `LOCAL_FILE_IDENTITY_INFERRED` 与 `manualReview`，不再无条件短路。
+- `audit-problems.js`：新原因归入 `SUSPECT_UPDATE`（"可精确下载"组），巡检时直接给出目标。
+
+### 遗留 / 未做
+
+- 仍无法推断的 64 项保持 `LOCAL_FILE_IDENTITY_UNRESOLVED`：档案名与页面文件没有任何共同产品 token（多为重命名、汉化整合包、自打包），保守拒绝是对的。
+- 推断是弱证据，永不自动下载；安装新版后仍需人工确认旧目录被正确替换。
+
+---
+
 ## 待建条目（尚未编号，记录线索）
 
 - **多文件夹共用 modId 无自动检测**：`Horde`（2 夹）、`NAT Effect 11`（3 夹）、`Somewhere in Between`（3 夹）反复出现。目前只有 `LOCAL_MULTI_VERSION_IDENTITY` 在特定路径上拦截，没有全局体检。
