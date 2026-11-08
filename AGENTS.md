@@ -176,6 +176,13 @@ npm run browser:status
 
 Browser/profile mismatch is a hard gate. Never attach automation CDP to the user's normal browser profile.
 
+Nexus sign-in for the managed browser lives on the SSO host: `https://users.nexusmods.com/auth/sign_in`. The old `www.nexusmods.com/.../users/sign-in` path now returns "Page not found", so pointing the operator there just wastes their time. Two states are NOT the same thing and neither is a code path:
+
+- a Cloudflare "正在进行安全验证 / Ray ID …" page → a human must clear the challenge in the managed window;
+- a normal page whose header shows `Log in` and whose file rows/buttons are missing → the session expired, the operator logs in again on the SSO host.
+
+Verify with a real mod `?tab=files` page: header `UPLOAD A MOD` plus `Manual download` / `Mod manager download` buttons means logged in.
+
 Current exact download architecture is:
 
 ```text
@@ -262,7 +269,9 @@ See `docs/DEBUG_PLAYBOOK.md` after a concrete errorCode is known.
 
 `RUN`: bootstrap/brief → `npm run update` → brief/report. Do not run full tests when code did not change.
 
-`AUDIT`: bootstrap/brief → `npm run audit` → `npm run audit:problems` → report. No download.
+`AUDIT`: bootstrap/brief → `npm run audit` → `npm run audit:problems` → `npm run review:open` → report. No download.
+
+The Review Center HTML must be **opened for the operator**, not just printed. Audit mode only writes the path to stdout, so run `npm run review:open` (latest run, or `--run <dir>`) every round — the human never has to ask where the HTML went.
 
 The problem sweep is mandatory, not optional. Every audit report must state which rows are NOT auto-downloadable and why: suspect updates whose exact target file is known, weak evidence, ambiguous candidates, component holds, unresolved local identity, runtime/edition gates, API blind spots, and mods with no Nexus modId. Never wait for the user to notice a missing update and come back for it — surface it in the same turn, with the exact `modId:fileId` when the sweep already knows it.
 
