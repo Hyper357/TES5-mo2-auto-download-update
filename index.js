@@ -107,6 +107,15 @@ async function run() {
   runNode(checkArgs);
   logger.info('SCAN', 'planning scan completed', { report: files.plan });
 
+  // API-level coverage: a throttled Nexus API (HTTP 429 / Cloudflare 1015) leaves
+  // hundreds of rows as HOLD_API_ERROR. Those rows were never analysed, so the
+  // up-to-date count collapses while the remaining auto list still looks sure.
+  // Counted here so the verdict below can be marked untrustworthy (ISS-010).
+  const planDoc = loadJson(files.plan, { rows: [] });
+  const planRows = Array.isArray(planDoc.rows) ? planDoc.rows : (Array.isArray(planDoc.items) ? planDoc.items : []);
+  const apiErrors = planRows.filter((r) => String((r.updateEligibility || {}).reason || '') === 'API_ERROR').length;
+  if (apiErrors) console.error(`  ⚠️ Nexus API 返回错误的行: ${apiErrors}/${planRows.length}`);
+
   console.log('\n[Step 2/9] Patch Discovery Graph：自动项 + 延期人工项全部扫描...');
   // The browser is started by run-workflow before the long planning scan, but it
   // can die while that scan runs (a 2-minute quiet gap is enough). Component
@@ -133,25 +142,39 @@ async function run() {
     browserErrored: discoverySummary.browserErrored,
     browserTargets: discoverySummary.browserTargets,
     targets: discoverySummary.targets,
+    apiErrors,
+    totalRows: planRows.length,
   });
   const coverageDegraded = coverage.degraded;
   if (coverageDegraded) {
+    if (coverage.kind === 'API_RATE_LIMITED') {
+      logger.error('SCAN', 'Nexus API rate-limited during the planning scan', {
+        errorCode: 'API_RATE_LIMITED', layer: 'API', action: 'retry-later',
+        affected: coverage.affected, totalRows: planRows.length,
+      });
+      console.error(`  ❌ API_RATE_LIMITED: ${coverage.affected}/${planRows.length} 行的 Nexus API 查询失败（429/超时）。`);
+      console.error('     这些 mod 根本没被分析过，所以"自动项只有 N 个"不代表真实清单。');
+      console.error('     → 等限流窗口过去后重跑；不要把这一轮的数字当结论。');
+      // Skip the browser-specific reporting below; this run failed earlier.
+    }
     const detail = String(discoverySummary.browserError || '').slice(0, 200);
     const e = classifyFailure(`BROWSER_UNAVAILABLE_FOR_COVERAGE ${detail || 'page scrape failed'}`);
-    logger.error('PATCH_DISCOVERY', 'component discovery ran without usable browser coverage', {
-      errorCode: e.code, layer: e.layer, action: e.action,
-      kind: coverage.kind, affected: coverage.affected, error: detail,
-      samples: discoverySummary.browserErrorSamples || [],
-    });
-    if (coverage.kind === 'BROWSER_UNAVAILABLE') {
-      console.error(`  ❌ BROWSER_UNAVAILABLE_FOR_COVERAGE: ${coverage.affected} 个目标无法做覆盖率检查（${detail || '无详情'}）`);
-    } else {
-      console.error(`  ❌ BROWSER_UNAVAILABLE_FOR_COVERAGE: ${coverage.affected}/${discoverySummary.targets || '?'} 个目标页面抓取失败（浏览器已连上但取不到页面）`);
-      for (const s of (discoverySummary.browserErrorSamples || []).slice(0, 3)) {
-        console.error(`       modId ${s.modId}: ${s.detail}`);
+    if (coverage.kind !== 'API_RATE_LIMITED') {
+      logger.error('PATCH_DISCOVERY', 'component discovery ran without usable browser coverage', {
+        errorCode: e.code, layer: e.layer, action: e.action,
+        kind: coverage.kind, affected: coverage.affected, error: detail,
+        samples: discoverySummary.browserErrorSamples || [],
+      });
+      if (coverage.kind === 'BROWSER_UNAVAILABLE') {
+        console.error(`  ❌ BROWSER_UNAVAILABLE_FOR_COVERAGE: ${coverage.affected} 个目标无法做覆盖率检查（${detail || '无详情'}）`);
+      } else {
+        console.error(`  ❌ BROWSER_UNAVAILABLE_FOR_COVERAGE: ${coverage.affected}/${discoverySummary.targets || '?'} 个目标页面抓取失败（浏览器已连上但取不到页面）`);
+        for (const s of (discoverySummary.browserErrorSamples || []).slice(0, 3)) {
+          console.error(`       modId ${s.modId}: ${s.detail}`);
+        }
       }
+      console.error('     → 这些目标的 HOLD 与"无可下载"结论不可信，不要当作真实结果。');
     }
-    console.error('     → 这些目标的 HOLD 与"无可下载"结论不可信，不要当作真实结果。');
   }
 
   console.log('\n[Step 3/9] 审计 REQUIRED aux 的精确 modId/fileId/version...');

@@ -55,6 +55,19 @@ assert.strictEqual(badCoverage.complete,false);assert.strictEqual(badCoverage.co
 
   // 5. Older callers that do not pass the new fields must not be flagged.
   assert.strictEqual(summarizeCoverageDegradation({}).degraded,false);
+
+  // 6. ISS-010: the Nexus API throttled us (HTTP 429 / Cloudflare 1015) and 687
+  // of 2054 rows were never analysed -- that must not look like a clean audit.
+  const throttled=summarizeCoverageDegradation({apiErrors:687,totalRows:2054});
+  assert.strictEqual(throttled.degraded,true,'API rate limiting must mark the run untrustworthy');
+  assert.strictEqual(throttled.kind,'API_RATE_LIMITED');
+  assert.strictEqual(throttled.affected,687);
+
+  // 7. A handful of 403s on a large library stays below the noise threshold.
+  assert.strictEqual(summarizeCoverageDegradation({apiErrors:10,totalRows:2000}).degraded,false);
+
+  // 8. Browser evidence still wins over API noise.
+  assert.strictEqual(summarizeCoverageDegradation({browserUnavailable:true,apiErrors:10,totalRows:2000}).kind,'BROWSER_UNAVAILABLE');
 }
 
 console.log('patch discovery tests: OK');

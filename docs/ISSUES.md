@@ -485,6 +485,46 @@ Nexus  : 页面只剩 2.0.9 MAIN / 2.0.7 OLD / 1.2.8 OLD / examples；2.0.8 已�
 
 ---
 
+## ISS-010 — Nexus API 限流(429/1015)时，"只分析了三分之一"仍被报成干净审计
+
+- **状态**：**FIXED（2026-11-14）**
+- **发现**：2026-11-14，例行 audit 报告 `自动项=14`，但同一次运行的 `HOLD_API_ERROR` 从常态 30 飙到 **687**、`SKIP_UP_TO_DATE` 从 1733 掉到 1134，`coverageDegraded` 却是 `false`
+- **影响面**：任何被 Nexus 限流的 audit；这次 687/2056 行（33%）根本没被分析
+- **回归测试**：`scripts/test-patch-discovery.js`（`API_RATE_LIMITED` 三条断言）
+
+### 症状
+
+```
+counts {"DOWNLOAD":14,"HOLD_UPDATE_ELIGIBILITY":199,"HOLD_API_ERROR":687,"SKIP_UP_TO_DATE":1134,...}
+coverageDegraded: false        ← 看起来是一次正常审计
+```
+
+直接用 API 复测：`HTTP 429`，响应体 `error code: 1015`（Cloudflare 限流）。
+
+### 根因
+
+`summarizeCoverageDegradation()` 只看**浏览器**覆盖率（`browserUnavailable` / `browserErrored`），完全不看 API 层失败。限流时：
+
+1. `check-outdated.js` 把每个查询失败的 mod 记成 `HOLD_API_ERROR`（这是对的）；
+2. 但这些行从未被分析，`SKIP_UP_TO_DATE` 塌陷、自动项变少；
+3. 报告仍然以 exit 0 收尾，显示"干净审计"。
+
+同一类"静默覆盖率缺口"，第三个变种（前两个是 2026-10-18 的浏览器不可达、2026-10-29 的分页抓取失败）。
+
+### 修复
+
+- `coverage-degradation.js`：新增 `apiErrors` / `totalRows` 输入；`apiErrors >= 50` 或占比 `> 5%` → `degraded: true`，`kind: 'API_RATE_LIMITED'`。浏览器类错误优先级不变（浏览器证据先判）。
+- `index.js`：扫描完立刻按 `updateEligibility.reason === 'API_ERROR'` 统计，传给判定；命中时打印
+  `❌ API_RATE_LIMITED: 687/2056 行的 Nexus API 查询失败`，并沿用既有 `coverageDegraded` 通道把退出码置 3（"结果不可信"）。
+- 报告语义：这次运行的数字**不能**当作"今天没有别的更新"。
+
+### 遗留 / 未做
+
+- 失败行仍只写 `reason=API_ERROR`，没有分离 429 / 403 / timeout。要区分，需要在 `nexus-api.js` 把 HTTP 状态一路带到行上（改动面较大，另开条目）。
+- 限流窗口通常几十分钟到数小时；正确做法是等待后重跑，而不是 `--force-refresh` 硬刷。
+
+---
+
 ## 待建条目（尚未编号，记录线索）
 
 - **多文件夹共用 modId 无自动检测**：`Horde`（2 夹）、`NAT Effect 11`（3 夹）、`Somewhere in Between`（3 夹）反复出现。目前只有 `LOCAL_MULTI_VERSION_IDENTITY` 在特定路径上拦截，没有全局体检。
