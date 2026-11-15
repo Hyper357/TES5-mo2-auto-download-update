@@ -262,8 +262,18 @@ async function run() {
     console.log(`\n🔎 AUDIT 完成。自动项=${downloadRows.length}，人工复核=${centerSummary.items || 0}。`);
     console.log(`只读 HTML: ${files.reviewCenterHtml}\n可操作模式: npm run review -- --run "${runDir}"`);
     if (coverageDegraded) {
-      console.error('\n❌ AUDIT 结果不可信：组件发现阶段浏览器不可用，覆盖率没有真正检查。');
-      console.error('   上面的自动项 / 人工复核数字都不代表真实结论。先修好浏览器再重跑。');
+      // Three different root causes share this channel; name the right one so the
+      // operator does not chase a browser that is perfectly healthy.
+      if (coverage.kind === 'API_RATE_LIMITED') {
+        console.error(`\n❌ AUDIT 结果不可信：Nexus API 限流，${coverage.affected}/${planRows.length} 行（mod）没有被分析。`);
+        console.error('   上面的自动项 / 人工复核数字都只代表被分析过的那部分；等限流窗口过去后重跑。');
+      } else if (coverage.kind === 'PAGE_SCRAPE_FAILED') {
+        console.error(`\n❌ AUDIT 结果不可信：组件发现阶段有 ${coverage.affected} 个页面抓取失败，覆盖率没有真正检查。`);
+        console.error('   上面的自动项 / 人工复核数字都不代表真实结论。先修好浏览器再重跑。');
+      } else {
+        console.error('\n❌ AUDIT 结果不可信：组件发现阶段浏览器不可用，覆盖率没有真正检查。');
+        console.error('   上面的自动项 / 人工复核数字都不代表真实结论。先修好浏览器再重跑。');
+      }
       process.exitCode = 3;
     }
     return;
@@ -325,7 +335,9 @@ async function run() {
   console.log(`🎛️ 人工复核项目=${centerSummary.items || 0} | ${files.reviewCenterHtml}`);
   maybeOpenReview();
   if (coverageDegraded) {
-    console.error('❌ 组件发现阶段浏览器不可用：本轮覆盖率未被真正检查，自动项可能被错误地全部 HOLD。');
+    console.error(coverage.kind === 'API_RATE_LIMITED'
+      ? `❌ Nexus API 限流：${coverage.affected}/${planRows.length} 行未被分析，本轮清单不可信。`
+      : '❌ 组件发现阶段浏览器不可用：本轮覆盖率未被真正检查，自动项可能被错误地全部 HOLD。');
     process.exitCode = 3;
   }
   if (failed > 0 || !execRun.ok) {
