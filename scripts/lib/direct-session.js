@@ -106,8 +106,34 @@ async function readSignedNxm(page) {
   });
 }
 
+// Nexus replaced the old "Mod manager download / Slow download" controls with a
+// header pair "Download: [Vortex] [Manual]" (rolled out 2026-11-17). Vortex is the
+// NXM/mod-manager path; Manual opens the slow-download page. Keep the historical
+// labels too so legacy pages/cached markup still work. Exported so the ranking is
+// unit-testable without a browser.
+const DOWNLOAD_CONTROL_PATTERNS = [
+  /^download:?\s*vortex$/i,
+  /^vortex$/i,
+  /^download:?\s*manual$/i,
+  /^mod manager download$/i,
+  /^slow download$/i,
+  /download with.*manager/i,
+  /^manual$/i,
+  /slow download/i,
+  /mod manager/i,
+];
+
+function matchDownloadControlLabel(text) {
+  const t = String(text || '').replace(/\s+/g, ' ').trim();
+  for (let i = 0; i < DOWNLOAD_CONTROL_PATTERNS.length; i++) {
+    if (DOWNLOAD_CONTROL_PATTERNS[i].test(t)) return i;
+  }
+  return -1;
+}
+
 async function clickDownloadControl(page) {
-  return page.evaluate(() => {
+  const patternSources = DOWNLOAD_CONTROL_PATTERNS.map((re) => re.source);
+  return page.evaluate((sources) => {
     const candidates = [];
     const visit = (node, depth) => {
       if (!node || depth > 16) return;
@@ -121,13 +147,7 @@ async function clickDownloadControl(page) {
       }
     };
     visit(document, 0);
-    const ranked = [
-      /^slow download$/i,
-      /^mod manager download$/i,
-      /download with.*manager/i,
-      /slow download/i,
-      /mod manager/i,
-    ];
+    const ranked = sources.map((s) => new RegExp(s, 'i'));
     for (const re of ranked) {
       const hit = candidates.find(x => re.test(x.text));
       if (hit) {
@@ -136,7 +156,7 @@ async function clickDownloadControl(page) {
       }
     }
     return '';
-  });
+  }, patternSources);
 }
 
 // A Nexus mod page is a client-side app: it renders its file table, then may
@@ -395,6 +415,8 @@ module.exports = {
   withTargetLock,
   extractSignedNxmFast,
   isNavigationError,
+  DOWNLOAD_CONTROL_PATTERNS,
+  matchDownloadControlLabel,
   normalizePageCount,
   createDirectSession,
   closeDirectSession,

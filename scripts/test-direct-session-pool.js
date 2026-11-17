@@ -2,7 +2,7 @@
 'use strict';
 
 const assert = require('assert');
-const { normalizePageCount, withTargetLock, isNavigationError } = require('./lib/direct-session');
+const { normalizePageCount, withTargetLock, isNavigationError, matchDownloadControlLabel } = require('./lib/direct-session');
 
 assert.strictEqual(normalizePageCount(0), 1);
 assert.strictEqual(normalizePageCount(2), 2);
@@ -21,6 +21,19 @@ assert.strictEqual(normalizePageCount(99), 3);
   assert.strictEqual(isNavigationError(new Error('NXM_DOWNLOAD_CONTROL_MISSING: no Slow download')), false);
   assert.strictEqual(isNavigationError(new Error('DIRECT_TARGET_ARCHIVED: 1:2')), false);
   assert.strictEqual(isNavigationError(null), false);
+}
+
+// ISS-014: Nexus replaced "Mod manager download / Slow download" with a header
+// pair "Download: [Vortex] [Manual]" (2026-11-17). Both the new and the legacy
+// labels must be recognised, and unrelated text must not match.
+{
+  assert.ok(matchDownloadControlLabel('Vortex') >= 0, 'new Vortex button must be recognised');
+  assert.ok(matchDownloadControlLabel('Download: Vortex') >= 0, 'labelled group must match');
+  assert.ok(matchDownloadControlLabel('Manual') >= 0, 'Manual fallback must be recognised');
+  assert.ok(matchDownloadControlLabel('Mod manager download') >= 0, 'legacy label must still match');
+  assert.ok(matchDownloadControlLabel('Slow download') >= 0, 'legacy slow-download must still match');
+  assert.strictEqual(matchDownloadControlLabel('Vortex League'), -1, 'anchored: unrelated buttons must not match');
+  assert.strictEqual(matchDownloadControlLabel(''), -1);
 }
 
 (async () => {
