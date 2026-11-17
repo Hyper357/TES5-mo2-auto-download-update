@@ -27,9 +27,12 @@ function classifyApiError(status, body) {
 function createFilesClient({
   cacheDir,
   forceRefresh = false,
-  ttlMs = 6 * 3600 * 1000,
+  ttlMs = 12 * 3600 * 1000,
   unavailableTtlMs = 24 * 3600 * 1000,
-  maxSockets = 8,
+  maxSockets = 4,
+  minRequestIntervalMs = 80,
+  retries = 1,
+  retryDelayMs = 700,
   timeoutMs = 15000,
   userAgent = 'TES5-mo2-auto-download-update/3.8',
   game = 'skyrimspecialedition',
@@ -37,6 +40,20 @@ function createFilesClient({
   if (!cacheDir) throw new Error('createFilesClient requires cacheDir');
   fs.mkdirSync(cacheDir, { recursive: true });
   const agent = new https.Agent({ keepAlive: true, maxSockets });
+
+  // ISS-013: a full refresh of ~2050 mods at 20 sockets is a burst big enough
+  // to trip Cloudflare's edge rate limit (1015) even with API quota to spare, so
+  // every request is spaced by at least minRequestIntervalMs. Throughput becomes
+  // ~12 req/s (~3 min for the whole library) instead of a 1-2 minute spike.
+  let nextSlot = 0;
+  async function pace() {
+    const interval = Math.max(0, Number(minRequestIntervalMs) || 0);
+    if (!interval) return;
+    const now = Date.now();
+    const at = Math.max(now, nextSlot);
+    nextSlot = at + interval;
+    if (at > now) await new Promise((r) => setTimeout(r, at - now));
+  }
 
   function unavailableMarker(modId) {
     return path.join(cacheDir, `${modId}.unavailable.json`);
@@ -77,25 +94,7 @@ function createFilesClient({
     } catch { return null; }
   }
 
-  function getFiles(modId, apiKey) {
-    const hit = cached(modId);
-    if (hit) return Promise.resolve(hit);
-    const knownUnavailable = cachedUnavailable(modId);
-    if (knownUnavailable) return Promise.reject(knownUnavailable);
-    const key = String(apiKey || '').trim();
-    if (!key) return Promise.reject(new Error('缺少 Nexus API key'));
-    const cacheFile = path.join(cacheDir, `${modId}.json`);
-
-    // A rate-limited (429) or server-erroring API must not erase a row that we
-    // already hold data for: serve the stale cache with a `__stale` flag so the
-    // audit stays usable (and still says the data is old) instead of turning
-    // hundreds of rows into HOLD_API_ERROR (ISS-012).
-    const retryable = (code) => code === 'API_RATE_LIMITED' || /^API_HTTP_5/.test(code || '');
-    const fallback = () => {
-      const stale = staleCached(modId);
-      return stale || null;
-    };
-
+  function requestOnce(modId, key, cacheFile) {
     return new Promise((resolve, reject) => {
       const req = https.get({
         hostname: 'api.nexusmods.com',
@@ -126,8 +125,7 @@ function createFilesClient({
                 }), 'utf8');
               } catch { /* cache write is best-effort */ }
             }
-            const stale = retryable(code) ? fallback() : null;
-            return stale ? resolve(stale) : reject(err);
+            return reject(err);
           }
           try {
             const parsed = JSON.parse(body);
@@ -137,16 +135,45 @@ function createFilesClient({
           } catch (err) { reject(err); }
         });
       });
-      const onSoftFailure = (err) => {
-        const stale = fallback();
-        if (stale) resolve(stale); else reject(err);
-      };
-      req.on('error', onSoftFailure);
+      req.on('error', reject);
       req.on('timeout', () => req.destroy(new Error('TIMEOUT')));
     });
   }
 
-  return { getFiles };
+  async function getFiles(modId, apiKey) {
+    const hit = cached(modId);
+    if (hit) return hit;
+    const knownUnavailable = cachedUnavailable(modId);
+    if (knownUnavailable) throw knownUnavailable;
+    const key = String(apiKey || '').trim();
+    if (!key) throw new Error('缺少 Nexus API key');
+    const cacheFile = path.join(cacheDir, `${modId}.json`);
+    const retryable = (code) => code === 'API_RATE_LIMITED' || /^API_HTTP_5/.test(code || '');
+    const fallback = () => staleCached(modId);
+
+    let lastErr = null;
+    for (let attempt = 0; attempt <= Math.max(0, Number(retries) || 0); attempt++) {
+      if (attempt > 0) await new Promise((r) => setTimeout(r, retryDelayMs * attempt));
+      await pace();
+      try {
+        return await requestOnce(modId, key, cacheFile);
+      } catch (err) {
+        lastErr = err;
+        if (!retryable(err.code)) break;
+      }
+    }
+    // ISS-012: a rate-limited / server-erroring API must not erase a row we
+    // already hold data for — serve the stale cache with a `__stale` flag.
+    const stale = retryable(lastErr && lastErr.code) ? fallback() : null;
+    if (stale) return stale;
+    throw lastErr;
+  }
+
+  return {
+    getFiles,
+    isFresh: (modId) => Boolean(cached(modId)),
+    getStale: (modId) => staleCached(modId),
+  };
 }
 
 module.exports = { readApiKey, createFilesClient, classifyApiError };

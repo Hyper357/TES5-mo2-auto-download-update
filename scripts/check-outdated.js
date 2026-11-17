@@ -25,10 +25,16 @@ const outFile = argValue(process.argv, '--out', null);
 const reportFile = argValue(process.argv, '--report', null);
 const environmentOut = argValue(process.argv, '--environment-out', reportFile ? path.join(path.dirname(reportFile), 'mo2-environment.json') : '');
 const policyFile = defaultPolicyFile(rootDir);
+// ISS-013: pacing instead of a burst. 4 sockets + >=80ms between request starts
+// keeps a full-library refresh well under Cloudflare's edge limit (the hourly
+// API quota itself is 2000 and the library is ~2050, so bursts always tripped it).
+const refreshBudget = Number(argValue(process.argv, '--refresh-budget', '800')) || 800;
 const api = createFilesClient({
   cacheDir: path.join(__dirname, '.api_cache'),
   forceRefresh,
-  maxSockets: 20,
+  maxSockets: 4,
+  minRequestIntervalMs: 80,
+  retries: 1,
 });
 
 function resolveInstalledFile(files, row) {
@@ -244,7 +250,27 @@ async function main() {
   let apiFail = 0;
   let apiUnavailable = 0;
   let apiStale = 0;
-  const CONCURRENCY = 8;
+  let apiBudgetDeferred = 0;
+  let refreshUsed = 0;
+  const CONCURRENCY = 4;
+
+  // ISS-013: hard cap on how many stale entries this run refreshes. The rest are
+  // served from the stale cache, so one run never fires ~2000 requests into the
+  // hourly budget. The next run continues with the next slice.
+  async function loadFilesForRow(r) {
+    const fresh = api.isFresh(r.modId);
+    if (fresh) return api.getFiles(r.modId, apiKey);
+    if (refreshUsed >= refreshBudget) {
+      const stale = api.getStale(r.modId);
+      if (stale) return stale;
+      apiBudgetDeferred++;
+      const e = new Error('REFRESH_BUDGET_EXHAUSTED');
+      e.code = 'API_BUDGET_DEFERRED';
+      throw e;
+    }
+    refreshUsed++;
+    return api.getFiles(r.modId, apiKey);
+  }
 
   async function worker() {
     while (cursor < rows.length) {
@@ -252,7 +278,7 @@ async function main() {
       const r = rows[i];
       if (i > 0 && i % 250 === 0) console.error(`progress ${i}/${rows.length}`);
       try {
-        const data = await api.getFiles(r.modId, apiKey);
+        const data = await loadFilesForRow(r);
         // ISS-012: a 429/5xx falls back to the stale cache. Keep the analysis
         // usable but carry the staleness so the report can say so.
         if (data && data.__stale) { r.staleApi = true; apiStale++; }
@@ -459,8 +485,11 @@ async function main() {
         // transient API fault. Counting it as apiFail made ~700 mods look like a
         // throttled scan and (since ISS-010) marked every audit untrustworthy.
         const unavailable = err && err.code === 'API_MOD_UNAVAILABLE';
-        const reason = unavailable ? 'API_MOD_UNAVAILABLE' : 'API_ERROR';
-        if (unavailable) apiUnavailable++; else apiFail++;
+        const deferred = err && err.code === 'API_BUDGET_DEFERRED';
+        const reason = unavailable ? 'API_MOD_UNAVAILABLE' : (deferred ? 'API_BUDGET_DEFERRED' : 'API_ERROR');
+        if (unavailable) apiUnavailable++;
+        else if (deferred) apiFail++; // not served at all: a real coverage gap
+        else apiFail++;
         results.push({
           ...r,
           action: 'HOLD_API_ERROR',
@@ -479,7 +508,7 @@ async function main() {
   const counts = {};
   for (const r of results) counts[r.action] = (counts[r.action] || 0) + 1;
   const updateCounts = eligibilityCounts(results);
-  console.error(`done rows=${rows.length} apiFail=${apiFail} apiUnavailable=${apiUnavailable} apiStale=${apiStale} updates=${JSON.stringify(updateCounts)} ${Object.entries(counts).map(([k, v]) => `${k}=${v}`).join(' ')}`);
+  console.error(`done rows=${rows.length} apiFail=${apiFail} apiUnavailable=${apiUnavailable} apiStale=${apiStale} refreshUsed=${refreshUsed}/${refreshBudget} budgetDeferred=${apiBudgetDeferred} updates=${JSON.stringify(updateCounts)} ${Object.entries(counts).map(([k, v]) => `${k}=${v}`).join(' ')}`);
 
   if (outFile) {
     const lines = results.map(o => [
@@ -513,6 +542,9 @@ async function main() {
     apiFail,
     apiUnavailable,
     apiStale,
+    refreshBudget,
+    refreshUsed,
+    apiBudgetDeferred,
     counts,
     items: results,
   };

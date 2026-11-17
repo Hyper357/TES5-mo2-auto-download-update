@@ -113,16 +113,22 @@ async function run() {
   // Counted here so the verdict below can be marked untrustworthy (ISS-010).
   const planDoc = loadJson(files.plan, { rows: [] });
   const planRows = Array.isArray(planDoc.rows) ? planDoc.rows : (Array.isArray(planDoc.items) ? planDoc.items : []);
-  const apiErrors = planRows.filter((r) => String((r.updateEligibility || {}).reason || '') === 'API_ERROR').length;
+  const apiErrors = planRows.filter((r) => {
+    const reason = String((r.updateEligibility || {}).reason || '');
+    return reason === 'API_ERROR' || reason === 'API_BUDGET_DEFERRED';
+  }).length;
   if (apiErrors) console.error(`  ⚠️ Nexus API 返回错误的行: ${apiErrors}/${planRows.length}`);
   // 403 "Mod not available" is permanent (hidden/adult/blocked), not throttling:
   // it must not mark the whole verdict untrustworthy, but it is worth stating.
   const apiUnavailable = planRows.filter((r) => String((r.updateEligibility || {}).reason || '') === 'API_MOD_UNAVAILABLE').length;
   if (apiUnavailable) console.error(`  ℹ️ Nexus API 不可用的 mod（403 Mod not available）: ${apiUnavailable}/${planRows.length}`);
-  // Rows served from an expired cache because the API answered 429/5xx. The
-  // analysis is still usable, but the data is old and the report must say so.
+  // Rows served from an expired cache because the API answered 429/5xx or the
+  // per-run refresh budget ran out. The analysis is still usable, but the data
+  // is old and the report must say so (ISS-012 / ISS-013).
   const apiStaleRows = planRows.filter((r) => r.staleApi).length;
-  if (apiStaleRows) console.error(`  ℹ️ 因 API 限流回退到过期缓存的行: ${apiStaleRows}/${planRows.length}（结论可用，但数据较旧）`);
+  if (apiStaleRows || planDoc.refreshBudget) {
+    console.error(`  ℹ️ 本轮刷新 ${planDoc.refreshUsed || 0}/${planDoc.refreshBudget || 0} 个 mod（分片限流）；${apiStaleRows} 行使用过期缓存，结论可用但数据较旧`);
+  }
 
   console.log('\n[Step 2/9] Patch Discovery Graph：自动项 + 延期人工项全部扫描...');
   // The browser is started by run-workflow before the long planning scan, but it
