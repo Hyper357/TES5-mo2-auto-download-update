@@ -525,6 +525,65 @@ coverageDegraded: false        ← 看起来是一次正常审计
 
 ---
 
+## ISS-011 — 403 "Mod not available" 被当成 API 故障，冲垮整轮审计
+
+- **状态**：**FIXED（2026-11-17）**
+- **发现**：2026-11-17，audit 连续两轮报 714 行 `API_ERROR`，但直连 API 对 `mods/{id}.json` 全返回 200
+- **影响面**：约 700 个"API 不可见"的 mod（隐藏/成人/被作者撤下）。它们的 `/mods/{id}/files.json` 返回 `403 {"message":"Mod not available: N"}`
+- **回归测试**：`scripts/test-nexus-api.js`（分类 + 负缓存短路）
+
+### 症状
+
+```
+HOLD_API_ERROR: 714 / 2056
+直连 /mods/19.json      -> 200
+直连 /mods/19/files.json -> 403 {"code":403,"message":"Mod not available: 19"}
+```
+
+缓存新鲜时这些 mod 直接从缓存出结果，所以问题被掩盖；缓存一旦过期（>6h），714 行同时变成 `API_ERROR`，ISS-010 于是把整轮判成限流不可信。
+
+### 根因
+
+`nexus-api.js` 把所有非 2xx 一律 reject 成 `HTTP <code>`，`check-outdated.js` 一律记 `API_ERROR`，无法区分"这 mod 永远查不到"与"服务器临时拒绝"。
+
+### 修复
+
+- `classifyApiError(status, body)`：403 且 body 含 `Mod not available` → `API_MOD_UNAVAILABLE`；429 → `API_RATE_LIMITED`；其它 403/404/5xx 各自归类。
+- 403-unavailable 写**负缓存** `<modId>.unavailable.json`（默认 24h）：后续运行直接短路返回，不再浪费请求。
+- `check-outdated.js`：不可用行记 `API_MOD_UNAVAILABLE`（不再是 `API_ERROR`），单独计数 `apiUnavailable`；只有真正失败（限流/超时/5xx）才算 `apiFail`。
+- `audit-problems.js`：新原因归入 `API_BLIND`。
+
+### 遗留 / 未做
+
+- 负缓存 24h 后会自动重试一次；如果作者恢复可见，下一轮就会重新纳入。
+
+---
+
+## ISS-012 — API 限流时整轮报废；改为回退过期缓存
+
+- **状态**：**FIXED（2026-11-17）**
+- **发现**：同日，第三次 audit 又报 `HTTP 429` 680 行（一小时内连续全量刷新把小时配额打满）
+- **影响面**：任何缓存过期后的一次全量扫描；每日晨间 audit 几乎必中
+- **回归测试**：`scripts/test-nexus-api.js`（429 时的 stale 回退路径；无缓存仍 reject）
+
+### 症状
+
+一小时内的第一次全量刷新大约需要 2050 次 API 调用，而 Nexus 的额度是 **2000/hour**；超出的尾部变成 429。之前的实现把 429 直接记成 `API_ERROR`，ISS-010 于是判整轮"不可信"，一小时后重跑又因为配额未重置而继续 429 —— 死循环。
+
+### 修复
+
+- `nexus-api.js`：**429 / 5xx / 网络错误时回退到过期缓存**，返回数据带不可枚举的 `__stale = true`；只有连缓存都没有才 reject。403/404 不回退（那是永久结果）。
+- `check-outdated.js`：行上记 `staleApi`，汇总打印 `apiStale`。
+- `index.js`：打印"因 API 限流回退到过期缓存的行数"，并**不**因此判整轮不可信（结论可用，只是数据较旧）。
+- 实测：同一天第三次跑 audit，657 行走 stale 回退、仅 22 行 `API_ERROR`，`coverageDegraded=false`，自动项 17 / 复核 235 正常产出。
+
+### 遗留 / 未做
+
+- 没有做"配额预算"（先读 `x-rl-hourly-remaining` 再决定刷新多少行）。当前策略仍会先用请求去撞 429 再回退，浪费一些配额；真正的按预算分片刷新留作后续条目。
+- stale 回退意味着部分 mod 的判断基于最多数小时前的 Nexus 数据；报告里会注明行数，但不会逐行标注（`plan.json` 里有 `staleApi` 字段可查）。
+
+---
+
 ## 待建条目（尚未编号，记录线索）
 
 - **多文件夹共用 modId 无自动检测**：`Horde`（2 夹）、`NAT Effect 11`（3 夹）、`Somewhere in Between`（3 夹）反复出现。目前只有 `LOCAL_MULTI_VERSION_IDENTITY` 在特定路径上拦截，没有全局体检。

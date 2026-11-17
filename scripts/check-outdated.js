@@ -242,6 +242,8 @@ async function main() {
   const results = [];
   let cursor = 0;
   let apiFail = 0;
+  let apiUnavailable = 0;
+  let apiStale = 0;
   const CONCURRENCY = 8;
 
   async function worker() {
@@ -251,6 +253,9 @@ async function main() {
       if (i > 0 && i % 250 === 0) console.error(`progress ${i}/${rows.length}`);
       try {
         const data = await api.getFiles(r.modId, apiKey);
+        // ISS-012: a 429/5xx falls back to the stale cache. Keep the analysis
+        // usable but carry the staleness so the report can say so.
+        if (data && data.__stale) { r.staleApi = true; apiStale++; }
         const files = Array.isArray(data.files) ? data.files : [];
         const fileUpdates = Array.isArray(data.file_updates) ? data.file_updates : (Array.isArray(data.fileUpdates) ? data.fileUpdates : []);
         if (!files.length) {
@@ -450,8 +455,20 @@ async function main() {
           candidates: topCandidates,
         });
       } catch (err) {
-        apiFail++;
-        results.push({ ...r, action: 'HOLD_API_ERROR', reason: 'API_ERROR', confidence: 'low', error: err.message, updateEligibility: { status: 'HOLD_UPDATE_ELIGIBILITY', reason: 'API_ERROR', priority: 50 } });
+        // 403 "Mod not available" is permanent (hidden/adult/blocked mod), not a
+        // transient API fault. Counting it as apiFail made ~700 mods look like a
+        // throttled scan and (since ISS-010) marked every audit untrustworthy.
+        const unavailable = err && err.code === 'API_MOD_UNAVAILABLE';
+        const reason = unavailable ? 'API_MOD_UNAVAILABLE' : 'API_ERROR';
+        if (unavailable) apiUnavailable++; else apiFail++;
+        results.push({
+          ...r,
+          action: 'HOLD_API_ERROR',
+          reason,
+          confidence: 'low',
+          error: err.message,
+          updateEligibility: { status: 'HOLD_UPDATE_ELIGIBILITY', reason, priority: 50 },
+        });
       }
     }
   }
@@ -462,7 +479,7 @@ async function main() {
   const counts = {};
   for (const r of results) counts[r.action] = (counts[r.action] || 0) + 1;
   const updateCounts = eligibilityCounts(results);
-  console.error(`done rows=${rows.length} apiFail=${apiFail} updates=${JSON.stringify(updateCounts)} ${Object.entries(counts).map(([k, v]) => `${k}=${v}`).join(' ')}`);
+  console.error(`done rows=${rows.length} apiFail=${apiFail} apiUnavailable=${apiUnavailable} apiStale=${apiStale} updates=${JSON.stringify(updateCounts)} ${Object.entries(counts).map(([k, v]) => `${k}=${v}`).join(' ')}`);
 
   if (outFile) {
     const lines = results.map(o => [
@@ -494,6 +511,8 @@ async function main() {
     },
     total: rows.length,
     apiFail,
+    apiUnavailable,
+    apiStale,
     counts,
     items: results,
   };

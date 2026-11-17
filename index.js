@@ -115,6 +115,14 @@ async function run() {
   const planRows = Array.isArray(planDoc.rows) ? planDoc.rows : (Array.isArray(planDoc.items) ? planDoc.items : []);
   const apiErrors = planRows.filter((r) => String((r.updateEligibility || {}).reason || '') === 'API_ERROR').length;
   if (apiErrors) console.error(`  ⚠️ Nexus API 返回错误的行: ${apiErrors}/${planRows.length}`);
+  // 403 "Mod not available" is permanent (hidden/adult/blocked), not throttling:
+  // it must not mark the whole verdict untrustworthy, but it is worth stating.
+  const apiUnavailable = planRows.filter((r) => String((r.updateEligibility || {}).reason || '') === 'API_MOD_UNAVAILABLE').length;
+  if (apiUnavailable) console.error(`  ℹ️ Nexus API 不可用的 mod（403 Mod not available）: ${apiUnavailable}/${planRows.length}`);
+  // Rows served from an expired cache because the API answered 429/5xx. The
+  // analysis is still usable, but the data is old and the report must say so.
+  const apiStaleRows = planRows.filter((r) => r.staleApi).length;
+  if (apiStaleRows) console.error(`  ℹ️ 因 API 限流回退到过期缓存的行: ${apiStaleRows}/${planRows.length}（结论可用，但数据较旧）`);
 
   console.log('\n[Step 2/9] Patch Discovery Graph：自动项 + 延期人工项全部扫描...');
   // The browser is started by run-workflow before the long planning scan, but it
